@@ -1,0 +1,260 @@
+import { setPriority } from 'os';
+try { setPriority(-20); } catch { /* CAP_SYS_NICE 없으면 무시 */ }
+
+import express from 'express';
+import { createServer } from 'http';
+import { Server as SocketIO } from 'socket.io';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+import jackRoutes    from './routes/jack.js';
+import bridgesRoutes from './routes/bridges.js';
+import streamsRoutes from './routes/streams.js';
+
+import { startJack, waitForJack, isJackRunning, checkJackAlive, setJackReady,
+         getPorts, getConnections, connect, disconnect, stopJack } from './lib/jack.js';
+import { startBridges, stopBridges, getBridgeStatus }              from './lib/bridges.js';
+import { startRxPipeline, stopRxPipeline, isRxRunning, setRxPort, getRxPort,
+         startTxPipeline, stopTxPipeline, isTxRunning,
+         addTxTarget, removeTxTarget, getGstStatus }               from './lib/gstreamer.js';
+import { getChannels, setGain, setMute, setLabel,
+         setHpf, setEqBand, setLimiter, startMeters,
+         getInputSrcPorts, getOutputSinkPorts }                     from './lib/channels.js';
+import { startGainer, stopGainer, isGainerRunning,
+         sendGain, sendMute }                                       from './lib/gainer.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const config = JSON.parse(readFileSync(join(__dirname, './config/audio.json'), 'utf8'));
+
+const PORT            = process.env.PORT ?? 3000;
+const STATUS_INTERVAL = 2000;
+const LEVEL_INTERVAL  = 80;   // ~12 fps
+
+// ── Express ───────────────────────────────────────────
+
+const app = express();
+app.use(express.json());
+app.use((_req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (_req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+app.use('/jack',    jackRoutes);
+app.use('/bridges', bridgesRoutes);
+app.use('/streams', streamsRoutes);
+
+// ── HTTP + Socket.IO ──────────────────────────────────
+
+const httpServer = createServer(app);
+const io = new SocketIO(httpServer, {
+  cors: { origin: '*', methods: ['GET', 'POST'] }
+});
+
+// ── 상태 스냅샷 ───────────────────────────────────────
+
+// 커넥션 캐시 — snapshot()이 2초마다 갱신, 레벨 브로드캐스트가 재사용
+let cachedConnections = [];
+
+
+async function snapshot() {
+  const [ports, connections] = isJackRunning()
+    ? await Promise.all([getPorts(), getConnections()]).catch(() => [[], []])
+    : [[], []];
+
+  cachedConnections = connections;
+
+  return {
+    jack:     { running: isJackRunning(), ports, connections },
+    bridges:  getBridgeStatus(),
+    streams:  getGstStatus(),
+    channels: getChannels(connections)
+  };
+}
+
+async function broadcastStatus() {
+  if (io.engine.clientsCount === 0) return;
+  try { io.emit('status', await snapshot()); } catch { /* jack not ready */ }
+}
+
+// 레벨 미터 — 빠른 주기로 별도 emit (커넥션 캐시 재사용)
+setInterval(() => {
+  if (io.engine.clientsCount === 0) return;
+  const ch = getChannels(cachedConnections);
+  io.emit('levels', {
+    inputs:  ch.inputs.map(c  => ({ id: c.id, level: c.level  })),
+    outputs: ch.outputs.map(c => ({ id: c.id, level: c.level }))
+  });
+}, LEVEL_INTERVAL);
+
+// 전체 상태 — 느린 주기
+setInterval(broadcastStatus, STATUS_INTERVAL);
+
+// ── Socket.IO 이벤트 ──────────────────────────────────
+
+io.on('connection', async (socket) => {
+  console.log('[io] client connected:', socket.id);
+  try { socket.emit('status', await snapshot()); } catch { /* ignore */ }
+
+  socket.on('disconnect', () => console.log('[io] disconnected:', socket.id));
+
+  // ── JACK ──
+  socket.on('jack:start', async (cb) => {
+    try {
+      if (isJackRunning()) return cb?.({ ok: false, error: 'already running' });
+      startJack();
+      await waitForJack();
+      startMeters();
+      await broadcastStatus();
+      cb?.({ ok: true });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  socket.on('jack:stop', async (cb) => {
+    try {
+      stopJack();
+      await broadcastStatus();
+      cb?.({ ok: true });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  socket.on('jack:connect', async ({ src, dst } = {}, cb) => {
+    try { await connect(src, dst); await broadcastStatus(); cb?.({ ok: true }); }
+    catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  socket.on('jack:disconnect', async ({ src, dst } = {}, cb) => {
+    try { await disconnect(src, dst); await broadcastStatus(); cb?.({ ok: true }); }
+    catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  // ── Bridges ──
+  socket.on('bridges:start', async (cb) => {
+    try { startBridges(config.bridges); await broadcastStatus(); cb?.({ ok: true }); }
+    catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+  socket.on('bridges:stop', async (cb) => {
+    try { stopBridges(); await broadcastStatus(); cb?.({ ok: true }); }
+    catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  // ── Streams ──
+  socket.on('rx:start', (cb) => {
+    try {
+      if (isRxRunning()) return cb?.({ ok: false, error: 'already running' });
+      startRxPipeline(config.rtp.input); broadcastStatus(); cb?.({ ok: true });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+  socket.on('rx:stop',  (cb) => { try { stopRxPipeline();  broadcastStatus(); cb?.({ ok: true }); } catch (e) { cb?.({ ok: false, error: e.message }); } });
+  socket.on('rx:port', ({ port } = {}, cb) => {
+    try {
+      const was = isRxRunning();
+      if (was) stopRxPipeline();
+      setRxPort(port);
+      if (was) startRxPipeline({});
+      broadcastStatus();
+      cb?.({ ok: true, port: getRxPort(), restarted: was });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+  socket.on('tx:start', (cb) => {
+    try {
+      if (isTxRunning()) return cb?.({ ok: false, error: 'already running' });
+      startTxPipeline(getGstStatus().tx.targets); broadcastStatus(); cb?.({ ok: true });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+  socket.on('tx:stop',          (cb)               => { try { stopTxPipeline(); broadcastStatus(); cb?.({ ok: true }); } catch (e) { cb?.({ ok: false, error: e.message }); } });
+  socket.on('tx:target:add',    ({ host, port } = {}, cb) => { try { addTxTarget({ host, port: Number(port) }); broadcastStatus(); cb?.({ ok: true, targets: getGstStatus().tx.targets }); } catch (e) { cb?.({ ok: false, error: e.message }); } });
+  socket.on('tx:target:remove', ({ host, port } = {}, cb) => { try { removeTxTarget({ host, port: Number(port) }); broadcastStatus(); cb?.({ ok: true, targets: getGstStatus().tx.targets }); } catch (e) { cb?.({ ok: false, error: e.message }); } });
+
+  // ── Channel gain / mute / label ──
+  socket.on('ch:gain', async ({ type, id, gain } = {}, cb) => {
+    try {
+      setGain(type, id, gain);
+      if (isGainerRunning()) sendGain(type === 'input' ? 'in' : 'out', id, gain);
+      await broadcastStatus();
+      cb?.({ ok: true });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  socket.on('ch:mute', async ({ type, id, muted } = {}, cb) => {
+    try {
+      setMute(type, id, muted);
+      if (isGainerRunning()) sendMute(type === 'input' ? 'in' : 'out', id, muted);
+      await broadcastStatus();
+      cb?.({ ok: true });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+  socket.on('ch:label', ({ type, id, label } = {}, cb) => { try { setLabel(type, id, label); broadcastStatus(); cb?.({ ok: true }); } catch (e) { cb?.({ ok: false, error: e.message }); } });
+
+  // ── DSP ──
+  socket.on('dsp:hpf',     ({ id, ...params } = {}, cb)           => { try { setHpf(id, params);                broadcastStatus(); cb?.({ ok: true }); } catch (e) { cb?.({ ok: false, error: e.message }); } });
+  socket.on('dsp:eq',      ({ type, id, band, ...params } = {}, cb) => { try { setEqBand(type, id, band, params); broadcastStatus(); cb?.({ ok: true }); } catch (e) { cb?.({ ok: false, error: e.message }); } });
+  socket.on('dsp:limiter', ({ id, ...params } = {}, cb)            => { try { setLimiter(id, params);            broadcastStatus(); cb?.({ ok: true }); } catch (e) { cb?.({ ok: false, error: e.message }); } });
+});
+
+// ── Startup ───────────────────────────────────────────
+
+async function startup() {
+  // JACK: 이미 외부에서 실행 중이면 jackd 재시작 없이 그대로 사용
+  if (await checkJackAlive()) {
+    console.log('[startup] JACK already running — skipping jackd start');
+    setJackReady(true);
+  } else {
+    console.log('[startup] Starting jackd...');
+    startJack();
+    try {
+      await waitForJack();
+    } catch (e) {
+      console.warn('[startup] waitForJack failed:', e.message, '— continuing without JACK');
+    }
+  }
+
+  const srcPorts  = getInputSrcPorts();
+  const sinkPorts = getOutputSinkPorts();
+
+  console.log('[startup] Starting gainer (in=%d out=%d)...', srcPorts.length, sinkPorts.length);
+  try { startGainer(srcPorts.length, sinkPorts.length); } catch (e) { console.warn('[startup] gainer:', e.message); }
+
+  console.log('[startup] Starting ALSA bridges...');
+  try { startBridges(config.bridges); } catch (e) { console.warn('[startup] bridges:', e.message); }
+
+  // gainer + 브릿지 포트 등록 대기 후 연결 (재시도 포함)
+  await new Promise(r => setTimeout(r, 2000));
+
+  async function connectWithRetry(src, dst, retries = 5) {
+    for (let i = 0; i < retries; i++) {
+      try { await connect(src, dst); return; } catch (e) {
+        if (i < retries - 1) await new Promise(r => setTimeout(r, 1000));
+        else console.warn('[startup] connect %s→%s failed: %s', src, dst, e.message);
+      }
+    }
+  }
+
+  console.log('[startup] Connecting src → gainer inputs...');
+  for (let i = 0; i < srcPorts.length; i++)
+    await connectWithRetry(srcPorts[i], `gainer:in_${i + 1}`);
+
+  console.log('[startup] Connecting gainer outputs → sinks...');
+  for (let i = 0; i < sinkPorts.length; i++)
+    await connectWithRetry(`gainer:sout_${i + 1}`, sinkPorts[i]);
+
+  // 저장된 gain/mute 상태를 gainer에 적용
+  const { inputs, outputs } = getChannels([]);
+  for (const ch of inputs)  { sendGain('in',  ch.id, ch.gain); if (ch.muted) sendMute('in',  ch.id, true); }
+  for (const ch of outputs) { sendGain('out', ch.id, ch.gain); if (ch.muted) sendMute('out', ch.id, true); }
+
+  console.log('[startup] Starting GStreamer RTP input...');
+  try { startRxPipeline(config.rtp.input); } catch (e) { console.warn('[startup] gst rx:', e.message); }
+
+  console.log('[startup] Starting channel meters...');
+  try { startMeters(); } catch (e) { console.warn('[startup] meters:', e.message); }
+
+  httpServer.listen(PORT, () => console.log(`[server] http://localhost:${PORT}`));
+}
+
+startup().catch((err) => {
+  console.error('[startup] Fatal:', err.message);
+});

@@ -11,6 +11,7 @@ import { dirname, join } from 'path';
 import jackRoutes    from './routes/jack.js';
 import bridgesRoutes from './routes/bridges.js';
 import streamsRoutes from './routes/streams.js';
+import gainerRoutes  from './routes/gainer.js';
 
 import { startJack, waitForJack, isJackRunning, checkJackAlive, setJackReady,
          getPorts, getConnections, connect, disconnect, stopJack } from './lib/jack.js';
@@ -22,7 +23,8 @@ import { getChannels, setGain, setMute, setLabel,
          setHpf, setEqBand, setLimiter, startMeters,
          getInputSrcPorts, getOutputSinkPorts }                     from './lib/channels.js';
 import { startGainer, stopGainer, isGainerRunning,
-         sendGain, sendMute }                                       from './lib/gainer.js';
+         sendGain, sendMute, sendHpf, sendEqCoeffs, sendLimiter,
+         sendAllDsp, getLimiterMeters }                             from './lib/gainer.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const config = JSON.parse(readFileSync(join(__dirname, './config/audio.json'), 'utf8'));
@@ -46,6 +48,7 @@ app.use((_req, res, next) => {
 app.use('/jack',    jackRoutes);
 app.use('/bridges', bridgesRoutes);
 app.use('/streams', streamsRoutes);
+app.use('/gainer',  gainerRoutes);
 
 // ── HTTP + Socket.IO ──────────────────────────────────
 
@@ -80,13 +83,28 @@ async function broadcastStatus() {
   try { io.emit('status', await snapshot()); } catch { /* jack not ready */ }
 }
 
+// 리미터 미터를 구독 중인 소켓 ID → 채널 id Set
+const limiterWatchers = new Map();   // socketId → Set<chId>
+
+function watchedChannels() {
+  const ids = new Set();
+  for (const set of limiterWatchers.values()) for (const id of set) ids.add(id);
+  return ids;
+}
+
 // 레벨 미터 — 빠른 주기로 별도 emit (커넥션 캐시 재사용)
 setInterval(() => {
   if (io.engine.clientsCount === 0) return;
   const ch = getChannels(cachedConnections);
+  const limMeters = getLimiterMeters();
+  const watched   = watchedChannels();
   io.emit('levels', {
-    inputs:  ch.inputs.map(c  => ({ id: c.id, level: c.level  })),
-    outputs: ch.outputs.map(c => ({ id: c.id, level: c.level }))
+    inputs:  ch.inputs.map(c  => ({ id: c.id, level: c.level })),
+    outputs: ch.outputs.map(c => ({
+      id:      c.id,
+      level:   c.level,
+      limiter: watched.has(c.id) ? (limMeters.get(`out ${c.id}`) ?? null) : undefined
+    }))
   });
 }, LEVEL_INTERVAL);
 
@@ -99,7 +117,10 @@ io.on('connection', async (socket) => {
   console.log('[io] client connected:', socket.id);
   try { socket.emit('status', await snapshot()); } catch { /* ignore */ }
 
-  socket.on('disconnect', () => console.log('[io] disconnected:', socket.id));
+  socket.on('disconnect', () => {
+    console.log('[io] disconnected:', socket.id);
+    limiterWatchers.delete(socket.id);
+  });
 
   // ── JACK ──
   socket.on('jack:start', async (cb) => {
@@ -133,7 +154,7 @@ io.on('connection', async (socket) => {
 
   // ── Bridges ──
   socket.on('bridges:start', async (cb) => {
-    try { startBridges(config.bridges); await broadcastStatus(); cb?.({ ok: true }); }
+    try { await startBridges(config.bridges); await broadcastStatus(); cb?.({ ok: true }); }
     catch (e) { cb?.({ ok: false, error: e.message }); }
   });
   socket.on('bridges:stop', async (cb) => {
@@ -189,10 +210,112 @@ io.on('connection', async (socket) => {
   });
   socket.on('ch:label', ({ type, id, label } = {}, cb) => { try { setLabel(type, id, label); broadcastStatus(); cb?.({ ok: true }); } catch (e) { cb?.({ ok: false, error: e.message }); } });
 
+  // ── Gainer bypass (테스트용) ──
+  socket.on('gainer:bypass', async (cb) => {
+    try {
+      stopGainer();
+      await new Promise(r => setTimeout(r, 500)); // 포트 사라질 때까지 대기
+      const srcPorts  = getInputSrcPorts();
+      const sinkPorts = getOutputSinkPorts();
+      const n = Math.min(srcPorts.length, sinkPorts.length);
+      for (let i = 0; i < n; i++) {
+        try { await connect(srcPorts[i], sinkPorts[i]); } catch { /* ignore */ }
+      }
+      await broadcastStatus();
+      cb?.({ ok: true });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  socket.on('gainer:restore', async (cb) => {
+    try {
+      const srcPorts  = getInputSrcPorts();
+      const sinkPorts = getOutputSinkPorts();
+      // 바이패스 연결 해제
+      const n = Math.min(srcPorts.length, sinkPorts.length);
+      for (let i = 0; i < n; i++) {
+        try { await disconnect(srcPorts[i], sinkPorts[i]); } catch { /* ignore */ }
+      }
+      // gainer 재시작 및 연결 복원
+      startGainer(srcPorts.length, sinkPorts.length);
+      await new Promise(r => setTimeout(r, 1000));
+      for (let i = 0; i < srcPorts.length; i++)
+        try { await connect(srcPorts[i], `gainer:in_${i + 1}`); } catch { /* ignore */ }
+      for (let i = 0; i < sinkPorts.length; i++)
+        try { await connect(`gainer:sout_${i + 1}`, sinkPorts[i]); } catch { /* ignore */ }
+      // DSP 상태 복원
+      const { inputs, outputs } = getChannels([]);
+      for (const ch of inputs)  { sendGain('in',  ch.id, ch.gain); if (ch.muted) sendMute('in',  ch.id, true); }
+      for (const ch of outputs) { sendGain('out', ch.id, ch.gain); if (ch.muted) sendMute('out', ch.id, true); }
+      sendAllDsp({ inputs, outputs });
+      await broadcastStatus();
+      cb?.({ ok: true });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
   // ── DSP ──
-  socket.on('dsp:hpf',     ({ id, ...params } = {}, cb)           => { try { setHpf(id, params);                broadcastStatus(); cb?.({ ok: true }); } catch (e) { cb?.({ ok: false, error: e.message }); } });
-  socket.on('dsp:eq',      ({ type, id, band, ...params } = {}, cb) => { try { setEqBand(type, id, band, params); broadcastStatus(); cb?.({ ok: true }); } catch (e) { cb?.({ ok: false, error: e.message }); } });
-  socket.on('dsp:limiter', ({ id, ...params } = {}, cb)            => { try { setLimiter(id, params);            broadcastStatus(); cb?.({ ok: true }); } catch (e) { cb?.({ ok: false, error: e.message }); } });
+  const hpfTimers  = new Map();
+  const hpfPending = new Map();
+
+  socket.on('dsp:hpf', ({ id, ...params } = {}, cb) => {
+    try {
+      setHpf(id, params);
+      io.emit('channels', getChannels(cachedConnections));
+      cb?.({ ok: true });
+
+      if (isGainerRunning()) {
+        hpfPending.set(id, { id, params });
+        clearTimeout(hpfTimers.get(id));
+        hpfTimers.set(id, setTimeout(() => {
+          hpfTimers.delete(id);
+          const p = hpfPending.get(id);
+          hpfPending.delete(id);
+          if (p && isGainerRunning()) sendHpf(p.id, p.params);
+        }, 60));
+      }
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  /* EQ 디바운스: 슬라이더를 빠르게 움직일 때 DSP 전송은 마지막 값만 보냄 (60ms) */
+  const eqTimers  = new Map();
+  const eqPending = new Map();
+
+  socket.on('dsp:eq', ({ type, id, band, ...params } = {}, cb) => {
+    try {
+      setEqBand(type, id, band, params);   /* 상태 저장은 즉시 */
+      io.emit('channels', getChannels(cachedConnections));
+      cb?.({ ok: true });
+
+      if (isGainerRunning()) {
+        const key = `${type}:${id}:${band}`;
+        eqPending.set(key, { type, id, band, params });
+        clearTimeout(eqTimers.get(key));
+        eqTimers.set(key, setTimeout(() => {
+          eqTimers.delete(key);
+          const p = eqPending.get(key);
+          eqPending.delete(key);
+          if (p && isGainerRunning())
+            sendEqCoeffs(p.type === 'input' ? 'in' : 'out', p.id, p.band, p.params);
+        }, 60));
+      }
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  /* limiter:watch { id, watch: true|false } — 리미터 창 열림/닫힘 */
+  socket.on('limiter:watch', ({ id, watch } = {}) => {
+    const chId = Number(id);
+    if (!limiterWatchers.has(socket.id)) limiterWatchers.set(socket.id, new Set());
+    const set = limiterWatchers.get(socket.id);
+    watch ? set.add(chId) : set.delete(chId);
+  });
+
+  socket.on('dsp:limiter', ({ id, ...params } = {}, cb) => {
+    try {
+      setLimiter(id, params);
+      if (isGainerRunning()) sendLimiter(id, params);
+      io.emit('channels', getChannels(cachedConnections)); cb?.({ ok: true });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
 });
 
 // ── Startup ───────────────────────────────────────────
@@ -219,7 +342,7 @@ async function startup() {
   try { startGainer(srcPorts.length, sinkPorts.length); } catch (e) { console.warn('[startup] gainer:', e.message); }
 
   console.log('[startup] Starting ALSA bridges...');
-  try { startBridges(config.bridges); } catch (e) { console.warn('[startup] bridges:', e.message); }
+  try { await startBridges(config.bridges); } catch (e) { console.warn('[startup] bridges:', e.message); }
 
   // gainer + 브릿지 포트 등록 대기 후 연결 (재시도 포함)
   await new Promise(r => setTimeout(r, 2000));
@@ -241,10 +364,11 @@ async function startup() {
   for (let i = 0; i < sinkPorts.length; i++)
     await connectWithRetry(`gainer:sout_${i + 1}`, sinkPorts[i]);
 
-  // 저장된 gain/mute 상태를 gainer에 적용
+  // 저장된 gain/mute/DSP 상태를 dsp_engine에 복원
   const { inputs, outputs } = getChannels([]);
   for (const ch of inputs)  { sendGain('in',  ch.id, ch.gain); if (ch.muted) sendMute('in',  ch.id, true); }
   for (const ch of outputs) { sendGain('out', ch.id, ch.gain); if (ch.muted) sendMute('out', ch.id, true); }
+  sendAllDsp({ inputs, outputs });
 
   console.log('[startup] Starting GStreamer RTP input...');
   try { startRxPipeline(config.rtp.input); } catch (e) { console.warn('[startup] gst rx:', e.message); }

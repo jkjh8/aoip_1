@@ -386,6 +386,102 @@
           }
         ]
       }
+    },
+    {
+      "id": 7,
+      "label": "RTP In L",
+      "jackPort": "gainer:out_7",
+      "srcPort": "rtp_in:out_1",
+      "gain": 100,
+      "muted": false,
+      "dsp": {
+        "hpf": {
+          "enabled": false,
+          "freq": 80
+        },
+        "eq": [
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "label": "RTP In R",
+      "jackPort": "gainer:out_8",
+      "srcPort": "rtp_in:out_2",
+      "gain": 100,
+      "muted": false,
+      "dsp": {
+        "hpf": {
+          "enabled": false,
+          "freq": 80
+        },
+        "eq": [
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          }
+        ]
+      }
     }
   ],
   "outputs": [
@@ -730,6 +826,108 @@
           "makeup": 0
         }
       }
+    },
+    {
+      "id": 7,
+      "label": "RTP Out L",
+      "jackPort": "gainer:sin_7",
+      "sinkPort": "rtp_send:in_1",
+      "gain": 100,
+      "muted": false,
+      "dsp": {
+        "eq": [
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          }
+        ],
+        "limiter": {
+          "enabled": false,
+          "threshold": -6,
+          "attack": 5,
+          "release": 100,
+          "makeup": 0
+        }
+      }
+    },
+    {
+      "id": 8,
+      "label": "RTP Out R",
+      "jackPort": "gainer:sin_8",
+      "sinkPort": "rtp_send:in_2",
+      "gain": 100,
+      "muted": false,
+      "dsp": {
+        "eq": [
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          }
+        ],
+        "limiter": {
+          "enabled": false,
+          "threshold": -6,
+          "attack": 5,
+          "release": 100,
+          "makeup": 0
+        }
+      }
     }
   ],
   "routing": [
@@ -742,20 +940,28 @@
       "dst": "gainer:sin_2"
     },
     {
-      "src": "gainer:out_1",
-      "dst": "gainer:sin_3"
-    },
-    {
-      "src": "gainer:out_2",
-      "dst": "gainer:sin_4"
-    },
-    {
       "src": "gainer:out_4",
       "dst": "gainer:sin_6"
     },
     {
       "src": "gainer:out_3",
       "dst": "gainer:sin_5"
+    },
+    {
+      "src": "gainer:out_3",
+      "dst": "gainer:sin_7"
+    },
+    {
+      "src": "gainer:out_4",
+      "dst": "gainer:sin_8"
+    },
+    {
+      "src": "gainer:out_7",
+      "dst": "gainer:sin_3"
+    },
+    {
+      "src": "gainer:out_8",
+      "dst": "gainer:sin_4"
     }
   ]
 }

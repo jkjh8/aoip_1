@@ -1,7 +1,7 @@
 import { Server as SocketIO } from 'socket.io';
 import { getPorts, getConnections, isJackRunning } from '../lib/jack.js';
 import { getBridgeStatus }                          from '../lib/bridges.js';
-import { getGstStatus }                             from '../lib/gstreamer.js';
+import { getGstStatus, getRxStats }                 from '../lib/gstreamer.js';
 import { getChannels }                              from '../lib/channels.js';
 import { getLimiterMeters }                         from '../lib/gainer.js';
 
@@ -35,6 +35,7 @@ async function snapshot() {
     jack:     { running: isJackRunning(), ports, connections },
     bridges:  getBridgeStatus(),
     streams:  getGstStatus(),
+    rxStats:  getRxStats(),
     channels: getChannels(connections)
   };
 }
@@ -52,7 +53,11 @@ export function setupSocket(httpServer, config) {
 
   async function broadcastStatus() {
     if (io.engine.clientsCount === 0) return;
-    try { io.emit('status', await snapshot()); } catch { /* jack not ready */ }
+    try {
+      const s = await snapshot();
+      io.emit('status', s);
+      io.emit('rx:stats', s.rxStats);
+    } catch { /* jack not ready */ }
   }
 
   // 레벨 미터 — 빠른 주기로 별도 emit

@@ -18,7 +18,8 @@ import logger from './lib/logger.js';
 import { startJack, waitForJack, checkJackAlive, killExistingJack,
          setJackReady, connect } from './lib/jack.js';
 import { startBridges }                              from './lib/bridges.js';
-import { startRxPipeline }                           from './lib/gstreamer.js';
+import { startRxPipeline, startTxClient,
+         waitForRxReady, waitForTxReady }             from './lib/gstreamer.js';
 import { getChannels, startMeters,
          getInputSrcPorts, getOutputSinkPorts,
          getSavedRoutes }                            from './lib/channels.js';
@@ -85,8 +86,16 @@ async function startup() {
   logger.info('[startup] Starting ALSA bridges...');
   try { await startBridges(config.bridges); } catch (e) { logger.warn('[startup] bridges:', e.message); }
 
-  // gainer + 브릿지 포트 등록 대기 후 연결 (재시도 포함)
+  // rtp_recv / rtp_send 를 포트 연결 전에 먼저 기동
+  logger.info('[startup] Starting GStreamer RTP input...');
+  try { startRxPipeline(config.rtp.input); } catch (e) { logger.warn('[startup] gst rx:', e.message); }
+  logger.info('[startup] Starting rtp_send JACK client...');
+  try { startTxClient({ channels: 2 }); } catch (e) { logger.warn('[startup] rtp_send:', e.message); }
+
+  // gainer + 브릿지 + rtp 포트 등록 대기
   await new Promise(r => setTimeout(r, 2000));
+  try { await Promise.all([waitForRxReady(6000), waitForTxReady(6000)]); }
+  catch (e) { logger.warn('[startup] rtp ready timeout: %s', e.message); }
 
   async function connectWithRetry(src, dst, retries = 5) {
     for (let i = 0; i < retries; i++) {
@@ -119,9 +128,6 @@ async function startup() {
   for (const ch of inputs)  { sendGain('in',  ch.id, ch.gain); if (ch.muted) sendMute('in',  ch.id, true); }
   for (const ch of outputs) { sendGain('out', ch.id, ch.gain); if (ch.muted) sendMute('out', ch.id, true); }
   sendAllDsp({ inputs, outputs });
-
-  logger.info('[startup] Starting GStreamer RTP input...');
-  try { startRxPipeline(config.rtp.input); } catch (e) { logger.warn('[startup] gst rx:', e.message); }
 
   logger.info('[startup] Starting channel meters...');
   try { startMeters(); } catch (e) { logger.warn('[startup] meters:', e.message); }

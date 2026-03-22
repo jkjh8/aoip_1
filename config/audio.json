@@ -2,7 +2,7 @@
   "jack": {
     "device": "hw:adau1452",
     "rate": 48000,
-    "period": 256,
+    "period": 512,
     "periods": 3
   },
   "bridges": [
@@ -12,7 +12,7 @@
     { "name": "usb_out", "type": "zita-j2a", "device": "hw:UAC2Gadget","period": 2048, "rate": 48000, "periods": 4, "channels": 2, "quality": 48}
   ],
   "rtp": {
-    "input": { "port": 10001 },
+    "input": { "port": 10001, "protocol": "rtp" },
     "outputs": []
   }
 }

@@ -1,12 +1,26 @@
 CC      = gcc
-CFLAGS  = -O2 -Wall -Wextra -ffast-math -march=native
-LDFLAGS = -ljack -lm -lpthread
-TARGET  = dsp_engine
+CFLAGS  = -O2 -Wall -Wextra -ffast-math -march=native \
+          $(shell pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 gstreamer-net-1.0 gio-2.0)
+LDFLAGS = -ljack -lm -lpthread \
+          $(shell pkg-config --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-net-1.0 gio-2.0)
 
-$(TARGET): dsp_engine.c
+DSP_CFLAGS  = -O2 -Wall -Wextra -ffast-math -march=native
+DSP_LDFLAGS = -ljack -lm -lpthread
+
+TARGETS = dsp_engine rtp_recv rtp_send
+
+all: $(TARGETS)
+
+dsp_engine: dsp_engine.c
+	$(CC) $(DSP_CFLAGS) -o $@ $< $(DSP_LDFLAGS)
+
+rtp_recv: rtp_recv.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+rtp_send: rtp_send.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGETS)
 
-.PHONY: clean
+.PHONY: all clean

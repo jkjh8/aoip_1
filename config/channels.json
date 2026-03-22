@@ -393,7 +393,7 @@
             "a2": 0.9814737924440637
           },
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 629,
             "gain": -3.9,
             "q": 0.7,
@@ -406,7 +406,7 @@
             "a2": 0.8630109533984979
           },
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 2256,
             "gain": 3.3,
             "q": 0.7,
@@ -419,7 +419,7 @@
             "a2": 0.7066054430712894
           },
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 8695,
             "gain": 2.3,
             "q": 0.7,
@@ -433,7 +433,7 @@
           }
         ],
         "limiter": {
-          "enabled": true,
+          "enabled": false,
           "threshold": -27,
           "attack": 5,
           "release": 50,
@@ -455,10 +455,16 @@
             "freq": 100,
             "gain": 0,
             "q": 0.7,
-            "type": "peak"
+            "type": "peak",
+            "bandType": "peak",
+            "b0": 1,
+            "b1": -1.9813040347772235,
+            "b2": 0.9814737924440637,
+            "a1": -1.9813040347772235,
+            "a2": 0.9814737924440637
           },
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 520,
             "gain": -3.5,
             "q": 0.7,
@@ -471,7 +477,7 @@
             "a2": 0.8878142287883238
           },
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 2256,
             "gain": 1,
             "q": 0.7,
@@ -488,7 +494,13 @@
             "freq": 8000,
             "gain": 0,
             "q": 0.7,
-            "type": "peak"
+            "type": "peak",
+            "bandType": "peak",
+            "b0": 1,
+            "b1": -0.6178218468609803,
+            "b2": 0.2356436937219602,
+            "a1": -0.6178218468609803,
+            "a2": 0.2356436937219602
           }
         ],
         "limiter": {

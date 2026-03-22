@@ -1,0 +1,1 @@
+import{s as e,u as t,w as n}from"./runtime-core.esm-bundler-Db4dHV02.js";import{t as r}from"./_plugin-vue_export-helper-QKFMMAHA.js";var i={},a={class:``};function o(r,i){return n(),t(`div`,a,[...i[0]||=[e(`h1`,null,`Devices`,-1),e(`p`,null,`Manage your audio interfaces and their configurations.`,-1)]])}var s=r(i,[[`render`,o]]);export{s as default};

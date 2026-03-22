@@ -10,11 +10,12 @@
       "dsp": {
         "hpf": {
           "enabled": false,
-          "freq": 80
+          "freq": 80,
+          "slope": 12
         },
         "eq": [
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 129,
             "gain": -4.7,
             "q": 0.7,
@@ -31,21 +32,39 @@
             "freq": 500,
             "gain": 0,
             "q": 0.7,
-            "type": "peak"
+            "type": "peak",
+            "bandType": "peak",
+            "b0": 1,
+            "b1": -1.9066459797557105,
+            "b2": 0.9107370143743273,
+            "a1": -1.9066459797557105,
+            "a2": 0.9107370143743273
           },
           {
             "enabled": false,
             "freq": 2000,
             "gain": 0,
             "q": 0.7,
-            "type": "peak"
+            "type": "peak",
+            "bandType": "peak",
+            "b0": 1,
+            "b1": -1.6304323980330466,
+            "b2": 0.6879478254525045,
+            "a1": -1.6304323980330466,
+            "a2": 0.6879478254525045
           },
           {
             "enabled": false,
             "freq": 8000,
             "gain": 0,
             "q": 0.7,
-            "type": "peak"
+            "type": "peak",
+            "bandType": "peak",
+            "b0": 1,
+            "b1": -0.6178218468609803,
+            "b2": 0.2356436937219602,
+            "a1": -0.6178218468609803,
+            "a2": 0.2356436937219602
           }
         ]
       }
@@ -239,13 +258,13 @@
       "muted": false,
       "dsp": {
         "hpf": {
-          "enabled": true,
+          "enabled": false,
           "freq": 53,
           "slope": 96
         },
         "eq": [
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 310,
             "gain": 0,
             "q": 0.7,
@@ -258,7 +277,7 @@
             "bandType": "peak"
           },
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 902,
             "gain": 0,
             "q": 0.7,
@@ -284,7 +303,7 @@
             "bandType": "peak"
           },
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 5320,
             "gain": 0,
             "q": 1.5,
@@ -308,13 +327,13 @@
       "muted": false,
       "dsp": {
         "hpf": {
-          "enabled": true,
+          "enabled": false,
           "freq": 53,
           "slope": 96
         },
         "eq": [
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 310,
             "gain": 0,
             "q": 0.7,
@@ -327,7 +346,7 @@
             "a2": 0.9436780825464426
           },
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 902,
             "gain": 0,
             "q": 0.7,
@@ -353,7 +372,7 @@
             "a2": 0.6103634523626147
           },
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 5320,
             "gain": 0,
             "q": 1.5,
@@ -630,11 +649,17 @@
             "type": "peak"
           },
           {
-            "enabled": false,
-            "freq": 2000,
-            "gain": 0,
+            "enabled": true,
+            "freq": 2409,
+            "gain": -0.2,
             "q": 0.7,
-            "type": "peak"
+            "type": "peak",
+            "bandType": "peak",
+            "b0": 0.9958328688916672,
+            "b1": -1.5533015590300132,
+            "b2": 0.6380315990414286,
+            "a1": -1.5533015590300132,
+            "a2": 0.6338644679330958
           },
           {
             "enabled": false,
@@ -677,11 +702,17 @@
             "type": "peak"
           },
           {
-            "enabled": false,
-            "freq": 2000,
-            "gain": 0,
+            "enabled": true,
+            "freq": 2409,
+            "gain": -0.2,
             "q": 0.7,
-            "type": "peak"
+            "type": "peak",
+            "bandType": "peak",
+            "b0": 0.9958328688916672,
+            "b1": -1.5533015590300132,
+            "b2": 0.6380315990414286,
+            "a1": -1.5533015590300132,
+            "a2": 0.6338644679330958
           },
           {
             "enabled": false,
@@ -699,6 +730,32 @@
           "makeup": 0
         }
       }
+    }
+  ],
+  "routing": [
+    {
+      "src": "gainer:out_5",
+      "dst": "gainer:sin_1"
+    },
+    {
+      "src": "gainer:out_6",
+      "dst": "gainer:sin_2"
+    },
+    {
+      "src": "gainer:out_1",
+      "dst": "gainer:sin_3"
+    },
+    {
+      "src": "gainer:out_2",
+      "dst": "gainer:sin_4"
+    },
+    {
+      "src": "gainer:out_4",
+      "dst": "gainer:sin_6"
+    },
+    {
+      "src": "gainer:out_3",
+      "dst": "gainer:sin_5"
     }
   ]
 }

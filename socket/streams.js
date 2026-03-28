@@ -131,15 +131,16 @@ export default function register(socket, { broadcastStatus, config }) {
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 
-  /* rtp_in 설정 변경 (port, protocol, codec, bufferMs) — 재시작 */
-  socket.on('rtp:in:config', ({ client, port, protocol, codec, bufferMs } = {}, cb) => {
+  /* rtp_in 설정 변경 (port, protocol[raw|pcm], sampleRate, bufferMs) — 재시작 */
+  socket.on('rtp:in:config', ({ client, port, protocol, sampleRate, codec, bufferMs } = {}, cb) => {
     try {
       if (!client) return cb?.({ ok: false, error: 'client required' });
       const updates = {};
-      if (port      != null) updates.port      = Number(port);
-      if (protocol  != null) updates.protocol  = protocol;
-      if (codec     != null) updates.codec     = codec;
-      if (bufferMs  != null) updates.bufferMs  = Number(bufferMs);
+      if (port       != null) updates.port       = Number(port);
+      if (protocol   != null) updates.protocol   = protocol;
+      if (sampleRate != null) updates.sampleRate = Number(sampleRate);
+      if (codec      != null) updates.codec      = codec;
+      if (bufferMs   != null) updates.bufferMs   = Number(bufferMs);
       updateRtpInConfig(client, updates);
       broadcastStatus();
       cb?.({ ok: true });

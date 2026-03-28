@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon --ignore 'config/channels.json' index.js"
+    "dev": "nodemon --ignore 'config/channels.json' --ignore 'config/audio.json' index.js"
   },
   "dependencies": {
     "express": "^4.18.2",

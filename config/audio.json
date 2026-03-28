@@ -41,7 +41,8 @@
       "channels": 2,
       "protocol": "raw",
       "bufferMs": 100,
-      "enabled": true
+      "enabled": true,
+      "sampleRate": 48000
     },
     {
       "type": "rtp_out",

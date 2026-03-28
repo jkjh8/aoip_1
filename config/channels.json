@@ -134,7 +134,7 @@
     },
     {
       "id": 3,
-      "label": "USB_GADGET 1",
+      "label": "USB IN 1",
       "jackPort": "gainer:out_3",
       "srcPort": "usb_gadget:out_1",
       "gain": 100,
@@ -192,7 +192,7 @@
     },
     {
       "id": 4,
-      "label": "USB_GADGET 2",
+      "label": "USB IN 2",
       "jackPort": "gainer:out_4",
       "srcPort": "usb_gadget:out_2",
       "gain": 100,
@@ -490,7 +490,7 @@
     },
     {
       "id": 3,
-      "label": "USB_GADGET 1",
+      "label": "USB OUT 1",
       "jackPort": "gainer:sin_3",
       "sinkPort": "usb_gadget:in_1",
       "gain": 100,
@@ -542,7 +542,7 @@
     },
     {
       "id": 4,
-      "label": "USB_GADGET 2",
+      "label": "USB OUT 2",
       "jackPort": "gainer:sin_4",
       "sinkPort": "usb_gadget:in_2",
       "gain": 100,

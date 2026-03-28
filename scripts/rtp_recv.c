@@ -34,8 +34,9 @@
 #define MAX_CH       8
 #define RING_FRAMES  16384   /* must be power of 2 */
 
-typedef enum { PROTO_RAW = 0, PROTO_RTP } ProtoMode;
+typedef enum { PROTO_RAW = 0, PROTO_PCM } ProtoMode;
 static ProtoMode g_proto = PROTO_RAW;
+static int       g_sample_rate_in = 48000;  /* input sample rate (PCM mode) */
 
 /* ── ring buffer ─────────────────────────────────── */
 typedef struct {
@@ -86,6 +87,7 @@ static int             g_rate    = 48000;
 static int             g_buf_ms  = 100;   /* pre-fill target in ms */
 
 static volatile int    g_quit = 0;
+static volatile int    g_exit_code = 0;
 static GstElement     *g_pipeline;
 
 static char            g_codec[64]  = "unknown";
@@ -189,6 +191,7 @@ static gboolean bus_msg(GstBus *bus, GstMessage *msg, gpointer data)
                 err->message, dbg ? dbg : "");
         g_error_free(err);
         g_free(dbg);
+        g_exit_code = 1;
         g_quit = 1;
         break;
     }
@@ -238,9 +241,7 @@ static GstPadProbeReturn udp_probe(GstPad *pad, GstPadProbeInfo *info, gpointer 
 static void *stats_thread(void *arg)
 {
     (void)arg;
-    unsigned long prev_udp  = 0;
-    unsigned long prev_pkts = 0;
-    int           stall_cnt = 0;
+    unsigned long prev_udp = 0;
 
     while (!g_quit) {
         sleep(2);
@@ -248,21 +249,17 @@ static void *stats_thread(void *arg)
         /* bitrate from UDP-level bytes (encoded stream) */
         unsigned long cur_udp = atomic_load(&g_udp_bytes);
         int bitrate_kbps = (int)((cur_udp - prev_udp) * 8 / 2 / 1000);
+        int has_data = (cur_udp != prev_udp);
         prev_udp = cur_udp;
 
-        /* stall detection: if packets frozen after stream was active, exit for restart */
-        unsigned long cur_pkts_snap = atomic_load(&g_packets);
-        if (prev_pkts > 0 && cur_pkts_snap == prev_pkts) {
-            if (++stall_cnt >= 5) {   /* 5 × 2s = 10s */
-                fprintf(stderr, "[rtp_recv] stream stall detected — exiting for restart\n");
-                fflush(stderr);
-                g_quit = 1;
-                break;
-            }
-        } else {
-            stall_cnt = 0;
+        /* no data this interval → clear sender info */
+        if (!has_data) {
+            pthread_mutex_lock(&g_addr_mtx);
+            g_src_ip[0] = '\0';
+            g_src_port  = 0;
+            pthread_mutex_unlock(&g_addr_mtx);
+            snprintf(g_codec, sizeof(g_codec), "unknown");
         }
-        prev_pkts = cur_pkts_snap;
 
         /* sender address captured by pad probe */
         char src_ip[64];
@@ -306,7 +303,10 @@ int main(int argc, char *argv[])
 
     /* argv[3]: protocol — raw (default) | rtp */
     const char *proto_arg = argc > 3 ? argv[3] : "raw";
-    g_proto = (strcmp(proto_arg, "rtp") == 0) ? PROTO_RTP : PROTO_RAW;
+    g_proto = (strcmp(proto_arg, "pcm") == 0) ? PROTO_PCM : PROTO_RAW;
+
+    g_sample_rate_in = argc > 6 ? atoi(argv[6]) : 48000;
+    if (g_sample_rate_in <= 0) g_sample_rate_in = 48000;
 
     char client_name[64];
     snprintf(client_name, sizeof(client_name), "%s", argc > 4 ? argv[4] : "rtp_in");
@@ -347,23 +347,23 @@ int main(int argc, char *argv[])
     }
 
     /* ── GStreamer pipeline ── */
-    fprintf(stderr, "[rtp_recv] mode=%s\n", g_proto == PROTO_RTP ? "rtp" : "raw");
+    const char *mode_str = g_proto == PROTO_PCM ? "pcm" : "raw";
+    fprintf(stderr, "[rtp_recv] mode=%s\n", mode_str);
+    if (g_proto == PROTO_PCM)
+        fprintf(stderr, "[rtp_recv] input rate=%d\n", g_sample_rate_in);
 
     GstElement *src      = gst_element_factory_make("udpsrc",        "src");
     GstElement *convert  = gst_element_factory_make("audioconvert",  "convert");
     GstElement *resample = gst_element_factory_make("audioresample", "resample");
     GstElement *caps_flt = gst_element_factory_make("capsfilter",    "caps");
     GstElement *appsink  = gst_element_factory_make("appsink",       "sink");
-    GstElement *decode   = gst_element_factory_make("decodebin",     "decode");
+    GstElement *decode   = (g_proto == PROTO_RAW) ?
+                           gst_element_factory_make("decodebin", "decode") : NULL;
 
-    /* PROTO_RTP: rtpptdemux → per-payload decodebin auto-detect */
-    GstElement *jitter   = (g_proto == PROTO_RTP) ?
-                           gst_element_factory_make("rtpjitterbuffer", "jitter") : NULL;
-    GstElement *ptdemux  = (g_proto == PROTO_RTP) ?
-                           gst_element_factory_make("rtpptdemux",      "ptdemux") : NULL;
+    if (g_proto == PROTO_PCM) snprintf(g_codec, sizeof(g_codec), "pcm-s16le");
 
-    int ok = src && convert && resample && caps_flt && appsink && decode;
-    if (g_proto == PROTO_RTP) ok = ok && jitter && ptdemux;
+    int ok = src && convert && resample && caps_flt && appsink;
+    if (g_proto == PROTO_RAW) ok = ok && decode;
     if (!ok) {
         fprintf(stderr, "[rtp_recv] failed to create GStreamer elements\n");
         jack_client_close(g_jclient);
@@ -374,15 +374,7 @@ int main(int argc, char *argv[])
 
     g_object_set(src, "port", port, "retrieve-sender-address", TRUE, NULL);
 
-    if (g_proto == PROTO_RTP) {
-        /* udpsrc caps: generic RTP audio — ptdemux handles per-PT depay selection */
-        GstCaps *c = gst_caps_new_simple("application/x-rtp",
-            "media", G_TYPE_STRING, "audio", NULL);
-        g_object_set(src, "caps", c, NULL);
-        gst_caps_unref(c);
-    }
-
-    /* capsfilter: F32LE interleaved to match JACK */
+    /* capsfilter: JACK용 F32LE interleaved */
     GstCaps *caps = gst_caps_new_simple("audio/x-raw",
         "format",   G_TYPE_STRING, "F32LE",
         "rate",     G_TYPE_INT,    g_rate,
@@ -400,32 +392,40 @@ int main(int argc, char *argv[])
         "drop",         TRUE,
         NULL);
     g_signal_connect(appsink, "new-sample", G_CALLBACK(on_new_sample), NULL);
-    g_signal_connect(decode,  "pad-added",  G_CALLBACK(on_pad_added),  convert);
 
     /* pipeline assembly */
     int link_ok = 1;
-    if (g_proto == PROTO_RTP) {
+    if (g_proto == PROTO_PCM) {
         /*
-         * udpsrc → rtpjitterbuffer → rtpptdemux
-         *   rtpptdemux "new-payload-type" → per-PT pad → decodebin (auto-detect depay+decode)
+         * PROTO_PCM (raw S16LE over UDP):
+         * udpsrc caps(S16LE) → audioconvert → audioresample → capsfilter → appsink
          */
+        GstCaps *c = gst_caps_new_simple("audio/x-raw",
+            "format",   G_TYPE_STRING, "S16LE",
+            "rate",     G_TYPE_INT,    g_sample_rate_in,
+            "channels", G_TYPE_INT,    g_ch,
+            "layout",   G_TYPE_STRING, "interleaved",
+            NULL);
+        g_object_set(src, "caps", c, NULL);
+        gst_caps_unref(c);
+
         gst_bin_add_many(GST_BIN(g_pipeline),
-            src, jitter, ptdemux, decode, convert, resample, caps_flt, appsink, NULL);
-        link_ok = gst_element_link_many(src, jitter, ptdemux, NULL) &&
-                  gst_element_link_many(convert, resample, caps_flt, appsink, NULL);
-        /* ptdemux → decodebin: dynamic pad link */
-        g_signal_connect(ptdemux, "new-payload-type",
-            G_CALLBACK(on_pad_added), decode);
+            src, convert, resample, caps_flt, appsink, NULL);
+        link_ok = gst_element_link_many(
+            src, convert, resample, caps_flt, appsink, NULL);
     } else {
-        /* PROTO_RAW: udpsrc → decodebin (auto-detect everything) */
+        /*
+         * PROTO_RAW: udpsrc → decodebin (MP3/Opus/WAV 자동 감지)
+         *   → audioconvert → audioresample → capsfilter → appsink
+         */
+        g_signal_connect(decode, "pad-added", G_CALLBACK(on_pad_added), convert);
         gst_bin_add_many(GST_BIN(g_pipeline),
             src, decode, convert, resample, caps_flt, appsink, NULL);
         link_ok = gst_element_link(src, decode) &&
                   gst_element_link_many(convert, resample, caps_flt, appsink, NULL);
     }
     if (!link_ok) {
-        fprintf(stderr, "[rtp_recv] pipeline link failed (mode=%s)\n",
-                g_proto == PROTO_RTP ? "rtp" : "raw");
+        fprintf(stderr, "[rtp_recv] pipeline link failed (mode=%s)\n", mode_str);
         gst_object_unref(g_pipeline);
         jack_client_close(g_jclient);
         return 1;
@@ -477,5 +477,5 @@ int main(int argc, char *argv[])
     jack_client_close(g_jclient);
 
     fprintf(stderr, "[rtp_recv] exiting\n");
-    return 0;
+    return g_exit_code;
 }

@@ -27,9 +27,15 @@
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
+#include <fcntl.h>
+
+
 
 #define MAX_CH       8
 #define RING_FRAMES  16384   /* must be power of 2 */
+
+typedef enum { PROTO_RAW = 0, PROTO_RTP } ProtoMode;
+static ProtoMode g_proto = PROTO_RAW;
 
 /* ── ring buffer ─────────────────────────────────── */
 typedef struct {
@@ -75,8 +81,9 @@ static int ring_read(float *dst, int nframes)
 /* ── globals ─────────────────────────────────────── */
 static jack_client_t  *g_jclient;
 static jack_port_t    *jports[MAX_CH];
-static int             g_ch   = 2;
-static int             g_rate = 48000;
+static int             g_ch      = 2;
+static int             g_rate    = 48000;
+static int             g_buf_ms  = 100;   /* pre-fill target in ms */
 
 static volatile int    g_quit = 0;
 static GstElement     *g_pipeline;
@@ -94,6 +101,17 @@ static int jack_process(jack_nframes_t nframes, void *arg)
 {
     (void)arg;
     float tmp[4096 * MAX_CH];
+    /* wait until ring has at least g_buf_ms worth of frames before playing */
+    unsigned wp  = atomic_load_explicit(&ring.wp, memory_order_acquire);
+    unsigned rp  = atomic_load_explicit(&ring.rp, memory_order_relaxed);
+    int prefill  = (int)((float)g_buf_ms / 1000.0f * (float)g_rate);
+    if ((int)(wp - rp) < prefill) {
+        for (int c = 0; c < g_ch; c++) {
+            float *out = jack_port_get_buffer(jports[c], nframes);
+            memset(out, 0, nframes * sizeof(float));
+        }
+        return 0;
+    }
     if (ring_read(tmp, (int)nframes)) {
         for (int c = 0; c < g_ch; c++) {
             float *out = jack_port_get_buffer(jports[c], nframes);
@@ -260,12 +278,11 @@ static void *stats_thread(void *arg)
         unsigned long pkts  = atomic_load(&g_packets);
         unsigned long drops = atomic_load(&g_drops);
 
-        fprintf(stdout,
-            "stats codec=%s bufMs=%d packets=%lu drops=%lu"
-            " srcIp=%s srcPort=%d bitrateKbps=%d\n",
-            g_codec, buf_ms, pkts, drops,
-            src_ip[0] ? src_ip : "none", src_port, bitrate_kbps);
-        fflush(stdout);
+        /* stats → stderr (Node.js가 stderr pipe로 읽음, 파일 I/O 없음) */
+        fprintf(stderr,
+            "stats codec=%s bufMs=%d packets=%lu drops=%lu srcIp=%s srcPort=%d bitrateKbps=%d\n",
+            g_codec, buf_ms, pkts, drops, src_ip, src_port, bitrate_kbps);
+        fflush(stderr);
     }
     return NULL;
 }
@@ -284,16 +301,25 @@ int main(int argc, char *argv[])
     signal(SIGTERM, on_signal);
     signal(SIGINT,  on_signal);
 
-    int port    = argc > 1 ? atoi(argv[1]) : 10001;
-    g_ch        = argc > 2 ? atoi(argv[2]) : 2;
-    int rtp_mode = (argc > 3 && strcmp(argv[3], "rtp") == 0) ? 1 : 0;
+    int port = argc > 1 ? atoi(argv[1]) : 10001;
+    g_ch     = argc > 2 ? atoi(argv[2]) : 2;
+
+    /* argv[3]: protocol — raw (default) | rtp */
+    const char *proto_arg = argc > 3 ? argv[3] : "raw";
+    g_proto = (strcmp(proto_arg, "rtp") == 0) ? PROTO_RTP : PROTO_RAW;
+
+    char client_name[64];
+    snprintf(client_name, sizeof(client_name), "%s", argc > 4 ? argv[4] : "rtp_in");
+    g_buf_ms = argc > 5 ? atoi(argv[5]) : 100;
+    if (g_buf_ms < 10)  g_buf_ms = 10;
+    if (g_buf_ms > 500) g_buf_ms = 500;
 
     /* ring buffer init */
     memset(&ring, 0, sizeof(ring));
     ring.ch = g_ch;
 
     /* ── JACK setup ── */
-    g_jclient = jack_client_open("rtp_in", JackNoStartServer, NULL);
+    g_jclient = jack_client_open(client_name, JackNoStartServer | JackUseExactName, NULL);
     if (!g_jclient) {
         fprintf(stderr, "[rtp_recv] jack_client_open failed\n");
         return 1;
@@ -321,33 +347,39 @@ int main(int argc, char *argv[])
     }
 
     /* ── GStreamer pipeline ── */
+    fprintf(stderr, "[rtp_recv] mode=%s\n", g_proto == PROTO_RTP ? "rtp" : "raw");
+
     GstElement *src      = gst_element_factory_make("udpsrc",        "src");
-    GstElement *depay    = rtp_mode ? gst_element_factory_make("rtpmpadepay", "depay") : NULL;
-    GstElement *decode   = gst_element_factory_make("decodebin",     "decode");
     GstElement *convert  = gst_element_factory_make("audioconvert",  "convert");
     GstElement *resample = gst_element_factory_make("audioresample", "resample");
     GstElement *caps_flt = gst_element_factory_make("capsfilter",    "caps");
     GstElement *appsink  = gst_element_factory_make("appsink",       "sink");
+    GstElement *decode   = gst_element_factory_make("decodebin",     "decode");
 
-    if (!src || (rtp_mode && !depay) || !decode || !convert || !resample || !caps_flt || !appsink) {
+    /* PROTO_RTP: rtpptdemux → per-payload decodebin auto-detect */
+    GstElement *jitter   = (g_proto == PROTO_RTP) ?
+                           gst_element_factory_make("rtpjitterbuffer", "jitter") : NULL;
+    GstElement *ptdemux  = (g_proto == PROTO_RTP) ?
+                           gst_element_factory_make("rtpptdemux",      "ptdemux") : NULL;
+
+    int ok = src && convert && resample && caps_flt && appsink && decode;
+    if (g_proto == PROTO_RTP) ok = ok && jitter && ptdemux;
+    if (!ok) {
         fprintf(stderr, "[rtp_recv] failed to create GStreamer elements\n");
         jack_client_close(g_jclient);
         return 1;
     }
 
     g_pipeline = gst_pipeline_new("rtp_recv");
-    fprintf(stderr, "[rtp_recv] mode=%s\n", rtp_mode ? "rtp" : "raw");
 
-    /* udpsrc */
     g_object_set(src, "port", port, "retrieve-sender-address", TRUE, NULL);
-    if (rtp_mode) {
-        GstCaps *rtp_caps = gst_caps_new_simple("application/x-rtp",
-            "media",         G_TYPE_STRING, "audio",
-            "clock-rate",    G_TYPE_INT,    90000,
-            "encoding-name", G_TYPE_STRING, "MPA",
-            NULL);
-        g_object_set(src, "caps", rtp_caps, NULL);
-        gst_caps_unref(rtp_caps);
+
+    if (g_proto == PROTO_RTP) {
+        /* udpsrc caps: generic RTP audio — ptdemux handles per-PT depay selection */
+        GstCaps *c = gst_caps_new_simple("application/x-rtp",
+            "media", G_TYPE_STRING, "audio", NULL);
+        g_object_set(src, "caps", c, NULL);
+        gst_caps_unref(c);
     }
 
     /* capsfilter: F32LE interleaved to match JACK */
@@ -360,7 +392,7 @@ int main(int argc, char *argv[])
     g_object_set(caps_flt, "caps", caps, NULL);
     gst_caps_unref(caps);
 
-    /* appsink: pull mode, no sync */
+    /* appsink */
     g_object_set(appsink,
         "emit-signals", TRUE,
         "sync",         FALSE,
@@ -370,27 +402,33 @@ int main(int argc, char *argv[])
     g_signal_connect(appsink, "new-sample", G_CALLBACK(on_new_sample), NULL);
     g_signal_connect(decode,  "pad-added",  G_CALLBACK(on_pad_added),  convert);
 
-    if (rtp_mode) {
+    /* pipeline assembly */
+    int link_ok = 1;
+    if (g_proto == PROTO_RTP) {
+        /*
+         * udpsrc → rtpjitterbuffer → rtpptdemux
+         *   rtpptdemux "new-payload-type" → per-PT pad → decodebin (auto-detect depay+decode)
+         */
         gst_bin_add_many(GST_BIN(g_pipeline),
-            src, depay, decode, convert, resample, caps_flt, appsink, NULL);
-        if (!gst_element_link(src, depay) ||
-            !gst_element_link(depay, decode) ||
-            !gst_element_link_many(convert, resample, caps_flt, appsink, NULL)) {
-            fprintf(stderr, "[rtp_recv] pipeline link failed (rtp mode)\n");
-            gst_object_unref(g_pipeline);
-            jack_client_close(g_jclient);
-            return 1;
-        }
+            src, jitter, ptdemux, decode, convert, resample, caps_flt, appsink, NULL);
+        link_ok = gst_element_link_many(src, jitter, ptdemux, NULL) &&
+                  gst_element_link_many(convert, resample, caps_flt, appsink, NULL);
+        /* ptdemux → decodebin: dynamic pad link */
+        g_signal_connect(ptdemux, "new-payload-type",
+            G_CALLBACK(on_pad_added), decode);
     } else {
+        /* PROTO_RAW: udpsrc → decodebin (auto-detect everything) */
         gst_bin_add_many(GST_BIN(g_pipeline),
             src, decode, convert, resample, caps_flt, appsink, NULL);
-        if (!gst_element_link(src, decode) ||
-            !gst_element_link_many(convert, resample, caps_flt, appsink, NULL)) {
-            fprintf(stderr, "[rtp_recv] pipeline link failed (raw mode)\n");
-            gst_object_unref(g_pipeline);
-            jack_client_close(g_jclient);
-            return 1;
-        }
+        link_ok = gst_element_link(src, decode) &&
+                  gst_element_link_many(convert, resample, caps_flt, appsink, NULL);
+    }
+    if (!link_ok) {
+        fprintf(stderr, "[rtp_recv] pipeline link failed (mode=%s)\n",
+                g_proto == PROTO_RTP ? "rtp" : "raw");
+        gst_object_unref(g_pipeline);
+        jack_client_close(g_jclient);
+        return 1;
     }
 
     GstBus *bus = gst_element_get_bus(g_pipeline);
@@ -408,15 +446,16 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* report ready */
-    fprintf(stdout, "[rtp_recv] ready\n");
-    fprintf(stdout, "ports:");
+    /* report ports first, then ready — Node.js uses ready as the trigger */
+    /* ports/ready → stderr (JACK이 fd1을 오염시켜도 fd2는 안전) */
+    fprintf(stderr, "ports:");
     for (int c = 0; c < g_ch; c++) {
-        if (c) fprintf(stdout, ",");
-        fprintf(stdout, " rtp_in:out_%d", c + 1);
+        if (c) fprintf(stderr, ",");
+        fprintf(stderr, " %s:out_%d", client_name, c + 1);
     }
-    fprintf(stdout, "\n");
-    fflush(stdout);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "[rtp_recv] ready\n");
+    fflush(stderr);
 
     /* stats thread */
     pthread_t stats_tid;

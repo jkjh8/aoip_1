@@ -17,9 +17,11 @@ import logger from './lib/logger.js';
 
 import { startJack, waitForJack, checkJackAlive, killExistingJack,
          setJackReady, connect } from './lib/jack.js';
-import { startBridges }                              from './lib/bridges.js';
+import { startBridges, startUsbGadgetWatcher }       from './lib/bridges.js';
 import { startRxPipeline, startTxClient,
-         waitForRxReady, waitForTxReady }             from './lib/gstreamer.js';
+         waitForRxReady, waitForTxReady,
+         startRtpStreams, waitForRtpStreamsReady,
+         getRtpStreamStatus }                         from './lib/gstreamer.js';
 import { getChannels, startMeters,
          getInputSrcPorts, getOutputSinkPorts,
          getSavedRoutes }                            from './lib/channels.js';
@@ -85,15 +87,24 @@ async function startup() {
 
   logger.info('[startup] Starting ALSA bridges...');
   try { await startBridges(config.bridges); } catch (e) { logger.warn('[startup] bridges:', e.message); }
+  startUsbGadgetWatcher();
 
   // rtp_recv / rtp_send 를 포트 연결 전에 먼저 기동
-  if (config.rtp) {
+  if (config.rtp_streams?.length) {
+    logger.info('[startup] Starting RTP streams (%d)...', config.rtp_streams.length);
+    try { startRtpStreams(config.rtp_streams); } catch (e) { logger.warn('[startup] rtp_streams:', e.message); }
+
+    // 포트 등록 대기
+    await new Promise(r => setTimeout(r, 2000));
+    try { await waitForRtpStreamsReady(6000); }
+    catch (e) { logger.warn('[startup] rtp_streams ready timeout: %s', e.message); }
+  } else if (config.rtp) {
+    // 레거시 단일 rtp 설정
     logger.info('[startup] Starting GStreamer RTP input...');
     try { startRxPipeline(config.rtp.input); } catch (e) { logger.warn('[startup] gst rx:', e.message); }
     logger.info('[startup] Starting rtp_send JACK client...');
     try { startTxClient({ channels: 2 }); } catch (e) { logger.warn('[startup] rtp_send:', e.message); }
 
-    // gainer + 브릿지 + rtp 포트 등록 대기
     await new Promise(r => setTimeout(r, 2000));
     try { await Promise.all([waitForRxReady(6000), waitForTxReady(6000)]); }
     catch (e) { logger.warn('[startup] rtp ready timeout: %s', e.message); }
@@ -110,9 +121,24 @@ async function startup() {
     }
   }
 
+  // rtp_in 실제 JACK 포트명 맵 (config client명 → 실제 등록 포트 목록)
+  const rtpPortMap = new Map();
+  for (const s of getRtpStreamStatus()) {
+    if (s.type === 'rtp_in' && s.ports.length)
+      rtpPortMap.set(s.client, s.ports);
+  }
+
   logger.info('[startup] Connecting src → gainer inputs...');
-  for (let i = 0; i < srcPorts.length; i++)
-    await connectWithRetry(srcPorts[i], `gainer:in_${i + 1}`);
+  for (let i = 0; i < srcPorts.length; i++) {
+    let src = srcPorts[i];
+    // rtp_in 포트: config의 `client:out_N` 대신 실제 등록된 포트명 사용
+    const m = src.match(/^([^:]+):out_(\d+)$/);
+    if (m && rtpPortMap.has(m[1])) {
+      const actual = rtpPortMap.get(m[1])[Number(m[2]) - 1];
+      if (actual) src = actual;
+    }
+    await connectWithRetry(src, `gainer:in_${i + 1}`);
+  }
 
   logger.info('[startup] Connecting gainer outputs → sinks...');
   for (let i = 0; i < sinkPorts.length; i++)

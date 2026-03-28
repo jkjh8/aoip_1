@@ -7,10 +7,7 @@ LDFLAGS = -ljack -lm -lpthread \
 DSP_CFLAGS  = -O2 -Wall -Wextra -ffast-math -march=native
 DSP_LDFLAGS = -ljack -lm -lpthread
 
-USB_CFLAGS  = -O2 -Wall -Wextra -ffast-math -march=native
-USB_LDFLAGS = -ljack -lasound -lm -lpthread
-
-TARGETS = dsp_engine rtp_recv rtp_send usb_jack_bridge
+TARGETS = dsp_engine rtp_recv rtp_send
 
 all: $(TARGETS)
 
@@ -22,9 +19,6 @@ rtp_recv: rtp_recv.c
 
 rtp_send: rtp_send.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
-
-usb_jack_bridge: usb_jack_bridge.c
-	$(CC) $(USB_CFLAGS) -o $@ $< $(USB_LDFLAGS)
 
 clean:
 	rm -f $(TARGETS)

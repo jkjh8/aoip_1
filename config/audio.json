@@ -8,10 +8,49 @@
   },
   "bridges": [
     {
-      "type": "usb_jack_bridge",
-      "name": "usb_gadget",
+      "type": "alsa_in",
+      "name": "USB Audio IN",
       "device": "hw:UAC2Gadget",
+      "rate": 48000,
+      "period": 192,
+      "periods": 3,
       "channels": 2,
+      "quality": 4,
+      "usb_gadget": true,
+      "enabled": true
+    },
+    {
+      "type": "alsa_out",
+      "name": "USB Audio OUT",
+      "device": "hw:UAC2Gadget",
+      "rate": 48000,
+      "period": 192,
+      "periods": 3,
+      "channels": 2,
+      "quality": 4,
+      "usb_gadget": true,
+      "enabled": true
+    }
+  ],
+  "rtp_streams": [
+    {
+      "type": "rtp_in",
+      "name": "Stream IN",
+      "client": "rtp_in_1",
+      "port": 5004,
+      "channels": 2,
+      "protocol": "raw",
+      "bufferMs": 100,
+      "enabled": true
+    },
+    {
+      "type": "rtp_out",
+      "name": "Stream OUT",
+      "client": "rtp_out_1",
+      "channels": 2,
+      "protocol": "raw",
+      "codec": "mp3",
+      "targets": [],
       "enabled": true
     }
   ]

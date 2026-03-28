@@ -139,7 +139,123 @@
       "srcPort": "usb_gadget:out_1",
       "gain": 100,
       "muted": false,
-      "bypassDsp": false,
+      "bypassDsp": true,
+      "dsp": {
+        "hpf": {
+          "enabled": true,
+          "freq": 83,
+          "slope": 12
+        },
+        "eq": [
+          {
+            "enabled": false,
+            "b0": null,
+            "b1": null,
+            "b2": null,
+            "a1": null,
+            "a2": null,
+            "gain": 0,
+            "bandType": "peak"
+          },
+          {
+            "enabled": false,
+            "b0": null,
+            "b1": null,
+            "b2": null,
+            "a1": null,
+            "a2": null,
+            "gain": 0,
+            "bandType": "peak"
+          },
+          {
+            "enabled": false,
+            "b0": null,
+            "b1": null,
+            "b2": null,
+            "a1": null,
+            "a2": null,
+            "gain": 0,
+            "bandType": "peak"
+          },
+          {
+            "enabled": false,
+            "b0": null,
+            "b1": null,
+            "b2": null,
+            "a1": null,
+            "a2": null,
+            "gain": -9.5,
+            "bandType": "peak"
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "label": "USB_GADGET 2",
+      "jackPort": "gainer:out_4",
+      "srcPort": "usb_gadget:out_2",
+      "gain": 100,
+      "muted": false,
+      "bypassDsp": true,
+      "dsp": {
+        "hpf": {
+          "enabled": true,
+          "freq": 83,
+          "slope": 12
+        },
+        "eq": [
+          {
+            "enabled": false,
+            "b0": null,
+            "b1": null,
+            "b2": null,
+            "a1": null,
+            "a2": null,
+            "gain": 0,
+            "bandType": "peak"
+          },
+          {
+            "enabled": false,
+            "b0": null,
+            "b1": null,
+            "b2": null,
+            "a1": null,
+            "a2": null,
+            "gain": 0,
+            "bandType": "peak"
+          },
+          {
+            "enabled": false,
+            "b0": null,
+            "b1": null,
+            "b2": null,
+            "a1": null,
+            "a2": null,
+            "gain": 0,
+            "bandType": "peak"
+          },
+          {
+            "enabled": false,
+            "b0": null,
+            "b1": null,
+            "b2": null,
+            "a1": null,
+            "a2": null,
+            "gain": -9.5,
+            "bandType": "peak"
+          }
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "label": "Stream IN 1",
+      "jackPort": "gainer:out_5",
+      "srcPort": "rtp_in_1:out_1",
+      "gain": 100,
+      "muted": false,
+      "bypassDsp": true,
       "dsp": {
         "hpf": {
           "enabled": false,
@@ -182,13 +298,13 @@
       }
     },
     {
-      "id": 4,
-      "label": "USB_GADGET 2",
-      "jackPort": "gainer:out_4",
-      "srcPort": "usb_gadget:out_2",
+      "id": 6,
+      "label": "Stream IN 2",
+      "jackPort": "gainer:out_6",
+      "srcPort": "rtp_in_1:out_2",
       "gain": 100,
       "muted": false,
-      "bypassDsp": false,
+      "bypassDsp": true,
       "dsp": {
         "hpf": {
           "enabled": false,
@@ -365,7 +481,7 @@
         ],
         "limiter": {
           "enabled": false,
-          "threshold": -6,
+          "threshold": -29.5,
           "attack": 5,
           "release": 50,
           "makeup": 0
@@ -379,7 +495,111 @@
       "sinkPort": "usb_gadget:in_1",
       "gain": 100,
       "muted": false,
-      "bypassDsp": false,
+      "bypassDsp": true,
+      "dsp": {
+        "eq": [
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          }
+        ],
+        "limiter": {
+          "enabled": false,
+          "threshold": -27,
+          "attack": 5,
+          "release": 100,
+          "makeup": 0
+        }
+      }
+    },
+    {
+      "id": 4,
+      "label": "USB_GADGET 2",
+      "jackPort": "gainer:sin_4",
+      "sinkPort": "usb_gadget:in_2",
+      "gain": 100,
+      "muted": false,
+      "bypassDsp": true,
+      "dsp": {
+        "eq": [
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          }
+        ],
+        "limiter": {
+          "enabled": false,
+          "threshold": -27,
+          "attack": 5,
+          "release": 100,
+          "makeup": 0
+        }
+      }
+    },
+    {
+      "id": 5,
+      "label": "Stream OUT 1",
+      "jackPort": "gainer:sin_5",
+      "sinkPort": "rtp_out_1:in_1",
+      "gain": 100,
+      "muted": false,
+      "bypassDsp": true,
       "dsp": {
         "eq": [
           {
@@ -425,13 +645,13 @@
       }
     },
     {
-      "id": 4,
-      "label": "USB_GADGET 2",
-      "jackPort": "gainer:sin_4",
-      "sinkPort": "usb_gadget:in_2",
+      "id": 6,
+      "label": "Stream OUT 2",
+      "jackPort": "gainer:sin_6",
+      "sinkPort": "rtp_out_1:in_2",
       "gain": 100,
       "muted": false,
-      "bypassDsp": false,
+      "bypassDsp": true,
       "dsp": {
         "eq": [
           {
@@ -493,6 +713,22 @@
     {
       "src": "gainer:out_4",
       "dst": "gainer:sin_2"
+    },
+    {
+      "src": "gainer:out_5",
+      "dst": "gainer:sin_1"
+    },
+    {
+      "src": "gainer:out_6",
+      "dst": "gainer:sin_2"
+    },
+    {
+      "src": "gainer:out_1",
+      "dst": "gainer:sin_5"
+    },
+    {
+      "src": "gainer:out_2",
+      "dst": "gainer:sin_6"
     },
     {
       "src": "gainer:out_1",

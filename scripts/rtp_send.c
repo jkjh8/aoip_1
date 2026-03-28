@@ -31,6 +31,10 @@
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
+#include <fcntl.h>
+
+static FILE *g_out = NULL;
+static FILE *g_in  = NULL;
 
 #define MAX_CH       8
 #define MAX_TARGETS  16
@@ -92,9 +96,10 @@ static int    g_bitrate = 320;
 /* ── globals ─────────────────────────────────────── */
 static jack_client_t *jclient;
 static jack_port_t   *jports[MAX_CH];
-static int            g_ch   = 2;
-static int            g_rate = 48000;
-static volatile int   g_quit = 0;
+static int            g_ch      = 2;
+static int            g_rate    = 48000;
+static int            g_use_rtp = 0;   /* 1 = wrap with RTP payloader */
+static volatile int   g_quit    = 0;
 
 static GstElement    *g_pipeline = NULL;
 static GstElement    *g_appsrc   = NULL;
@@ -179,7 +184,7 @@ static int pipeline_build(void)
         caps_flt = gst_element_factory_make("capsfilter", "cf");
         if (!caps_flt) goto fail;
         GstCaps *raw = gst_caps_new_simple("audio/x-raw",
-            "format",   G_TYPE_STRING, "S16LE",
+            "format",   G_TYPE_STRING, g_use_rtp ? "S16BE" : "S16LE",
             "rate",     G_TYPE_INT,    g_rate,
             "channels", G_TYPE_INT,    g_ch,
             "layout",   G_TYPE_STRING, "interleaved",
@@ -192,6 +197,18 @@ static int pipeline_build(void)
 
     /* previous element (encoder or capsfilter) */
     GstElement *last_enc = enc ? enc : caps_flt;
+
+    /* RTP payloader */
+    if (g_use_rtp) {
+        GstElement *pay = NULL;
+        if      (g_codec == CODEC_MP3)  pay = gst_element_factory_make("rtpmpapay",  "pay");
+        else if (g_codec == CODEC_OPUS) pay = gst_element_factory_make("rtpopuspay", "pay");
+        else                            pay = gst_element_factory_make("rtpL16pay",  "pay");
+        if (!pay) goto fail;
+        gst_bin_add(GST_BIN(pipe), pay);
+        if (!gst_element_link(last_enc, pay)) goto fail;
+        last_enc = pay;
+    }
 
     if (n_targets == 0) {
         /* no targets: drain audio to fakesink */
@@ -291,7 +308,7 @@ static void *stdin_thread(void *arg)
 {
     (void)arg;
     char line[256];
-    while (!g_quit && fgets(line, sizeof(line), stdin)) {
+    while (!g_quit && fgets(line, sizeof(line), g_in)) {
         /* strip newline */
         size_t len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
@@ -322,8 +339,8 @@ static void *stdin_thread(void *arg)
             pthread_mutex_lock(&pipe_mutex);
             pipeline_build();
             pthread_mutex_unlock(&pipe_mutex);
-            fprintf(stdout, "ok\n");
-            fflush(stdout);
+            fprintf(g_out, "ok\n");
+            fflush(g_out);
             continue;
         }
 
@@ -339,8 +356,8 @@ static void *stdin_thread(void *arg)
             pthread_mutex_lock(&pipe_mutex);
             pipeline_build();
             pthread_mutex_unlock(&pipe_mutex);
-            fprintf(stdout, "ok\n");
-            fflush(stdout);
+            fprintf(g_out, "ok\n");
+            fflush(g_out);
             continue;
         }
 
@@ -355,8 +372,8 @@ static void *stdin_thread(void *arg)
             pthread_mutex_lock(&pipe_mutex);
             pipeline_build();
             pthread_mutex_unlock(&pipe_mutex);
-            fprintf(stdout, "ok\n");
-            fflush(stdout);
+            fprintf(g_out, "ok\n");
+            fflush(g_out);
             continue;
         }
 
@@ -371,17 +388,26 @@ static void on_signal(int sig) { (void)sig; g_quit = 1; }
 /* ── main ─────────────────────────────────────────── */
 int main(int argc, char *argv[])
 {
+    /* argv[4]: 출력 fd, argv[5]: 입력 fd (Node.js가 전달) */
+    if (argc > 4 && atoi(argv[4]) > 2) g_out = fdopen(atoi(argv[4]), "w");
+    if (!g_out) g_out = stdout;
+    if (argc > 5 && atoi(argv[5]) > 2) g_in  = fdopen(atoi(argv[5]), "r");
+    if (!g_in)  g_in  = stdin;
+
     gst_init(&argc, &argv);
     signal(SIGTERM, on_signal);
     signal(SIGINT,  on_signal);
 
     g_ch = argc > 1 ? atoi(argv[1]) : 2;
+    char client_name[64];
+    snprintf(client_name, sizeof(client_name), "%s", argc > 2 ? argv[2] : "rtp_send");
+    g_use_rtp = (argc > 3 && strcmp(argv[3], "rtp") == 0) ? 1 : 0;
 
     memset(&ring, 0, sizeof(ring));
     ring.ch = g_ch;
 
     /* ── JACK setup ── */
-    jclient = jack_client_open("rtp_send", JackNoStartServer, NULL);
+    jclient = jack_client_open(client_name, JackNoStartServer | JackUseExactName, NULL);
     if (!jclient) {
         fprintf(stderr, "[rtp_send] jack_client_open failed\n");
         return 1;
@@ -413,15 +439,15 @@ int main(int argc, char *argv[])
     pipeline_build();
     pthread_mutex_unlock(&pipe_mutex);
 
-    /* report ready */
-    fprintf(stdout, "[rtp_send] ready\n");
-    fprintf(stdout, "ports:");
+    /* ports first, then ready */
+    fprintf(g_out, "ports:");
     for (int c = 0; c < g_ch; c++) {
-        if (c) fprintf(stdout, ",");
-        fprintf(stdout, " rtp_send:in_%d", c + 1);
+        if (c) fprintf(g_out, ",");
+        fprintf(g_out, " %s:in_%d", client_name, c + 1);
     }
-    fprintf(stdout, "\n");
-    fflush(stdout);
+    fprintf(g_out, "\n");
+    fprintf(g_out, "[rtp_send] ready\n");
+    fflush(g_out);
 
     /* threads */
     pthread_t push_tid, stdin_tid;

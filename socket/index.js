@@ -1,7 +1,7 @@
 import { Server as SocketIO } from 'socket.io';
 import { getPorts, getConnections, isJackRunning } from '../lib/jack.js';
 import { getBridgeStatus, getUsbGadgetEnabled }      from '../lib/bridges.js';
-import { getGstStatus, getRxStats }                 from '../lib/gstreamer.js';
+import { getGstStatus, getRxStats, getRtpStreamStatus } from '../lib/gstreamer.js';
 import { getChannels }                              from '../lib/channels.js';
 import { getLimiterMeters }                         from '../lib/gainer.js';
 
@@ -35,7 +35,7 @@ async function snapshot() {
   return {
     jack:     { running: isJackRunning(), ports, connections },
     bridges:  getBridgeStatus(),
-    streams:  getGstStatus(),
+    streams:  { ...getGstStatus(), rtpStreams: getRtpStreamStatus() },
     rxStats:  getRxStats(),
     channels: getChannels(connections),
     usb:      { enabled: getUsbGadgetEnabled() }
@@ -78,7 +78,7 @@ export function setupSocket(httpServer, config) {
     });
   }, LEVEL_INTERVAL);
 
-  // 전체 상태 — 느린 주기
+  // 전체 상태 — 느린 주기 (rtpStreams stats 포함)
   setInterval(broadcastStatus, STATUS_INTERVAL);
 
   const ctx = {

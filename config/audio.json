@@ -1,18 +1,9 @@
 {
   "jack": {
-    "device": "hw:adau1452",
+    "device": "hw:sndrpiaoip8",
     "rate": 48000,
     "period": 512,
-    "periods": 3
-  },
-  "bridges": [
-    { "name": "i2s_in",  "type": "zita-a2j", "device": "hw:RAVENNA",   "period": 48,  "rate": 48000, "periods": 3, "channels": 2, "quality": 48},
-    { "name": "i2s_out", "type": "zita-j2a", "device": "hw:RAVENNA",   "period": 48,  "rate": 48000, "periods": 3, "channels": 2, "quality": 48},
-    { "name": "usb_in",  "type": "zita-a2j", "device": "hw:UAC2Gadget","period": 2048, "rate": 48000, "periods": 4, "channels": 2, "quality": 48},
-    { "name": "usb_out", "type": "zita-j2a", "device": "hw:UAC2Gadget","period": 2048, "rate": 48000, "periods": 4, "channels": 2, "quality": 48}
-  ],
-  "rtp": {
-    "input": { "port": 10001, "protocol": "rtp" },
-    "outputs": []
+    "periods": 3,
+    "channels": 2
   }
 }

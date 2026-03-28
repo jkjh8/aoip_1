@@ -7,7 +7,9 @@
  *   Input  channels: gainer:in_1..N  →  gainer:out_1..N   (HPF + 4-band PEQ + gain)
  *   Output channels: gainer:sin_1..M →  gainer:sout_1..M  (4-band PEQ + limiter + gain)
  *
- * Output signal chain: matrix → EQ → limiter → gain/mute → level meter (JACK port)
+ * Signal chain:
+ *   Input:  src → HPF → EQ → level meter → gain ramp → dst
+ *   Output: src → EQ  → limiter → level meter → gain ramp → dst
  *
  * Commands via stdin (all 1-based channel indices):
  *   gain     in|out  <ch>  <linear 0.0–2.0>
@@ -27,7 +29,8 @@
  *   limiter  out     <ch>  makeup    <db>
  *
  * Stdout output (for Node.js):
- *   lvl in  <ch> <db>                — input channel level (post-gain), ~8 Hz
+ *   lvl in  <ch> <db>                — input level (post-EQ, pre-gain), ~8 Hz
+ *   lvl out <ch> <db>                — output level (post-limiter, pre-gain), ~8 Hz
  *   lm  out <ch> <pre_db> <post_db>  — limiter I/O level, ~8 Hz when enabled
  */
 
@@ -189,6 +192,7 @@ static LimCoeffs calc_limiter(float threshold_db, float attack_ms,
 typedef enum {
     CMD_GAIN,
     CMD_MUTE,
+    CMD_BYPASS,
     CMD_HPF_ENABLE,
     CMD_HPF_COEFFS,
     CMD_EQ_ENABLE,
@@ -245,6 +249,9 @@ typedef struct {
     float gain_tgt, gain_cur;
     int   muted;
 
+    /* When set, skip all DSP (HPF/EQ/limiter) — level meter + gain only */
+    int bypass_dsp;
+
     /* HPF (input channels only) */
     int    hpf_enabled;
     Biquad hpf;
@@ -266,7 +273,9 @@ static float   g_sr;
 /* Limiter meter values — written by RT thread (volatile float), read by reporter thread */
 static volatile float g_lim_pre[MAX_CHANNELS];
 static volatile float g_lim_post[MAX_CHANNELS];
-/* Input channel peak levels (post-gain) for level metering */
+/* Output channel peak levels (post-limiter, pre-gain) for level metering */
+static volatile float g_out_level[MAX_CHANNELS];
+/* Input channel peak levels (post-EQ, pre-gain) for level metering */
 static volatile float g_in_level[MAX_CHANNELS];
 static volatile int   g_reporter_running;
 
@@ -283,6 +292,9 @@ static void apply_cmd(const Cmd *cmd) {
         ch->muted = cmd->flag;
         if (ch->muted) ch->gain_cur = ch->gain_tgt;
         break;
+    case CMD_BYPASS:
+        ch->bypass_dsp = cmd->flag;
+        break;
     case CMD_HPF_ENABLE:
         ch->hpf_enabled = cmd->flag;
         break;
@@ -290,7 +302,6 @@ static void apply_cmd(const Cmd *cmd) {
         Biquad *bq = &ch->hpf;
         bq->b0 = cmd->coeffs.b0; bq->b1 = cmd->coeffs.b1; bq->b2 = cmd->coeffs.b2;
         bq->a1 = cmd->coeffs.a1; bq->a2 = cmd->coeffs.a2;
-        /* Do NOT bq_reset: preserving filter state avoids click on coefficient update */
         break;
     }
     case CMD_EQ_ENABLE:
@@ -300,7 +311,6 @@ static void apply_cmd(const Cmd *cmd) {
         Biquad *bq = &ch->eq[cmd->band];
         bq->b0 = cmd->coeffs.b0; bq->b1 = cmd->coeffs.b1; bq->b2 = cmd->coeffs.b2;
         bq->a1 = cmd->coeffs.a1; bq->a2 = cmd->coeffs.a2;
-        /* Do NOT bq_reset: preserving filter state avoids click on coefficient update */
         break;
     }
     case CMD_LIMITER_ENABLE:
@@ -318,13 +328,6 @@ static void apply_cmd(const Cmd *cmd) {
 
 /* ── JACK process callback ───────────────────────────────── */
 
-/*
- * Input  chain: src → HPF → EQ → gain ramp → dst
- * Output chain: src → EQ  → limiter → gain ramp → dst
- *
- * Limiter I/O levels are tracked in meter_pre_lim / meter_post_lim
- * and reported to stdout periodically for Node.js to relay.
- */
 static void process_channel(Channel *ch, jack_nframes_t nframes, int is_input) {
     float *src = (float *)jack_port_get_buffer(ch->in_port,  nframes);
     float *dst = (float *)jack_port_get_buffer(ch->out_port, nframes);
@@ -342,24 +345,44 @@ static void process_channel(Channel *ch, jack_nframes_t nframes, int is_input) {
     for (jack_nframes_t i = 0; i < nframes; i++) {
         float s = src[i];
 
-        /* HPF (input only) */
-        if (is_input && ch->hpf_enabled)
-            s = bq_process(&ch->hpf, s);
-
-        /* Parametric EQ */
-        for (int b = 0; b < MAX_EQ_BANDS; b++)
-            if (ch->eq_enabled[b])
-                s = bq_process(&ch->eq[b], s);
-
-        /* Limiter (output only): track pre level, apply, track post level */
-        if (!is_input) {
-            int idx = (int)(ch - g_outputs);
+        if (ch->bypass_dsp) {
+            /* Bypass: level meter only, no DSP */
             float peak = fabsf(s);
-            if (peak > g_lim_pre[idx]) g_lim_pre[idx] = peak;
-            if (ch->lim.enabled)
-                s = lim_process(&ch->lim, s);
-            peak = fabsf(s);
-            if (peak > g_lim_post[idx]) g_lim_post[idx] = peak;
+            if (is_input) {
+                int idx = (int)(ch - g_inputs);
+                if (peak > g_in_level[idx]) g_in_level[idx] = peak;
+            } else {
+                int idx = (int)(ch - g_outputs);
+                if (peak > g_out_level[idx]) g_out_level[idx] = peak;
+            }
+        } else {
+            /* HPF (input only) */
+            if (is_input && ch->hpf_enabled)
+                s = bq_process(&ch->hpf, s);
+
+            /* Parametric EQ */
+            for (int b = 0; b < MAX_EQ_BANDS; b++)
+                if (ch->eq_enabled[b])
+                    s = bq_process(&ch->eq[b], s);
+
+            /* Limiter (output only): track pre level, apply, track post level */
+            if (!is_input) {
+                int idx = (int)(ch - g_outputs);
+                float peak = fabsf(s);
+                if (peak > g_lim_pre[idx]) g_lim_pre[idx] = peak;
+                if (ch->lim.enabled)
+                    s = lim_process(&ch->lim, s);
+                peak = fabsf(s);
+                if (peak > g_lim_post[idx]) g_lim_post[idx] = peak;
+                if (peak > g_out_level[idx]) g_out_level[idx] = peak;
+            }
+
+            /* Input level tracking (post-EQ, pre-gain) */
+            if (is_input) {
+                int idx = (int)(ch - g_inputs);
+                float peak = fabsf(s);
+                if (peak > g_in_level[idx]) g_in_level[idx] = peak;
+            }
         }
 
         /* Gain ramp */
@@ -367,13 +390,6 @@ static void process_channel(Channel *ch, jack_nframes_t nframes, int is_input) {
         s   *= cur;
 
         dst[i] = s;
-
-        /* Input level tracking (post-gain) */
-        if (is_input) {
-            int idx = (int)(ch - g_inputs);
-            float peak = fabsf(s);
-            if (peak > g_in_level[idx]) g_in_level[idx] = peak;
-        }
     }
     ch->gain_cur = tgt;
 }
@@ -389,19 +405,27 @@ static int process_cb(jack_nframes_t nframes, void *arg) {
     return 0;
 }
 
-/* ── Limiter meter reporter thread (~8 Hz) ───────────────── */
+/* ── Reporter thread (~8 Hz) ─────────────────────────────── */
 
 static void *reporter_thread(void *arg) {
     (void)arg;
     while (g_reporter_running) {
         usleep(125000);  /* 125 ms (~8 Hz) */
 
-        /* Input channel levels */
+        /* Input channel levels (post-EQ, pre-gain) */
         for (int i = 0; i < g_n_in; i++) {
             float peak = g_in_level[i];
             g_in_level[i] = 0.0f;
             float db = peak > 1e-7f ? 20.0f * log10f(peak) : -120.0f;
             printf("lvl in %d %.1f\n", i + 1, db);
+        }
+
+        /* Output channel levels (post-limiter, pre-gain) */
+        for (int i = 0; i < g_n_out; i++) {
+            float peak = g_out_level[i];
+            g_out_level[i] = 0.0f;
+            float db = peak > 1e-7f ? 20.0f * log10f(peak) : -120.0f;
+            printf("lvl out %d %.1f\n", i + 1, db);
         }
 
         /* Limiter meters (output channels with limiter enabled) */
@@ -472,6 +496,12 @@ static void cmd_loop(void) {
             cmd.flag = atoi(tok[3]);
             ring_push(&cmd);
 
+        /* bypass in|out <ch> <0|1> */
+        } else if (!strcmp(verb, "bypass") && n >= 4) {
+            cmd.type = CMD_BYPASS;
+            cmd.flag = atoi(tok[3]);
+            ring_push(&cmd);
+
         /* hpf in <ch> enable|freq <val> */
         } else if (!strcmp(verb, "hpf") && n >= 5) {
             const char *param = tok[3];
@@ -500,7 +530,6 @@ static void cmd_loop(void) {
                 cmd.flag = atoi(tok[5]);
                 ring_push(&cmd);
             } else if (!strcmp(param, "coeffs") && n >= 10) {
-                /* eq in|out <ch> <band> coeffs <b0> <b1> <b2> <a1> <a2> */
                 BqCoeffs c;
                 c.b0 = atof(tok[5]);
                 c.b1 = atof(tok[6]);
@@ -547,7 +576,6 @@ static void cmd_loop(void) {
                 cmd.lim_coeffs = lc;
                 ring_push(&cmd);
             }
-
         }
     }
 }

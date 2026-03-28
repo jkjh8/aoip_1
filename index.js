@@ -24,7 +24,7 @@ import { getChannels, startMeters,
          getInputSrcPorts, getOutputSinkPorts,
          getSavedRoutes }                            from './lib/channels.js';
 import { startGainer, sendGain, sendMute,
-         sendAllDsp }                                from './lib/gainer.js';
+         sendBypass, sendAllDsp }                    from './lib/gainer.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const config    = JSON.parse(readFileSync(join(__dirname, './config/audio.json'), 'utf8'));
@@ -87,15 +87,19 @@ async function startup() {
   try { await startBridges(config.bridges); } catch (e) { logger.warn('[startup] bridges:', e.message); }
 
   // rtp_recv / rtp_send 를 포트 연결 전에 먼저 기동
-  logger.info('[startup] Starting GStreamer RTP input...');
-  try { startRxPipeline(config.rtp.input); } catch (e) { logger.warn('[startup] gst rx:', e.message); }
-  logger.info('[startup] Starting rtp_send JACK client...');
-  try { startTxClient({ channels: 2 }); } catch (e) { logger.warn('[startup] rtp_send:', e.message); }
+  if (config.rtp) {
+    logger.info('[startup] Starting GStreamer RTP input...');
+    try { startRxPipeline(config.rtp.input); } catch (e) { logger.warn('[startup] gst rx:', e.message); }
+    logger.info('[startup] Starting rtp_send JACK client...');
+    try { startTxClient({ channels: 2 }); } catch (e) { logger.warn('[startup] rtp_send:', e.message); }
 
-  // gainer + 브릿지 + rtp 포트 등록 대기
-  await new Promise(r => setTimeout(r, 2000));
-  try { await Promise.all([waitForRxReady(6000), waitForTxReady(6000)]); }
-  catch (e) { logger.warn('[startup] rtp ready timeout: %s', e.message); }
+    // gainer + 브릿지 + rtp 포트 등록 대기
+    await new Promise(r => setTimeout(r, 2000));
+    try { await Promise.all([waitForRxReady(6000), waitForTxReady(6000)]); }
+    catch (e) { logger.warn('[startup] rtp ready timeout: %s', e.message); }
+  } else {
+    await new Promise(r => setTimeout(r, 2000));
+  }
 
   async function connectWithRetry(src, dst, retries = 5) {
     for (let i = 0; i < retries; i++) {
@@ -125,8 +129,16 @@ async function startup() {
 
   // 저장된 gain/mute/DSP 상태를 dsp_engine에 복원
   const { inputs, outputs } = getChannels([]);
-  for (const ch of inputs)  { sendGain('in',  ch.id, ch.gain); if (ch.muted) sendMute('in',  ch.id, true); }
-  for (const ch of outputs) { sendGain('out', ch.id, ch.gain); if (ch.muted) sendMute('out', ch.id, true); }
+  for (const ch of inputs) {
+    if (ch.bypassDsp) sendBypass('in', ch.id, true);
+    sendGain('in', ch.id, ch.gain);
+    if (ch.muted) sendMute('in', ch.id, true);
+  }
+  for (const ch of outputs) {
+    if (ch.bypassDsp) sendBypass('out', ch.id, true);
+    sendGain('out', ch.id, ch.gain);
+    if (ch.muted) sendMute('out', ch.id, true);
+  }
   sendAllDsp({ inputs, outputs });
 
   logger.info('[startup] Starting channel meters...');

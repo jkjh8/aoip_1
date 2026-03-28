@@ -7,6 +7,7 @@
       "srcPort": "system:capture_1",
       "gain": 100,
       "muted": false,
+      "bypassDsp": false,
       "dsp": {
         "hpf": {
           "enabled": false,
@@ -16,16 +17,15 @@
         "eq": [
           {
             "enabled": false,
-            "freq": 129,
-            "gain": -4.7,
+            "freq": 100,
+            "gain": 0,
             "q": 0.7,
             "type": "peak",
-            "bandType": "peak",
-            "b0": 0.9934966515815826,
-            "b1": -1.9685951198088816,
-            "b2": 0.9753791632369593,
-            "a1": -1.9685951198088816,
-            "a2": 0.9688758148185418
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
@@ -33,12 +33,11 @@
             "gain": 0,
             "q": 0.7,
             "type": "peak",
-            "bandType": "peak",
             "b0": 1,
-            "b1": -1.9066459797557105,
-            "b2": 0.9107370143743273,
-            "a1": -1.9066459797557105,
-            "a2": 0.9107370143743273
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
@@ -46,12 +45,11 @@
             "gain": 0,
             "q": 0.7,
             "type": "peak",
-            "bandType": "peak",
             "b0": 1,
-            "b1": -1.6304323980330466,
-            "b2": 0.6879478254525045,
-            "a1": -1.6304323980330466,
-            "a2": 0.6879478254525045
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
@@ -59,12 +57,11 @@
             "gain": 0,
             "q": 0.7,
             "type": "peak",
-            "bandType": "peak",
             "b0": 1,
-            "b1": -0.6178218468609803,
-            "b2": 0.2356436937219602,
-            "a1": -0.6178218468609803,
-            "a2": 0.2356436937219602
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           }
         ]
       }
@@ -76,10 +73,12 @@
       "srcPort": "system:capture_2",
       "gain": 100,
       "muted": false,
+      "bypassDsp": false,
       "dsp": {
         "hpf": {
           "enabled": false,
-          "freq": 80
+          "freq": 80,
+          "slope": 12
         },
         "eq": [
           {
@@ -87,393 +86,43 @@
             "freq": 100,
             "gain": 0,
             "q": 0.7,
-            "type": "peak"
+            "type": "peak",
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "freq": 500,
             "gain": 0,
             "q": 0.7,
-            "type": "peak"
+            "type": "peak",
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "freq": 2000,
             "gain": 0,
             "q": 0.7,
-            "type": "peak"
+            "type": "peak",
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "freq": 8000,
             "gain": 0,
             "q": 0.7,
-            "type": "peak"
-          }
-        ]
-      }
-    },
-    {
-      "id": 3,
-      "label": "AES67 In CH1",
-      "jackPort": "gainer:out_3",
-      "srcPort": "i2s_in:capture_1",
-      "gain": 100,
-      "muted": false,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80
-        },
-        "eq": [
-          {
-            "enabled": false,
-            "freq": 112,
-            "gain": -0.1,
-            "q": 0.7,
             "type": "peak",
-            "bandType": "low_shelf",
-            "b0": 0.9999289405694168,
-            "b1": -1.975240906804879,
-            "b2": 0.9755230438341634,
-            "a1": -1.9752396847231792,
-            "a2": 0.9754532064852801
-          },
-          {
-            "enabled": false,
-            "freq": 500,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 1,
-            "b1": -1.9066459797557105,
-            "b2": 0.9107370143743273,
-            "a1": -1.9066459797557105,
-            "a2": 0.9107370143743273
-          },
-          {
-            "enabled": false,
-            "freq": 2683,
-            "gain": -0.3,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 0.9932098466767909,
-            "b1": -1.50231655418775,
-            "b2": 0.6067707642396625,
-            "a1": -1.50231655418775,
-            "a2": 0.5999806109164534
-          },
-          {
-            "enabled": false,
-            "freq": 6891,
-            "gain": -0.8,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "high_shelf",
-            "b0": 0.9387384908936114,
-            "b1": -0.6798156408099241,
-            "b2": 0.18373296136023484,
-            "a1": -0.7667563446453926,
-            "a2": 0.20941215608931485
-          }
-        ]
-      }
-    },
-    {
-      "id": 4,
-      "label": "AES67 In CH2",
-      "jackPort": "gainer:out_4",
-      "srcPort": "i2s_in:capture_2",
-      "gain": 100,
-      "muted": false,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80
-        },
-        "eq": [
-          {
-            "enabled": false,
-            "freq": 112,
-            "gain": -0.1,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "low_shelf",
-            "b0": 0.9999289405694168,
-            "b1": -1.975240906804879,
-            "b2": 0.9755230438341634,
-            "a1": -1.9752396847231792,
-            "a2": 0.9754532064852801
-          },
-          {
-            "enabled": false,
-            "freq": 500,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 1,
-            "b1": -1.9066459797557105,
-            "b2": 0.9107370143743273,
-            "a1": -1.9066459797557105,
-            "a2": 0.9107370143743273
-          },
-          {
-            "enabled": false,
-            "freq": 2683,
-            "gain": -0.3,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 0.9932098466767909,
-            "b1": -1.50231655418775,
-            "b2": 0.6067707642396625,
-            "a1": -1.50231655418775,
-            "a2": 0.5999806109164534
-          },
-          {
-            "enabled": false,
-            "freq": 6891,
-            "gain": -0.8,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "high_shelf",
-            "b0": 0.9387384908936114,
-            "b1": -0.6798156408099241,
-            "b2": 0.18373296136023484,
-            "a1": -0.7667563446453926,
-            "a2": 0.20941215608931485
-          }
-        ]
-      }
-    },
-    {
-      "id": 5,
-      "label": "USB In L",
-      "jackPort": "gainer:out_5",
-      "srcPort": "usb_in:capture_1",
-      "gain": 100,
-      "muted": false,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 53,
-          "slope": 96
-        },
-        "eq": [
-          {
-            "enabled": false,
-            "freq": 310,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak",
-            "b0": 1,
-            "b1": -1.9420780257588908,
-            "b2": 0.9436780825464426,
-            "a1": -1.9420780257588908,
-            "a2": 0.9436780825464426,
-            "bandType": "peak"
-          },
-          {
-            "enabled": false,
-            "freq": 902,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak",
-            "b0": 1,
-            "b1": -1.8319345288226936,
-            "b2": 0.8447785194025348,
-            "a1": -1.8319345288226936,
-            "a2": 0.8447785194025348,
-            "bandType": "peak"
-          },
-          {
-            "enabled": false,
-            "freq": 2640,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak",
-            "b0": 1,
-            "b1": -1.5151600033547181,
-            "b2": 0.6103634523626147,
-            "a1": -1.5151600033547181,
-            "a2": 0.6103634523626147,
-            "bandType": "peak"
-          },
-          {
-            "enabled": false,
-            "freq": 5320,
-            "gain": 0,
-            "q": 1.5,
-            "type": "peak",
-            "b0": 1,
-            "b1": -1.2640545322902892,
-            "b2": 0.6476954529272195,
-            "a1": -1.2640545322902892,
-            "a2": 0.6476954529272195,
-            "bandType": "peak"
-          }
-        ]
-      }
-    },
-    {
-      "id": 6,
-      "label": "USB In R",
-      "jackPort": "gainer:out_6",
-      "srcPort": "usb_in:capture_2",
-      "gain": 100,
-      "muted": false,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 53,
-          "slope": 96
-        },
-        "eq": [
-          {
-            "enabled": false,
-            "freq": 310,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 1,
-            "b1": -1.9420780257588908,
-            "b2": 0.9436780825464426,
-            "a1": -1.9420780257588908,
-            "a2": 0.9436780825464426
-          },
-          {
-            "enabled": false,
-            "freq": 902,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 1,
-            "b1": -1.8319345288226936,
-            "b2": 0.8447785194025348,
-            "a1": -1.8319345288226936,
-            "a2": 0.8447785194025348
-          },
-          {
-            "enabled": false,
-            "freq": 2640,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 1,
-            "b1": -1.5151600033547181,
-            "b2": 0.6103634523626147,
-            "a1": -1.5151600033547181,
-            "a2": 0.6103634523626147
-          },
-          {
-            "enabled": false,
-            "freq": 5320,
-            "gain": 0,
-            "q": 1.5,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 1,
-            "b1": -1.2640545322902892,
-            "b2": 0.6476954529272195,
-            "a1": -1.2640545322902892,
-            "a2": 0.6476954529272195
-          }
-        ]
-      }
-    },
-    {
-      "id": 7,
-      "label": "RTP In L",
-      "jackPort": "gainer:out_7",
-      "srcPort": "rtp_in:out_1",
-      "gain": 100,
-      "muted": false,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80
-        },
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ]
-      }
-    },
-    {
-      "id": 8,
-      "label": "RTP In R",
-      "jackPort": "gainer:out_8",
-      "srcPort": "rtp_in:out_2",
-      "gain": 100,
-      "muted": false,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80
-        },
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
             "b0": 1,
             "b1": 0,
             "b2": 0,
@@ -492,6 +141,7 @@
       "sinkPort": "system:playback_1",
       "gain": 100,
       "muted": false,
+      "bypassDsp": false,
       "dsp": {
         "eq": [
           {
@@ -500,56 +150,56 @@
             "gain": 0,
             "q": 0.7,
             "type": "peak",
-            "bandType": "peak",
             "b0": 1,
             "b1": -1.9813040347772235,
             "b2": 0.9814737924440637,
             "a1": -1.9813040347772235,
-            "a2": 0.9814737924440637
+            "a2": 0.9814737924440637,
+            "bandType": "peak"
           },
           {
             "enabled": false,
-            "freq": 629,
-            "gain": -3.9,
+            "freq": 500,
+            "gain": 0,
             "q": 0.7,
             "type": "peak",
-            "bandType": "peak",
-            "b0": 0.975223029926146,
-            "b1": -1.856699656598361,
-            "b2": 0.8877879234723518,
-            "a1": -1.856699656598361,
-            "a2": 0.8630109533984979
+            "b0": 1,
+            "b1": -1.9066459797557105,
+            "b2": 0.9107370143743273,
+            "a1": -1.9066459797557105,
+            "a2": 0.9107370143743273,
+            "bandType": "peak"
+          },
+          {
+            "enabled": true,
+            "freq": 1259,
+            "gain": -15,
+            "q": 0.1,
+            "type": "peak",
+            "b0": 0.4569835274287801,
+            "b1": -0.6698676560351733,
+            "b2": 0.22208500420131133,
+            "a1": -0.6698676560351733,
+            "a2": -0.32093146836990843,
+            "bandType": "peak"
           },
           {
             "enabled": false,
-            "freq": 2256,
-            "gain": 3.3,
+            "freq": 8000,
+            "gain": 0,
             "q": 0.7,
             "type": "peak",
-            "bandType": "peak",
-            "b0": 1.0678001336611462,
-            "b1": -1.6327299946422,
-            "b2": 0.6388053094101431,
-            "a1": -1.6327299946422,
-            "a2": 0.7066054430712894
-          },
-          {
-            "enabled": false,
-            "freq": 8695,
-            "gain": 2.3,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 1.1098281662536684,
-            "b1": -0.5347419132584947,
-            "b2": 0.16563224656363568,
-            "a1": -0.5347419132584947,
-            "a2": 0.275460412817304
+            "b0": 1,
+            "b1": -0.6178218468609803,
+            "b2": 0.2356436937219602,
+            "a1": -0.6178218468609803,
+            "a2": 0.2356436937219602,
+            "bandType": "peak"
           }
         ],
         "limiter": {
           "enabled": false,
-          "threshold": -27,
+          "threshold": -30,
           "attack": 5,
           "release": 50,
           "makeup": 0
@@ -563,6 +213,7 @@
       "sinkPort": "system:playback_2",
       "gain": 100,
       "muted": false,
+      "bypassDsp": false,
       "dsp": {
         "eq": [
           {
@@ -571,198 +222,47 @@
             "gain": 0,
             "q": 0.7,
             "type": "peak",
-            "bandType": "peak",
             "b0": 1,
-            "b1": -1.9813040347772235,
-            "b2": 0.9814737924440637,
-            "a1": -1.9813040347772235,
-            "a2": 0.9814737924440637
-          },
-          {
-            "enabled": false,
-            "freq": 520,
-            "gain": -3.5,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 0.9813964533076959,
-            "b1": -1.8834425774242733,
-            "b2": 0.906417775480628,
-            "a1": -1.8834425774242733,
-            "a2": 0.8878142287883238
-          },
-          {
-            "enabled": false,
-            "freq": 2256,
-            "gain": 1,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 1.0200180133799677,
-            "b1": -1.5995129860093247,
-            "b2": 0.6518674650177788,
-            "a1": -1.5995129860093247,
-            "a2": 0.6718854783977465
-          },
-          {
-            "enabled": false,
-            "freq": 8000,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 1,
-            "b1": -0.6178218468609803,
-            "b2": 0.2356436937219602,
-            "a1": -0.6178218468609803,
-            "a2": 0.2356436937219602
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 50,
-          "makeup": 0
-        }
-      }
-    },
-    {
-      "id": 3,
-      "label": "AES67 Out CH1",
-      "jackPort": "gainer:sin_3",
-      "sinkPort": "i2s_out:playback_1",
-      "gain": 100,
-      "muted": false,
-      "dsp": {
-        "eq": [
-          {
-            "enabled": false,
-            "freq": 100,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak"
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "freq": 500,
             "gain": 0,
             "q": 0.7,
-            "type": "peak"
+            "type": "peak",
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "freq": 2000,
             "gain": 0,
             "q": 0.7,
-            "type": "peak"
+            "type": "peak",
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "freq": 8000,
             "gain": 0,
-            "q": 0.7,
-            "type": "peak"
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 50,
-          "makeup": 0
-        }
-      }
-    },
-    {
-      "id": 4,
-      "label": "AES67 Out CH2",
-      "jackPort": "gainer:sin_4",
-      "sinkPort": "i2s_out:playback_2",
-      "gain": 100,
-      "muted": false,
-      "dsp": {
-        "eq": [
-          {
-            "enabled": false,
-            "freq": 100,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak"
-          },
-          {
-            "enabled": false,
-            "freq": 500,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak"
-          },
-          {
-            "enabled": false,
-            "freq": 2000,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak"
-          },
-          {
-            "enabled": false,
-            "freq": 8000,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak"
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 50,
-          "makeup": 0
-        }
-      }
-    },
-    {
-      "id": 5,
-      "label": "USB Out L",
-      "jackPort": "gainer:sin_5",
-      "sinkPort": "usb_out:playback_1",
-      "gain": 100,
-      "muted": false,
-      "dsp": {
-        "eq": [
-          {
-            "enabled": false,
-            "freq": 100,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak"
-          },
-          {
-            "enabled": false,
-            "freq": 500,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak"
-          },
-          {
-            "enabled": true,
-            "freq": 2409,
-            "gain": -0.2,
             "q": 0.7,
             "type": "peak",
-            "bandType": "peak",
-            "b0": 0.9958328688916672,
-            "b1": -1.5533015590300132,
-            "b2": 0.6380315990414286,
-            "a1": -1.5533015590300132,
-            "a2": 0.6338644679330958
-          },
-          {
-            "enabled": false,
-            "freq": 8000,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak"
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           }
         ],
         "limiter": {
@@ -770,161 +270,6 @@
           "threshold": -6,
           "attack": 5,
           "release": 50,
-          "makeup": 0
-        }
-      }
-    },
-    {
-      "id": 6,
-      "label": "USB Out R",
-      "jackPort": "gainer:sin_6",
-      "sinkPort": "usb_out:playback_2",
-      "gain": 100,
-      "muted": false,
-      "dsp": {
-        "eq": [
-          {
-            "enabled": false,
-            "freq": 100,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak"
-          },
-          {
-            "enabled": false,
-            "freq": 500,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak"
-          },
-          {
-            "enabled": true,
-            "freq": 2409,
-            "gain": -0.2,
-            "q": 0.7,
-            "type": "peak",
-            "bandType": "peak",
-            "b0": 0.9958328688916672,
-            "b1": -1.5533015590300132,
-            "b2": 0.6380315990414286,
-            "a1": -1.5533015590300132,
-            "a2": 0.6338644679330958
-          },
-          {
-            "enabled": false,
-            "freq": 8000,
-            "gain": 0,
-            "q": 0.7,
-            "type": "peak"
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 50,
-          "makeup": 0
-        }
-      }
-    },
-    {
-      "id": 7,
-      "label": "RTP Out L",
-      "jackPort": "gainer:sin_7",
-      "sinkPort": "rtp_send:in_1",
-      "gain": 100,
-      "muted": false,
-      "dsp": {
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 100,
-          "makeup": 0
-        }
-      }
-    },
-    {
-      "id": 8,
-      "label": "RTP Out R",
-      "jackPort": "gainer:sin_8",
-      "sinkPort": "rtp_send:in_2",
-      "gain": 100,
-      "muted": false,
-      "dsp": {
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 100,
           "makeup": 0
         }
       }
@@ -932,36 +277,12 @@
   ],
   "routing": [
     {
-      "src": "gainer:out_5",
+      "src": "gainer:out_1",
       "dst": "gainer:sin_1"
     },
     {
-      "src": "gainer:out_6",
+      "src": "gainer:out_2",
       "dst": "gainer:sin_2"
-    },
-    {
-      "src": "gainer:out_4",
-      "dst": "gainer:sin_6"
-    },
-    {
-      "src": "gainer:out_3",
-      "dst": "gainer:sin_5"
-    },
-    {
-      "src": "gainer:out_3",
-      "dst": "gainer:sin_7"
-    },
-    {
-      "src": "gainer:out_4",
-      "dst": "gainer:sin_8"
-    },
-    {
-      "src": "gainer:out_7",
-      "dst": "gainer:sin_3"
-    },
-    {
-      "src": "gainer:out_8",
-      "dst": "gainer:sin_4"
     }
   ]
 }

@@ -1,0 +1,14 @@
+pcm.aoip24 {
+    type plug
+    slave {
+        pcm "hw:sndrpiaoip8"
+        format S24_LE
+        rate 48000
+        channels 2
+    }
+}
+
+ctl.aoip24 {
+    type hw
+    card sndrpiaoip8
+}

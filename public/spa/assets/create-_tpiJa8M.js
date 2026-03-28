@@ -1,0 +1,1 @@
+import{I as e,R as t,m as n}from"./runtime-core.esm-bundler-DG33XdCd.js";function r(e,t,n,r){return Object.defineProperty(e,t,{get:n,set:r,enumerable:!0}),e}function i(t){return e(n(t))}function a(t){return e(t)}var o=(e,n)=>{let i=t(e);for(let t in e)r(n,t,()=>i[t],e=>{i[t]=e});return n};export{r as i,a as n,o as r,i as t};

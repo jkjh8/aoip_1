@@ -131,6 +131,104 @@
           }
         ]
       }
+    },
+    {
+      "id": 3,
+      "label": "USB_GADGET 1",
+      "jackPort": "gainer:out_3",
+      "srcPort": "usb_gadget:out_1",
+      "gain": 100,
+      "muted": false,
+      "bypassDsp": false,
+      "dsp": {
+        "hpf": {
+          "enabled": false,
+          "freq": 80
+        },
+        "eq": [
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "label": "USB_GADGET 2",
+      "jackPort": "gainer:out_4",
+      "srcPort": "usb_gadget:out_2",
+      "gain": 100,
+      "muted": false,
+      "bypassDsp": false,
+      "dsp": {
+        "hpf": {
+          "enabled": false,
+          "freq": 80
+        },
+        "eq": [
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          }
+        ]
+      }
     }
   ],
   "outputs": [
@@ -171,7 +269,7 @@
             "bandType": "peak"
           },
           {
-            "enabled": true,
+            "enabled": false,
             "freq": 1259,
             "gain": -15,
             "q": 0.1,
@@ -273,15 +371,119 @@
           "makeup": 0
         }
       }
+    },
+    {
+      "id": 3,
+      "label": "USB_GADGET 1",
+      "jackPort": "gainer:sin_3",
+      "sinkPort": "usb_gadget:in_1",
+      "gain": 100,
+      "muted": false,
+      "bypassDsp": false,
+      "dsp": {
+        "eq": [
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          }
+        ],
+        "limiter": {
+          "enabled": false,
+          "threshold": -6,
+          "attack": 5,
+          "release": 100,
+          "makeup": 0
+        }
+      }
+    },
+    {
+      "id": 4,
+      "label": "USB_GADGET 2",
+      "jackPort": "gainer:sin_4",
+      "sinkPort": "usb_gadget:in_2",
+      "gain": 100,
+      "muted": false,
+      "bypassDsp": false,
+      "dsp": {
+        "eq": [
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          },
+          {
+            "enabled": false,
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
+          }
+        ],
+        "limiter": {
+          "enabled": false,
+          "threshold": -6,
+          "attack": 5,
+          "release": 100,
+          "makeup": 0
+        }
+      }
     }
   ],
   "routing": [
     {
-      "src": "gainer:out_1",
+      "src": "gainer:out_3",
       "dst": "gainer:sin_1"
     },
     {
-      "src": "gainer:out_2",
+      "src": "gainer:out_4",
       "dst": "gainer:sin_2"
     }
   ]

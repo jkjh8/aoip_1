@@ -5,5 +5,14 @@
     "period": 512,
     "periods": 3,
     "channels": 2
-  }
+  },
+  "bridges": [
+    {
+      "type": "usb_jack_bridge",
+      "name": "usb_gadget",
+      "device": "hw:UAC2Gadget",
+      "channels": 2,
+      "enabled": false
+    }
+  ]
 }

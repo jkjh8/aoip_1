@@ -118,11 +118,19 @@ async function startup() {
   for (let i = 0; i < sinkPorts.length; i++)
     await connectWithRetry(`gainer:sout_${i + 1}`, sinkPorts[i]);
 
-  // 저장된 라우팅 매트릭스 복원
+  // 저장된 라우팅 매트릭스 복원 — 현재 활성 채널의 포트만 연결
   const savedRoutes = getSavedRoutes();
   if (savedRoutes.length > 0) {
+    const { inputs: activeIn, outputs: activeOut } = getChannels([]);
+    const validSrcs = new Set(activeIn.map(ch => ch.jackPort));   // gainer:out_N
+    const validDsts = new Set(activeOut.map(ch => ch.jackPort));  // gainer:sin_N
+
     logger.info('[startup] Restoring %d saved routes...', savedRoutes.length);
     for (const { src, dst } of savedRoutes) {
+      if (!validSrcs.has(src) || !validDsts.has(dst)) {
+        logger.info('[startup] skipping route %s→%s (port not active)', src, dst);
+        continue;
+      }
       await connectWithRetry(src, dst);
     }
   }

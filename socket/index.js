@@ -1,6 +1,6 @@
 import { Server as SocketIO } from 'socket.io';
 import { getPorts, getConnections, isJackRunning } from '../lib/jack.js';
-import { getBridgeStatus }                          from '../lib/bridges.js';
+import { getBridgeStatus, getUsbGadgetEnabled }      from '../lib/bridges.js';
 import { getGstStatus, getRxStats }                 from '../lib/gstreamer.js';
 import { getChannels }                              from '../lib/channels.js';
 import { getLimiterMeters }                         from '../lib/gainer.js';
@@ -11,6 +11,7 @@ import registerBridges  from './bridges.js';
 import registerStreams   from './streams.js';
 import registerChannels from './channels.js';
 import registerDsp      from './dsp.js';
+import registerUsb      from './usb.js';
 
 const STATUS_INTERVAL = 2000;
 const LEVEL_INTERVAL  = 80;   // ~12 fps
@@ -36,7 +37,8 @@ async function snapshot() {
     bridges:  getBridgeStatus(),
     streams:  getGstStatus(),
     rxStats:  getRxStats(),
-    channels: getChannels(connections)
+    channels: getChannels(connections),
+    usb:      { enabled: getUsbGadgetEnabled() }
   };
 }
 
@@ -101,6 +103,7 @@ export function setupSocket(httpServer, config) {
     registerStreams(socket, ctx);
     registerChannels(socket, ctx);
     registerDsp(socket, ctx);
+    registerUsb(socket, ctx);
   });
 
   return { io, broadcastStatus };

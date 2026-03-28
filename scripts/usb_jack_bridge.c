@@ -5,8 +5,8 @@
  * 종료: /usr/local/bin/usb_gadget_uac2_stop.sh
  *
  * JACK 포트:
- *   <name>:out_1, out_2  — USB 수신(S24_3LE) → JACK 출력
- *   <name>:in_1,  in_2   — JACK 입력 → USB 송신(S24_3LE)
+ *   <name>:out_1, out_2  — USB 수신(S32_LE) → JACK 출력
+ *   <name>:in_1,  in_2   — JACK 입력 → USB 송신(S32_LE)
  *
  * ALSA 장치가 없거나(USB 미연결) 오류 시 JACK 포트는 유지하면서
  * 2초마다 재연결을 시도합니다.
@@ -47,26 +47,26 @@ static volatile int       g_running = 1;
 /* ALSA 장치 이름 (스레드에 전달) */
 static const char        *g_alsa_device;
 
-/* ── 변환: S24_3LE ↔ float32 ─────────────────────────────────── */
+/* ── 변환: S32_LE ↔ float32 ──────────────────────────────────── */
 
-static inline float s24_3le_to_float(const uint8_t *p)
+static inline float s32_le_to_float(const uint8_t *p)
 {
     int32_t v = (int32_t)p[0]
               | ((int32_t)p[1] << 8)
-              | ((int32_t)p[2] << 16);
-    if (v & 0x800000)
-        v |= (int32_t)0xFF000000;
-    return (float)v * (1.0f / 8388608.0f);
+              | ((int32_t)p[2] << 16)
+              | ((int32_t)p[3] << 24);
+    return (float)v * (1.0f / 2147483648.0f);
 }
 
-static inline void float_to_s24_3le(float f, uint8_t *p)
+static inline void float_to_s32_le(float f, uint8_t *p)
 {
     if      (f >  1.0f) f =  1.0f;
     else if (f < -1.0f) f = -1.0f;
-    int32_t v = (int32_t)(f * 8388607.0f);
+    int32_t v = (int32_t)(f * 2147483647.0f);
     p[0] = (uint8_t)( v        & 0xFF);
     p[1] = (uint8_t)((v >>  8) & 0xFF);
     p[2] = (uint8_t)((v >> 16) & 0xFF);
+    p[3] = (uint8_t)((v >> 24) & 0xFF);
 }
 
 /* ── JACK 프로세스 콜백 ──────────────────────────────────────── */
@@ -112,7 +112,7 @@ static int alsa_open(snd_pcm_t **pcm, snd_pcm_stream_t stream)
     snd_pcm_hw_params_alloca(&hw);
     snd_pcm_hw_params_any(*pcm, hw);
     snd_pcm_hw_params_set_access(*pcm, hw, SND_PCM_ACCESS_RW_INTERLEAVED);
-    snd_pcm_hw_params_set_format(*pcm, hw, SND_PCM_FORMAT_S24_3LE);
+    snd_pcm_hw_params_set_format(*pcm, hw, SND_PCM_FORMAT_S32_LE);
     snd_pcm_hw_params_set_channels(*pcm, hw, CHANNELS);
 
     unsigned int rate = SAMPLE_RATE;
@@ -143,7 +143,7 @@ static int alsa_open(snd_pcm_t **pcm, snd_pcm_stream_t stream)
 static void *alsa_cap_thread(void *arg)
 {
     (void)arg;
-    const int bpf = CHANNELS * 3;
+    const int bpf = CHANNELS * 4;
     uint8_t  *buf = (uint8_t *)malloc((size_t)PERIOD_FRAMES * bpf);
     float     tmp[CHANNELS][PERIOD_FRAMES];
 
@@ -162,15 +162,17 @@ static void *alsa_cap_thread(void *arg)
         /* 캡처 루프 */
         while (g_running) {
             snd_pcm_sframes_t n = snd_pcm_readi(pcm, buf, PERIOD_FRAMES);
-            if (n == -EPIPE) { snd_pcm_prepare(pcm); continue; }
+            if (n == -EPIPE || n == -EIO) { snd_pcm_prepare(pcm); usleep(2000); continue; }
             if (n < 0) {
+                fprintf(stderr, "[usb_jack] capture error: %s (%ld)\n",
+                        snd_strerror((int)n), (long)n);
                 if (snd_pcm_recover(pcm, (int)n, 0) < 0) break; /* 재연결 필요 */
                 continue;
             }
 
             for (snd_pcm_sframes_t i = 0; i < n; i++)
                 for (int ch = 0; ch < CHANNELS; ch++)
-                    tmp[ch][i] = s24_3le_to_float(buf + i * bpf + ch * 3);
+                    tmp[ch][i] = s32_le_to_float(buf + i * bpf + ch * 4);
 
             for (int ch = 0; ch < CHANNELS; ch++) {
                 size_t bytes = (size_t)n * sizeof(float);
@@ -196,7 +198,7 @@ static void *alsa_cap_thread(void *arg)
 static void *alsa_play_thread(void *arg)
 {
     (void)arg;
-    const int bpf = CHANNELS * 3;
+    const int bpf = CHANNELS * 4;
     float     tmp[CHANNELS][PERIOD_FRAMES];
     uint8_t  *buf = (uint8_t *)malloc((size_t)PERIOD_FRAMES * bpf);
 
@@ -248,11 +250,15 @@ static void *alsa_play_thread(void *arg)
 
             for (snd_pcm_sframes_t i = 0; i < n; i++)
                 for (int ch = 0; ch < CHANNELS; ch++)
-                    float_to_s24_3le(tmp[ch][i], buf + i * bpf + ch * 3);
+                    float_to_s32_le(tmp[ch][i], buf + i * bpf + ch * 4);
 
             snd_pcm_sframes_t r = snd_pcm_writei(pcm, buf, n);
-            if (r == -EPIPE)    { snd_pcm_prepare(pcm); continue; }
-            if (r < 0)          { if (snd_pcm_recover(pcm, (int)r, 0) < 0) break; }
+            if (r == -EPIPE || r == -EIO) { snd_pcm_prepare(pcm); usleep(2000); continue; }
+            if (r < 0) {
+                fprintf(stderr, "[usb_jack] playback error: %s (%ld)\n",
+                        snd_strerror((int)r), (long)r);
+                if (snd_pcm_recover(pcm, (int)r, 0) < 0) break;
+            }
         }
 
         snd_pcm_close(pcm);

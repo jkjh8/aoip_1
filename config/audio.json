@@ -2,7 +2,7 @@
   "jack": {
     "device": "hw:sndrpiaoip8",
     "rate": 48000,
-    "period": 512,
+    "period": 256,
     "periods": 3,
     "channels": 2
   },
@@ -12,7 +12,7 @@
       "name": "usb_gadget",
       "device": "hw:UAC2Gadget",
       "channels": 2,
-      "enabled": false
+      "enabled": true
     }
   ]
 }

@@ -479,12 +479,28 @@
   ],
   "routing": [
     {
+      "src": "gainer:out_1",
+      "dst": "gainer:sin_1"
+    },
+    {
+      "src": "gainer:out_2",
+      "dst": "gainer:sin_2"
+    },
+    {
       "src": "gainer:out_3",
       "dst": "gainer:sin_1"
     },
     {
       "src": "gainer:out_4",
       "dst": "gainer:sin_2"
+    },
+    {
+      "src": "gainer:out_1",
+      "dst": "gainer:sin_3"
+    },
+    {
+      "src": "gainer:out_2",
+      "dst": "gainer:sin_4"
     }
   ]
 }

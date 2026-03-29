@@ -12,6 +12,7 @@ import registerStreams   from './streams.js';
 import registerChannels from './channels.js';
 import registerDsp      from './dsp.js';
 import registerUsb      from './usb.js';
+import registerSystem   from './system.js';
 
 const STATUS_INTERVAL = 2000;
 const LEVEL_INTERVAL  = 80;   // ~12 fps
@@ -104,6 +105,7 @@ export function setupSocket(httpServer, config) {
     registerChannels(socket, ctx);
     registerDsp(socket, ctx);
     registerUsb(socket, ctx);
+    registerSystem(socket);
   });
 
   return { io, broadcastStatus };

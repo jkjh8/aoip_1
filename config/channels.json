@@ -44,15 +44,15 @@
           },
           {
             "enabled": false,
-            "freq": 1893,
-            "gain": 0,
+            "freq": 2120,
+            "gain": -4.4,
             "q": 0.7,
             "type": "peak",
-            "b0": 1,
-            "b1": -1.6498720910153182,
-            "b2": 0.7018534122471018,
-            "a1": -1.6498720910153182,
-            "a2": 0.7018534122471018,
+            "b0": 0.91998085498725,
+            "b1": -1.5362159264466355,
+            "b2": 0.6773467332045191,
+            "a1": -1.5362159264466355,
+            "a2": 0.5973275881917691,
             "bandType": "peak"
           },
           {
@@ -418,7 +418,7 @@
         ],
         "limiter": {
           "enabled": false,
-          "threshold": -30,
+          "threshold": -15,
           "attack": 5,
           "release": 50,
           "makeup": 0
@@ -716,18 +716,6 @@
       "dst": "gainer:sin_1"
     },
     {
-      "src": "gainer:out_4",
-      "dst": "gainer:sin_2"
-    },
-    {
-      "src": "gainer:out_5",
-      "dst": "gainer:sin_1"
-    },
-    {
-      "src": "gainer:out_6",
-      "dst": "gainer:sin_2"
-    },
-    {
       "src": "gainer:out_1",
       "dst": "gainer:sin_5"
     },
@@ -742,6 +730,10 @@
     {
       "src": "gainer:out_2",
       "dst": "gainer:sin_4"
+    },
+    {
+      "src": "gainer:out_4",
+      "dst": "gainer:sin_2"
     }
   ]
 }

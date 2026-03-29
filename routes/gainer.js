@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { startGainer, stopGainer, isGainerRunning,
          sendGain, sendMute, sendAllDsp } from '../lib/gainer.js';
 import { connect, disconnect } from '../lib/jack.js';
-import { getInputSrcPorts, getOutputSinkPorts, getChannels } from '../lib/channels.js';
+import { getInputSrcPorts, getOutputSinkPorts,
+         getTotalInputCount, getTotalOutputCount, getChannels } from '../lib/channels.js';
 
 const router = Router();
 
@@ -11,23 +12,22 @@ router.get('/bypass', async (_req, res) => {
   try {
     const { getConnections } = await import('../lib/jack.js');
     const srcPorts  = getInputSrcPorts();
-    const sinkPorts = getOutputSinkPorts();5
+    const sinkPorts = getOutputSinkPorts();
 
     // 현재 연결 스냅샷: gainer 체인 매핑 파악
-    // srcPorts[i] → gainer:in_{i+1} → gainer:out_{i+1} → gainer:sin_{j+1} → sinkPorts[j]
     const conns = await getConnections();
     const portMap = new Map(conns.map(({ port, connections }) => [port, connections]));
+    const sinkById = new Map(sinkPorts.map(({ id, sinkPort }) => [id, sinkPort]));
 
     const pairs = [];
-    for (let i = 0; i < srcPorts.length; i++) {
-      const gainerOut = `gainer:out_${i + 1}`;
+    for (const { id, srcPort } of srcPorts) {
+      const gainerOut = `gainer:out_${id}`;
       const dsts = portMap.get(gainerOut) ?? [];
       for (const gainerSin of dsts) {
-        // gainer:sin_N → sinkPorts[N-1]
         const m = gainerSin.match(/^gainer:sin_(\d+)$/);
         if (m) {
-          const j = parseInt(m[1], 10) - 1;
-          if (sinkPorts[j]) pairs.push({ src: srcPorts[i], dst: sinkPorts[j] });
+          const dst = sinkById.get(parseInt(m[1], 10));
+          if (dst) pairs.push({ src: srcPort, dst });
         }
       }
     }
@@ -56,16 +56,14 @@ router.get('/restore', async (_req, res) => {
   try {
     const srcPorts  = getInputSrcPorts();
     const sinkPorts = getOutputSinkPorts();
-    const n = Math.min(srcPorts.length, sinkPorts.length);
-    for (let i = 0; i < n; i++) {
-      try { await disconnect(srcPorts[i], sinkPorts[i]); } catch { /* ignore */ }
-    }
-    startGainer(srcPorts.length, sinkPorts.length);
+    for (const { srcPort } of srcPorts)
+      try { await disconnect(srcPort, srcPort); } catch { /* ignore */ }
+    startGainer(getTotalInputCount(), getTotalOutputCount());
     await new Promise(r => setTimeout(r, 1000));
-    for (let i = 0; i < srcPorts.length; i++)
-      try { await connect(srcPorts[i], `gainer:in_${i + 1}`); } catch { /* ignore */ }
-    for (let i = 0; i < sinkPorts.length; i++)
-      try { await connect(`gainer:sout_${i + 1}`, sinkPorts[i]); } catch { /* ignore */ }
+    for (const { id, srcPort } of srcPorts)
+      try { await connect(srcPort, `gainer:in_${id}`); } catch { /* ignore */ }
+    for (const { id, sinkPort } of sinkPorts)
+      try { await connect(`gainer:sout_${id}`, sinkPort); } catch { /* ignore */ }
     const { inputs, outputs } = getChannels([]);
     for (const ch of inputs)  { sendGain('in',  ch.id, ch.gain); if (ch.muted) sendMute('in',  ch.id, true); }
     for (const ch of outputs) { sendGain('out', ch.id, ch.gain); if (ch.muted) sendMute('out', ch.id, true); }

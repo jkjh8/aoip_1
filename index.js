@@ -11,6 +11,7 @@ import jackRoutes    from './routes/jack.js';
 import bridgesRoutes from './routes/bridges.js';
 import streamsRoutes from './routes/streams.js';
 import gainerRoutes  from './routes/gainer.js';
+import systemRoutes  from './routes/system.js';
 
 import { setupSocket } from './socket/index.js';
 import logger from './lib/logger.js';
@@ -24,6 +25,7 @@ import { startRxPipeline, startTxClient,
          getRtpStreamStatus }                         from './lib/gstreamer.js';
 import { getChannels, startMeters,
          getInputSrcPorts, getOutputSinkPorts,
+         getTotalInputCount, getTotalOutputCount,
          getSavedRoutes }                            from './lib/channels.js';
 import { startGainer, sendGain, sendMute,
          sendBypass, sendAllDsp }                    from './lib/gainer.js';
@@ -49,6 +51,7 @@ app.use('/jack',    jackRoutes);
 app.use('/bridges', bridgesRoutes);
 app.use('/streams', streamsRoutes);
 app.use('/gainer',  gainerRoutes);
+app.use('/system',  systemRoutes);
 
 // ── SPA 정적 파일 서빙 ────────────────────────────────
 const SPA_DIR = join(__dirname, 'public/spa');
@@ -82,8 +85,10 @@ async function startup() {
   const srcPorts  = getInputSrcPorts();
   const sinkPorts = getOutputSinkPorts();
 
-  logger.info('[startup] Starting gainer (in=%d out=%d)...', srcPorts.length, sinkPorts.length);
-  try { startGainer(srcPorts.length, sinkPorts.length); } catch (e) { logger.warn('[startup] gainer:', e.message); }
+  const totalIn  = getTotalInputCount();
+  const totalOut = getTotalOutputCount();
+  logger.info('[startup] Starting gainer (in=%d out=%d, active in=%d out=%d)...', totalIn, totalOut, srcPorts.length, sinkPorts.length);
+  try { startGainer(totalIn, totalOut); } catch (e) { logger.warn('[startup] gainer:', e.message); }
 
   logger.info('[startup] Starting ALSA bridges...');
   try { await startBridges(config.bridges); } catch (e) { logger.warn('[startup] bridges:', e.message); }
@@ -129,20 +134,20 @@ async function startup() {
   }
 
   logger.info('[startup] Connecting src → gainer inputs...');
-  for (let i = 0; i < srcPorts.length; i++) {
-    let src = srcPorts[i];
+  for (const { id, srcPort } of srcPorts) {
+    let src = srcPort;
     // rtp_in 포트: config의 `client:out_N` 대신 실제 등록된 포트명 사용
     const m = src.match(/^([^:]+):out_(\d+)$/);
     if (m && rtpPortMap.has(m[1])) {
       const actual = rtpPortMap.get(m[1])[Number(m[2]) - 1];
       if (actual) src = actual;
     }
-    await connectWithRetry(src, `gainer:in_${i + 1}`);
+    await connectWithRetry(src, `gainer:in_${id}`);
   }
 
   logger.info('[startup] Connecting gainer outputs → sinks...');
-  for (let i = 0; i < sinkPorts.length; i++)
-    await connectWithRetry(`gainer:sout_${i + 1}`, sinkPorts[i]);
+  for (const { id, sinkPort } of sinkPorts)
+    await connectWithRetry(`gainer:sout_${id}`, sinkPort);
 
   // 저장된 라우팅 매트릭스 복원 — 현재 활성 채널의 포트만 연결
   const savedRoutes = getSavedRoutes();

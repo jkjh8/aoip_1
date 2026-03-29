@@ -1,5 +1,6 @@
 import { getChannels, setGain, setMute, setLabel,
-         getInputSrcPorts, getOutputSinkPorts } from '../lib/channels.js';
+         getInputSrcPorts, getOutputSinkPorts,
+         getTotalInputCount, getTotalOutputCount } from '../lib/channels.js';
 import { startGainer, stopGainer, isGainerRunning,
          sendGain, sendMute, sendAllDsp } from '../lib/gainer.js';
 import { connect, disconnect } from '../lib/jack.js';
@@ -34,9 +35,10 @@ export default function register(socket, { broadcastStatus }) {
       await new Promise(r => setTimeout(r, 500));
       const srcPorts  = getInputSrcPorts();
       const sinkPorts = getOutputSinkPorts();
-      const n = Math.min(srcPorts.length, sinkPorts.length);
-      for (let i = 0; i < n; i++) {
-        try { await connect(srcPorts[i], sinkPorts[i]); } catch { /* ignore */ }
+      const sinkById  = new Map(sinkPorts.map(({ id, sinkPort }) => [id, sinkPort]));
+      for (const { id, srcPort } of srcPorts) {
+        const dst = sinkById.get(id);
+        if (dst) try { await connect(srcPort, dst); } catch { /* ignore */ }
       }
       await broadcastStatus();
       cb?.({ ok: true });
@@ -47,16 +49,17 @@ export default function register(socket, { broadcastStatus }) {
     try {
       const srcPorts  = getInputSrcPorts();
       const sinkPorts = getOutputSinkPorts();
-      const n = Math.min(srcPorts.length, sinkPorts.length);
-      for (let i = 0; i < n; i++) {
-        try { await disconnect(srcPorts[i], sinkPorts[i]); } catch { /* ignore */ }
+      const sinkById  = new Map(sinkPorts.map(({ id, sinkPort }) => [id, sinkPort]));
+      for (const { id, srcPort } of srcPorts) {
+        const dst = sinkById.get(id);
+        if (dst) try { await disconnect(srcPort, dst); } catch { /* ignore */ }
       }
-      startGainer(srcPorts.length, sinkPorts.length);
+      startGainer(getTotalInputCount(), getTotalOutputCount());
       await new Promise(r => setTimeout(r, 1000));
-      for (let i = 0; i < srcPorts.length; i++)
-        try { await connect(srcPorts[i], `gainer:in_${i + 1}`); } catch { /* ignore */ }
-      for (let i = 0; i < sinkPorts.length; i++)
-        try { await connect(`gainer:sout_${i + 1}`, sinkPorts[i]); } catch { /* ignore */ }
+      for (const { id, srcPort } of srcPorts)
+        try { await connect(srcPort, `gainer:in_${id}`); } catch { /* ignore */ }
+      for (const { id, sinkPort } of sinkPorts)
+        try { await connect(`gainer:sout_${id}`, sinkPort); } catch { /* ignore */ }
       const { inputs, outputs } = getChannels([]);
       for (const ch of inputs)  { sendGain('in',  ch.id, ch.gain); if (ch.muted) sendMute('in',  ch.id, true); }
       for (const ch of outputs) { sendGain('out', ch.id, ch.gain); if (ch.muted) sendMute('out', ch.id, true); }

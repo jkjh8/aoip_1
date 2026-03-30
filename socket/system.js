@@ -3,10 +3,10 @@ import { getNetworkInfo, setStaticIp, setDhcp, rebootSystem } from '../lib/syste
 /**
  * socket events:
  *   system:network:get  (client→server)  { iface? }
- *                       (server→client)  { iface, ip, prefix, gateway, dns, mode, mac }
+ *                       (server→client)  { iface, ip, subnet, gateway, dns, mode, mac }
  *
  *   system:network:set  (client→server)  { iface?, mode: 'dhcp' }
- *                     OR                 { iface?, mode: 'static', ip, prefix?, gateway, dns? }
+ *                     OR                 { iface?, mode: 'static', ip, subnet?, gateway, dns? }
  *                       (server→client)  { ok, error? }
  *
  *   system:reboot       (client→server)  —
@@ -23,11 +23,11 @@ export default function register(socket) {
 
   socket.on('system:network:set', async (opts = {}, cb) => {
     try {
-      const { iface = 'eth0', mode = 'static', ip, prefix, gateway, dns } = opts;
+      const { iface = 'eth0', mode = 'static', ip, subnet, gateway, dns } = opts;
       if (mode === 'dhcp') {
         await setDhcp(iface);
       } else {
-        await setStaticIp({ iface, ip, prefix, gateway, dns });
+        await setStaticIp({ iface, ip, subnet, gateway, dns });
       }
       cb?.({ ok: true });
     } catch (e) {

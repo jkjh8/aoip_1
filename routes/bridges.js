@@ -1,11 +1,6 @@
 import { Router } from 'express';
-import { readFileSync } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
 import { startBridges, stopBridges, getBridgeStatus } from '../lib/bridges.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const config = JSON.parse(readFileSync(join(__dirname, '../config/audio.json'), 'utf8'));
+import { getConfig } from '../lib/config.js';
 
 const router = Router();
 
@@ -17,7 +12,7 @@ router.get('/', (_req, res) => {
 // POST /bridges/start
 router.post('/start', (_req, res) => {
   try {
-    startBridges(config.bridges);
+    startBridges(getConfig().bridges);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

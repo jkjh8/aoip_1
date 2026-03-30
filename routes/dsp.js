@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { startGainer, stopGainer, isGainerRunning,
-         sendGain, sendMute, sendAllDsp } from '../lib/gainer.js';
+import { startDsp, stopDsp, isDspRunning,
+         sendGain, sendMute, sendAllDsp } from '../lib/dsp.js';
 import { connect, disconnect } from '../lib/jack.js';
 import { getInputSrcPorts, getOutputSinkPorts,
          getTotalInputCount, getTotalOutputCount, getChannels } from '../lib/channels.js';
@@ -32,7 +32,7 @@ router.get('/bypass', async (_req, res) => {
       }
     }
 
-    stopGainer();
+    stopDsp();
     await new Promise(r => setTimeout(r, 500));
 
     const results = [];
@@ -58,7 +58,7 @@ router.get('/restore', async (_req, res) => {
     const sinkPorts = getOutputSinkPorts();
     for (const { srcPort } of srcPorts)
       try { await disconnect(srcPort, srcPort); } catch { /* ignore */ }
-    startGainer(getTotalInputCount(), getTotalOutputCount());
+    startDsp(getTotalInputCount(), getTotalOutputCount());
     await new Promise(r => setTimeout(r, 1000));
     for (const { id, srcPort } of srcPorts)
       try { await connect(srcPort, `gainer:in_${id}`); } catch { /* ignore */ }
@@ -76,7 +76,7 @@ router.get('/restore', async (_req, res) => {
 
 // GET /gainer/status
 router.get('/status', (_req, res) => {
-  res.json({ running: isGainerRunning() });
+  res.json({ running: isDspRunning() });
 });
 
 export default router;

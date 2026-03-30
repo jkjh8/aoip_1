@@ -142,7 +142,7 @@
       "label": "USB IN 1",
       "jackPort": "gainer:out_3",
       "srcPort": "usb_gadget:out_1",
-      "gain": 93,
+      "gain": 100,
       "muted": false,
       "bypassDsp": true,
       "dsp": {
@@ -200,7 +200,7 @@
       "label": "USB IN 2",
       "jackPort": "gainer:out_4",
       "srcPort": "usb_gadget:out_2",
-      "gain": 93,
+      "gain": 100,
       "muted": false,
       "bypassDsp": true,
       "dsp": {
@@ -391,15 +391,15 @@
           },
           {
             "enabled": false,
-            "freq": 1259,
-            "gain": 0,
+            "freq": 1349,
+            "gain": -7.1,
             "q": 0.1,
             "type": "peak",
-            "b0": 1,
-            "b1": -1.0838399313750906,
-            "b2": 0.0987268665533182,
-            "a1": -1.0838399313750906,
-            "a2": 0.0987268665533182,
+            "b0": 0.6820876609348162,
+            "b1": -0.8480105205278569,
+            "b2": 0.17931808824721654,
+            "a1": -0.8480105205278569,
+            "a2": -0.13859425081796736,
             "bandType": "peak"
           },
           {
@@ -419,8 +419,8 @@
         "limiter": {
           "enabled": false,
           "threshold": -15,
-          "attack": 5,
-          "release": 50,
+          "attack": 0.1,
+          "release": 150,
           "makeup": 0
         }
       }
@@ -486,9 +486,9 @@
         ],
         "limiter": {
           "enabled": false,
-          "threshold": -29.5,
-          "attack": 5,
-          "release": 50,
+          "threshold": -15,
+          "attack": 0.1,
+          "release": 150,
           "makeup": 0
         }
       }
@@ -712,10 +712,6 @@
       "dst": "gainer:sin_2"
     },
     {
-      "src": "gainer:out_3",
-      "dst": "gainer:sin_1"
-    },
-    {
       "src": "gainer:out_1",
       "dst": "gainer:sin_5"
     },
@@ -732,8 +728,28 @@
       "dst": "gainer:sin_4"
     },
     {
+      "src": "gainer:out_5",
+      "dst": "gainer:sin_1"
+    },
+    {
+      "src": "gainer:out_3",
+      "dst": "gainer:sin_1"
+    },
+    {
+      "src": "gainer:out_6",
+      "dst": "gainer:sin_2"
+    },
+    {
       "src": "gainer:out_4",
       "dst": "gainer:sin_2"
+    },
+    {
+      "src": "gainer:out_3",
+      "dst": "gainer:sin_5"
+    },
+    {
+      "src": "gainer:out_4",
+      "dst": "gainer:sin_6"
     }
   ]
 }

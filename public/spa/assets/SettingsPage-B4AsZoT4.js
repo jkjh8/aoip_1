@@ -1,1 +1,0 @@
-import{T as e,s as t,u as n}from"./runtime-core.esm-bundler-DG33XdCd.js";import{t as r}from"./_plugin-vue_export-helper-0vLWKQyu.js";var i={},a={class:``};function o(r,i){return e(),n(`div`,a,[...i[0]||=[t(`h1`,null,`Settings`,-1),t(`p`,null,`Manage your application settings and configurations.`,-1)]])}var s=r(i,[[`render`,o]]);export{s as default};

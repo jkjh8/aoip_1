@@ -28,15 +28,19 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 
 
-#define MAX_CH       8
+#define MAX_CH       2
 #define RING_FRAMES  16384   /* must be power of 2 */
 
-typedef enum { PROTO_RAW = 0, PROTO_PCM } ProtoMode;
+typedef enum { PROTO_RAW = 0, PROTO_PCM, PROTO_RTP } ProtoMode;
 static ProtoMode g_proto = PROTO_RAW;
-static int       g_sample_rate_in = 48000;  /* input sample rate (PCM mode) */
+static int       g_sample_rate_in = 44100;  /* input sample rate (PCM/RTP mode) */
+static char      g_encoding_name[32] = "L16"; /* RTP encoding name (L24, L16, OPUS, ...) */
 
 /* ── ring buffer ─────────────────────────────────── */
 typedef struct {
@@ -83,11 +87,13 @@ static int ring_read(float *dst, int nframes)
 static jack_client_t  *g_jclient;
 static jack_port_t    *jports[MAX_CH];
 static int             g_ch      = 2;
-static int             g_rate    = 48000;
+static int             g_rate    = 44100;
 static int             g_buf_ms  = 100;   /* pre-fill target in ms */
 
 static volatile int    g_quit = 0;
 static volatile int    g_exit_code = 0;
+static int             g_auto_detect = 0;  /* 1 = AUTO 모드, 실시간 PT 감지 활성 */
+static atomic_int      g_prebuffered = 0;  /* 1 = pre-fill 완료, 재생 중 */
 static GstElement     *g_pipeline;
 
 static char            g_codec[64]  = "unknown";
@@ -103,17 +109,23 @@ static int jack_process(jack_nframes_t nframes, void *arg)
 {
     (void)arg;
     float tmp[4096 * MAX_CH];
-    /* wait until ring has at least g_buf_ms worth of frames before playing */
-    unsigned wp  = atomic_load_explicit(&ring.wp, memory_order_acquire);
-    unsigned rp  = atomic_load_explicit(&ring.rp, memory_order_relaxed);
-    int prefill  = (int)((float)g_buf_ms / 1000.0f * (float)g_rate);
-    if ((int)(wp - rp) < prefill) {
-        for (int c = 0; c < g_ch; c++) {
-            float *out = jack_port_get_buffer(jports[c], nframes);
-            memset(out, 0, nframes * sizeof(float));
+
+    unsigned wp = atomic_load_explicit(&ring.wp, memory_order_acquire);
+    unsigned rp = atomic_load_explicit(&ring.rp, memory_order_relaxed);
+    int available = (int)(wp - rp);
+
+    /* 아직 pre-fill 안 됐으면 무음 대기 */
+    if (!atomic_load_explicit(&g_prebuffered, memory_order_relaxed)) {
+        int prefill = (int)((float)g_buf_ms / 1000.0f * (float)g_rate);
+        if (available < prefill) {
+            for (int c = 0; c < g_ch; c++)
+                memset(jack_port_get_buffer(jports[c], nframes), 0, nframes * sizeof(float));
+            return 0;
         }
-        return 0;
+        atomic_store_explicit(&g_prebuffered, 1, memory_order_relaxed);
     }
+
+    /* pre-fill 완료 → underrun 전까지 계속 재생 */
     if (ring_read(tmp, (int)nframes)) {
         for (int c = 0; c < g_ch; c++) {
             float *out = jack_port_get_buffer(jports[c], nframes);
@@ -121,11 +133,11 @@ static int jack_process(jack_nframes_t nframes, void *arg)
                 out[f] = tmp[f * g_ch + c];
         }
     } else {
-        /* underrun → silence */
-        for (int c = 0; c < g_ch; c++) {
-            float *out = jack_port_get_buffer(jports[c], nframes);
-            memset(out, 0, nframes * sizeof(float));
-        }
+        /* 실제 underrun: 무음 출력 + pre-fill 재트리거 */
+        atomic_store_explicit(&g_prebuffered, 0, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_drops, 1, memory_order_relaxed);
+        for (int c = 0; c < g_ch; c++)
+            memset(jack_port_get_buffer(jports[c], nframes), 0, nframes * sizeof(float));
     }
     return 0;
 }
@@ -252,13 +264,17 @@ static void *stats_thread(void *arg)
         int has_data = (cur_udp != prev_udp);
         prev_udp = cur_udp;
 
-        /* no data this interval → clear sender info */
+        /* no data this interval → clear sender info + flush ring buffer */
         if (!has_data) {
             pthread_mutex_lock(&g_addr_mtx);
             g_src_ip[0] = '\0';
             g_src_port  = 0;
             pthread_mutex_unlock(&g_addr_mtx);
             snprintf(g_codec, sizeof(g_codec), "unknown");
+            /* 버퍼 비우기: rp를 wp로 이동, prebuffered 리셋 */
+            unsigned wp_now = atomic_load_explicit(&ring.wp, memory_order_acquire);
+            atomic_store_explicit(&ring.rp, wp_now, memory_order_release);
+            atomic_store_explicit(&g_prebuffered, 0, memory_order_relaxed);
         }
 
         /* sender address captured by pad probe */
@@ -292,21 +308,185 @@ static void on_signal(int sig)
 }
 
 /* ── main ─────────────────────────────────────────── */
+/* ── AUTO 모드: 실시간 PT 변경 감지 프로브 ───────────
+ * udpsrc src 패드에 상시 부착. PT가 바뀌면 stderr에
+ * "auto-codec: ENCODING RATE" 를 출력하고 exit 2로 종료.
+ * Node.js가 stderr을 파싱해 cfg 업데이트 후 즉시 재시작.
+ */
+static GstPadProbeReturn auto_pt_probe(GstPad *pad, GstPadProbeInfo *info, gpointer data)
+{
+    (void)pad; (void)data;
+    GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
+    if (!buf) return GST_PAD_PROBE_PASS;
+
+    GstMapInfo map;
+    if (!gst_buffer_map(buf, &map, GST_MAP_READ)) return GST_PAD_PROBE_PASS;
+
+    static uint8_t last_pt = 0xFF;
+    if (map.size < 12) { gst_buffer_unmap(buf, &map); return GST_PAD_PROBE_PASS; }
+
+    uint8_t pt = map.data[1] & 0x7F;
+    if (pt == last_pt) { gst_buffer_unmap(buf, &map); return GST_PAD_PROBE_PASS; }
+    last_pt = pt;
+
+    /* PT 변경 감지 → encoding 결정 */
+    char new_enc[32] = "";
+    int  new_rate    = g_sample_rate_in;
+
+    switch (pt) {
+        case 0:  snprintf(new_enc, sizeof(new_enc), "PCMU"); new_rate = 8000;  break;
+        case 8:  snprintf(new_enc, sizeof(new_enc), "PCMA"); new_rate = 8000;  break;
+        case 11: snprintf(new_enc, sizeof(new_enc), "L16");  new_rate = 44100; break;
+        case 14: snprintf(new_enc, sizeof(new_enc), "MPA");                    break;
+        default: {
+            /* Dynamic PT: 페이로드 스니핑 */
+            int cc = map.data[0] & 0x0F;
+            int has_ext = (map.data[0] >> 4) & 0x1;
+            int hdr = 12 + cc * 4;
+            if (has_ext && map.size >= (size_t)(hdr + 4)) {
+                int ew = (map.data[hdr+2] << 8) | map.data[hdr+3];
+                hdr += 4 + ew * 4;
+            }
+            if (hdr < (int)map.size) {
+                const uint8_t *pl = map.data + hdr;
+                int plen = (int)map.size - hdr;
+                if (plen >= 6 && pl[4] == 0xFF && (pl[5] & 0xE0) == 0xE0)
+                    snprintf(new_enc, sizeof(new_enc), "MPA");
+                else
+                    snprintf(new_enc, sizeof(new_enc), plen > 4000 ? "L24" : "L16");
+            }
+            break;
+        }
+    }
+
+    gst_buffer_unmap(buf, &map);
+
+    if (!new_enc[0]) return GST_PAD_PROBE_PASS;
+
+    /* 현재 설정과 다르면 → stderr 출력 후 재시작 트리거 */
+    if (strcmp(new_enc, g_encoding_name) != 0 || new_rate != g_sample_rate_in) {
+        fprintf(stderr, "[rtp_recv] auto-codec: %s %d\n", new_enc, new_rate);
+        fflush(stderr);
+        g_exit_code = 2;
+        g_quit      = 1;
+    }
+    return GST_PAD_PROBE_PASS;
+}
+
+/* ── RTP codec auto-detection ────────────────────────
+ * 파이프라인 시작 전에 UDP 소켓으로 첫 패킷을 스니핑.
+ * PT와 페이로드를 보고 g_encoding_name 을 결정한다.
+ * 타임아웃(3초) 내에 패킷이 없으면 기존 g_encoding_name 유지.
+ */
+static void detect_rtp_codec(int port)
+{
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) return;
+
+    int reuse = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
+
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 };  /* 100ms */
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons((uint16_t)port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return;
+    }
+
+    uint8_t buf[4096];
+    ssize_t len = recv(sock, buf, sizeof(buf), 0);
+    close(sock);
+
+    if (len < 12) return; /* RTP 헤더 최소 12바이트 */
+
+    uint8_t pt      = buf[1] & 0x7F;   /* payload type */
+    int     cc      = buf[0] & 0x0F;   /* CSRC count   */
+    int     has_ext = (buf[0] >> 4) & 0x1;
+
+    fprintf(stderr, "[rtp_recv] auto-detect: PT=%d\n", pt);
+
+    /* Static PT → 바로 결정 */
+    switch (pt) {
+        case 0:  snprintf(g_encoding_name, sizeof(g_encoding_name), "PCMU"); return;
+        case 8:  snprintf(g_encoding_name, sizeof(g_encoding_name), "PCMA"); return;
+        case 11: snprintf(g_encoding_name, sizeof(g_encoding_name), "L16");
+                 g_sample_rate_in = 44100; return;
+        case 14: snprintf(g_encoding_name, sizeof(g_encoding_name), "MPA");  return;
+        default: break;
+    }
+
+    /* Dynamic PT (96+) → 페이로드 내용으로 판별 */
+    int hdr = 12 + cc * 4;
+    if (has_ext && len > hdr + 4) {
+        int ext_words = (buf[hdr + 2] << 8) | buf[hdr + 3];
+        hdr += 4 + ext_words * 4;
+    }
+    if (hdr >= (int)len) return;
+
+    const uint8_t *payload     = buf + hdr;
+    int            payload_len = (int)len - hdr;
+
+    /* MPA(MP3): RFC 2250 — 4바이트 헤더 후 MPEG sync (0xFF 0xEx) */
+    if (payload_len >= 6) {
+        const uint8_t *mp = payload + 4;
+        if (mp[0] == 0xFF && (mp[1] & 0xE0) == 0xE0) {
+            snprintf(g_encoding_name, sizeof(g_encoding_name), "MPA");
+            fprintf(stderr, "[rtp_recv] auto-detect: MPA(MP3) from payload\n");
+            return;
+        }
+    }
+
+    /* L24 vs L16: 페이로드 크기로 추정
+     * L16 stereo 44100Hz 20ms = 44100*0.02*2*2 = 3528 bytes
+     * L24 stereo 48000Hz 20ms = 48000*0.02*2*3 = 5760 bytes
+     * 4000 bytes 기준으로 구분 */
+    if (payload_len > 4000) {
+        snprintf(g_encoding_name, sizeof(g_encoding_name), "L24");
+        g_sample_rate_in = 48000;
+        fprintf(stderr, "[rtp_recv] auto-detect: L24 (payload=%d)\n", payload_len);
+    } else {
+        snprintf(g_encoding_name, sizeof(g_encoding_name), "L16");
+        fprintf(stderr, "[rtp_recv] auto-detect: L16 (payload=%d)\n", payload_len);
+    }
+}
+
 int main(int argc, char *argv[])
 {
     gst_init(&argc, &argv);
     signal(SIGTERM, on_signal);
     signal(SIGINT,  on_signal);
 
-    int port = argc > 1 ? atoi(argv[1]) : 10001;
+    int port = argc > 1 ? atoi(argv[1]) : 5004;
     g_ch     = argc > 2 ? atoi(argv[2]) : 2;
 
-    /* argv[3]: protocol — raw (default) | rtp */
+    /* argv[3]: protocol — raw (default) | pcm | rtp */
     const char *proto_arg = argc > 3 ? argv[3] : "raw";
-    g_proto = (strcmp(proto_arg, "pcm") == 0) ? PROTO_PCM : PROTO_RAW;
+    if      (strcmp(proto_arg, "pcm") == 0) g_proto = PROTO_PCM;
+    else if (strcmp(proto_arg, "rtp") == 0) g_proto = PROTO_RTP;
+    else                                    g_proto = PROTO_RAW;
 
     g_sample_rate_in = argc > 6 ? atoi(argv[6]) : 48000;
     if (g_sample_rate_in <= 0) g_sample_rate_in = 48000;
+    /* argv[7]: RTP encoding name (AUTO, L16, L24, MPA, OPUS, PCMA, PCMU) */
+    if (g_proto == PROTO_RTP && argc > 7)
+        snprintf(g_encoding_name, sizeof(g_encoding_name), "%s", argv[7]);
+
+    /* AUTO: 시작 시 빠른 스니핑 시도 (이미 데이터가 오고 있으면 즉시 감지) */
+    if (g_proto == PROTO_RTP && strcmp(g_encoding_name, "AUTO") == 0) {
+        snprintf(g_encoding_name, sizeof(g_encoding_name), "L16"); /* fallback */
+        detect_rtp_codec(port);  /* 데이터 없으면 즉시 반환 (timeout=0) */
+        fprintf(stderr, "[rtp_recv] AUTO mode: using encoding=%s rate=%d\n",
+                g_encoding_name, g_sample_rate_in);
+        g_auto_detect = 1;  /* 실시간 PT 변경 감지 활성화 */
+    }
 
     char client_name[64];
     snprintf(client_name, sizeof(client_name), "%s", argc > 4 ? argv[4] : "rtp_in");
@@ -347,10 +527,14 @@ int main(int argc, char *argv[])
     }
 
     /* ── GStreamer pipeline ── */
-    const char *mode_str = g_proto == PROTO_PCM ? "pcm" : "raw";
+    const char *mode_str = g_proto == PROTO_PCM ? "pcm" :
+                           g_proto == PROTO_RTP  ? "rtp" : "raw";
     fprintf(stderr, "[rtp_recv] mode=%s\n", mode_str);
     if (g_proto == PROTO_PCM)
         fprintf(stderr, "[rtp_recv] input rate=%d\n", g_sample_rate_in);
+    if (g_proto == PROTO_RTP)
+        fprintf(stderr, "[rtp_recv] rtp encoding=%s clock-rate=%d\n",
+                g_encoding_name, g_sample_rate_in);
 
     GstElement *src      = gst_element_factory_make("udpsrc",        "src");
     GstElement *convert  = gst_element_factory_make("audioconvert",  "convert");
@@ -361,6 +545,7 @@ int main(int argc, char *argv[])
                            gst_element_factory_make("decodebin", "decode") : NULL;
 
     if (g_proto == PROTO_PCM) snprintf(g_codec, sizeof(g_codec), "pcm-s16le");
+    if (g_proto == PROTO_RTP) snprintf(g_codec, sizeof(g_codec), "%s", g_encoding_name);
 
     int ok = src && convert && resample && caps_flt && appsink;
     if (g_proto == PROTO_RAW) ok = ok && decode;
@@ -395,7 +580,74 @@ int main(int argc, char *argv[])
 
     /* pipeline assembly */
     int link_ok = 1;
-    if (g_proto == PROTO_PCM) {
+    if (g_proto == PROTO_RTP) {
+        /*
+         * PROTO_RTP: standard RTP (QSys, etc.)
+         *
+         * AUTO 모드: rtpjitterbuffer → decodebin  (static PT 자동 감지)
+         *   PT=14 MPA(MP3), PT=11 L16, PT=0 PCMU, PT=8 PCMA 등
+         *
+         * 명시 모드: rtpjitterbuffer → rtpXXXdepay [→ decodebin]
+         *   dynamic PT(96+) L24/L16/OPUS 등 직접 지정
+         */
+        GstElement *jitter = gst_element_factory_make("rtpjitterbuffer", "jitter");
+        if (!jitter) {
+            fprintf(stderr, "[rtp_recv] failed to create rtpjitterbuffer\n");
+            gst_object_unref(g_pipeline);
+            jack_client_close(g_jclient);
+            return 1;
+        }
+        g_object_set(jitter, "latency", (guint)g_buf_ms, NULL);
+
+        /* AUTO는 main()에서 이미 detect_rtp_codec()으로 g_encoding_name 결정됨 */
+        int rtp_needs_decode = (strcmp(g_encoding_name, "MPA")  == 0 ||
+                                strcmp(g_encoding_name, "OPUS") == 0);
+
+        const char *depay_name =
+            (strcmp(g_encoding_name, "L16")  == 0) ? "rtpL16depay"  :
+            (strcmp(g_encoding_name, "MPA")  == 0) ? "rtpmpadepay"  :
+            (strcmp(g_encoding_name, "OPUS") == 0) ? "rtpopusdepay" :
+            (strcmp(g_encoding_name, "PCMA") == 0) ? "rtppcmadepay" :
+            (strcmp(g_encoding_name, "PCMU") == 0) ? "rtppcmudepay" :
+                                                      "rtpL24depay"; /* default L24 */
+
+        GstElement *depay      = gst_element_factory_make(depay_name, "depay");
+        GstElement *rtp_decode = rtp_needs_decode ?
+                                 gst_element_factory_make("decodebin", "rtp_decode") : NULL;
+
+        if (!depay || (rtp_needs_decode && !rtp_decode)) {
+            fprintf(stderr, "[rtp_recv] failed to create depay element (%s)\n", depay_name);
+            gst_object_unref(g_pipeline);
+            jack_client_close(g_jclient);
+            return 1;
+        }
+
+        char ch_str[8];
+        snprintf(ch_str, sizeof(ch_str), "%d", g_ch);
+        GstCaps *rtp_caps = gst_caps_new_simple("application/x-rtp",
+            "media",           G_TYPE_STRING, "audio",
+            "clock-rate",      G_TYPE_INT,    g_sample_rate_in,
+            "encoding-name",   G_TYPE_STRING, g_encoding_name,
+            "encoding-params", G_TYPE_STRING, ch_str,
+            "channels",        G_TYPE_INT,    g_ch,
+            NULL);
+        g_object_set(src, "caps", rtp_caps, NULL);
+        gst_caps_unref(rtp_caps);
+
+        if (rtp_needs_decode) {
+            g_signal_connect(rtp_decode, "pad-added", G_CALLBACK(on_pad_added), convert);
+            gst_bin_add_many(GST_BIN(g_pipeline),
+                src, jitter, depay, rtp_decode, convert, resample, caps_flt, appsink, NULL);
+            link_ok = gst_element_link_many(src, jitter, depay, rtp_decode, NULL) &&
+                      gst_element_link_many(convert, resample, caps_flt, appsink, NULL);
+        } else {
+            gst_bin_add_many(GST_BIN(g_pipeline),
+                src, jitter, depay, convert, resample, caps_flt, appsink, NULL);
+            link_ok = gst_element_link_many(
+                src, jitter, depay, convert, resample, caps_flt, appsink, NULL);
+        }
+
+    } else if (g_proto == PROTO_PCM) {
         /*
          * PROTO_PCM (raw S16LE over UDP):
          * udpsrc caps(S16LE) → audioconvert → audioresample → capsfilter → appsink
@@ -437,11 +689,14 @@ int main(int argc, char *argv[])
 
     gst_element_set_state(g_pipeline, GST_STATE_PLAYING);
 
-    /* pad probe on udpsrc for sender address + UDP byte counting */
+    /* pad probes on udpsrc */
     {
         GstPad *src_pad = gst_element_get_static_pad(src, "src");
         if (src_pad) {
             gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, udp_probe, NULL, NULL);
+            /* AUTO 모드: PT 변경 실시간 감지 프로브 */
+            if (g_auto_detect)
+                gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, auto_pt_probe, NULL, NULL);
             gst_object_unref(src_pad);
         }
     }

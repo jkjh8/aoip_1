@@ -3,14 +3,15 @@ try { setPriority(-20); } catch { /* CAP_SYS_NICE 없으면 무시 */ }
 
 import express from 'express';
 import { createServer } from 'http';
-import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import httpLogger from 'morgan';
+import cookieParser from 'cookie-parser'
 
 import jackRoutes    from './routes/jack.js';
 import bridgesRoutes from './routes/bridges.js';
 import streamsRoutes from './routes/streams.js';
-import gainerRoutes  from './routes/gainer.js';
+import dspRoutes     from './routes/dsp.js';
 import systemRoutes  from './routes/system.js';
 
 import { setupSocket } from './socket/index.js';
@@ -27,11 +28,12 @@ import { getChannels, startMeters,
          getInputSrcPorts, getOutputSinkPorts,
          getTotalInputCount, getTotalOutputCount,
          getSavedRoutes }                            from './lib/channels.js';
-import { startGainer, sendGain, sendMute,
-         sendBypass, sendAllDsp }                    from './lib/gainer.js';
+import { startDsp, sendGain, sendMute,
+         sendBypass, sendAllDsp }                    from './lib/dsp.js';
+import { getConfig } from './lib/config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const config    = JSON.parse(readFileSync(join(__dirname, './config/audio.json'), 'utf8'));
+const config    = getConfig();
 
 const PORT = process.env.PORT ?? 3000;
 
@@ -39,6 +41,8 @@ const PORT = process.env.PORT ?? 3000;
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }))
+app.use(cookieParser())
 app.use((_req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -47,10 +51,12 @@ app.use((_req, res, next) => {
   next();
 });
 
+app.use(httpLogger('dev'))
+
 app.use('/jack',    jackRoutes);
 app.use('/bridges', bridgesRoutes);
 app.use('/streams', streamsRoutes);
-app.use('/gainer',  gainerRoutes);
+app.use('/dsp',     dspRoutes);
 app.use('/system',  systemRoutes);
 
 // ── SPA 정적 파일 서빙 ────────────────────────────────
@@ -88,7 +94,7 @@ async function startup() {
   const totalIn  = getTotalInputCount();
   const totalOut = getTotalOutputCount();
   logger.info('[startup] Starting gainer (in=%d out=%d, active in=%d out=%d)...', totalIn, totalOut, srcPorts.length, sinkPorts.length);
-  try { startGainer(totalIn, totalOut); } catch (e) { logger.warn('[startup] gainer:', e.message); }
+  try { startDsp(totalIn, totalOut); } catch (e) { logger.warn('[startup] gainer:', e.message); }
 
   logger.info('[startup] Starting ALSA bridges...');
   try { await startBridges(config.bridges); } catch (e) { logger.warn('[startup] bridges:', e.message); }

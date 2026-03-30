@@ -3,7 +3,7 @@ import { getPorts, getConnections, isJackRunning } from '../lib/jack.js';
 import { getBridgeStatus, getUsbGadgetEnabled }      from '../lib/bridges.js';
 import { getGstStatus, getRxStats, getRtpStreamStatus } from '../lib/gstreamer.js';
 import { getChannels }                              from '../lib/channels.js';
-import { getLimiterMeters }                         from '../lib/gainer.js';
+import { getLimiterMeters }                         from '../lib/dsp.js';
 
 import logger from '../lib/logger.js';
 import registerJack     from './jack.js';

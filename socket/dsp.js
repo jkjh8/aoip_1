@@ -1,5 +1,5 @@
 import { getChannels, setHpf, setEqBand, setLimiter } from '../lib/channels.js';
-import { isGainerRunning, sendHpf, sendEqCoeffs, sendLimiter } from '../lib/gainer.js';
+import { isDspRunning, sendHpf, sendEqCoeffs, sendLimiter } from '../lib/dsp.js';
 
 export default function register(socket, { io, getCached, limiterWatchers }) {
   const hpfTimers  = new Map();
@@ -11,14 +11,14 @@ export default function register(socket, { io, getCached, limiterWatchers }) {
       io.emit('channels', getChannels(getCached()));
       cb?.({ ok: true });
 
-      if (isGainerRunning()) {
+      if (isDspRunning()) {
         hpfPending.set(id, { id, params });
         clearTimeout(hpfTimers.get(id));
         hpfTimers.set(id, setTimeout(() => {
           hpfTimers.delete(id);
           const p = hpfPending.get(id);
           hpfPending.delete(id);
-          if (p && isGainerRunning()) sendHpf(p.id, p.params);
+          if (p && isDspRunning()) sendHpf(p.id, p.params);
         }, 60));
       }
     } catch (e) { cb?.({ ok: false, error: e.message }); }
@@ -33,7 +33,7 @@ export default function register(socket, { io, getCached, limiterWatchers }) {
       io.emit('channels', getChannels(getCached()));
       cb?.({ ok: true });
 
-      if (isGainerRunning()) {
+      if (isDspRunning()) {
         const key = `${type}:${id}:${band}`;
         eqPending.set(key, { type, id, band, params });
         clearTimeout(eqTimers.get(key));
@@ -41,7 +41,7 @@ export default function register(socket, { io, getCached, limiterWatchers }) {
           eqTimers.delete(key);
           const p = eqPending.get(key);
           eqPending.delete(key);
-          if (p && isGainerRunning())
+          if (p && isDspRunning())
             sendEqCoeffs(p.type === 'input' ? 'in' : 'out', p.id, p.band, p.params);
         }, 60));
       }
@@ -58,7 +58,7 @@ export default function register(socket, { io, getCached, limiterWatchers }) {
   socket.on('dsp:limiter', ({ id, ...params } = {}, cb) => {
     try {
       setLimiter(id, params);
-      if (isGainerRunning()) sendLimiter(id, params);
+      if (isDspRunning()) sendLimiter(id, params);
       io.emit('channels', getChannels(getCached()));
       cb?.({ ok: true });
     } catch (e) { cb?.({ ok: false, error: e.message }); }

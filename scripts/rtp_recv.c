@@ -41,6 +41,7 @@ typedef enum { PROTO_RAW = 0, PROTO_PCM, PROTO_RTP } ProtoMode;
 static ProtoMode g_proto = PROTO_RAW;
 static int       g_sample_rate_in = 44100;  /* input sample rate (PCM/RTP mode) */
 static char      g_encoding_name[32] = "L16"; /* RTP encoding name (L24, L16, OPUS, ...) */
+static char      g_bind_address[64]  = "0.0.0.0"; /* bind/multicast address */
 
 /* ── ring buffer ─────────────────────────────────── */
 typedef struct {
@@ -56,9 +57,14 @@ static void ring_write(const float *src, int nframes)
 {
     unsigned wp = atomic_load_explicit(&ring.wp, memory_order_relaxed);
     unsigned rp = atomic_load_explicit(&ring.rp, memory_order_acquire);
-    if ((int)(RING_FRAMES - (wp - rp)) < nframes) {
-        atomic_fetch_add_explicit(&ring.rp,
-            (unsigned)nframes, memory_order_release); /* discard oldest */
+    //if ((int)(RING_FRAMES - (wp - rp)) < nframes) {
+    //    atomic_fetch_add_explicit(&ring.rp,
+    //        (unsigned)nframes, memory_order_release); /* discard oldest */
+    //}
+    unsigned free = RING_FRAMES - (wp - rp);
+    if ((int)free < nframes) {
+        unsigned drop = nframes - free;
+        atomic_fetch_add_explicit(&ring.rp, drop, memory_order_release);
     }
     for (int i = 0; i < nframes; i++) {
         unsigned idx = (wp + i) & (RING_FRAMES - 1);
@@ -108,8 +114,8 @@ static pthread_mutex_t g_addr_mtx   = PTHREAD_MUTEX_INITIALIZER;
 static int jack_process(jack_nframes_t nframes, void *arg)
 {
     (void)arg;
-    float tmp[4096 * MAX_CH];
-
+    // float tmp[4096 * MAX_CH];
+    static float tmp[RING_FRAMES * MAX_CH];
     unsigned wp = atomic_load_explicit(&ring.wp, memory_order_acquire);
     unsigned rp = atomic_load_explicit(&ring.rp, memory_order_relaxed);
     int available = (int)(wp - rp);
@@ -336,7 +342,8 @@ static GstPadProbeReturn auto_pt_probe(GstPad *pad, GstPadProbeInfo *info, gpoin
     switch (pt) {
         case 0:  snprintf(new_enc, sizeof(new_enc), "PCMU"); new_rate = 8000;  break;
         case 8:  snprintf(new_enc, sizeof(new_enc), "PCMA"); new_rate = 8000;  break;
-        case 11: snprintf(new_enc, sizeof(new_enc), "L16");  new_rate = 44100; break;
+        case 10: snprintf(new_enc, sizeof(new_enc), "L16");  new_rate = 44100; break; /* L16/44100/2 stereo */
+        case 11: snprintf(new_enc, sizeof(new_enc), "L16");  new_rate = 44100; break; /* L16/44100/1 mono */
         case 14: snprintf(new_enc, sizeof(new_enc), "MPA");                    break;
         default: {
             /* Dynamic PT: 페이로드 스니핑 */
@@ -417,7 +424,9 @@ static void detect_rtp_codec(int port)
     switch (pt) {
         case 0:  snprintf(g_encoding_name, sizeof(g_encoding_name), "PCMU"); return;
         case 8:  snprintf(g_encoding_name, sizeof(g_encoding_name), "PCMA"); return;
-        case 11: snprintf(g_encoding_name, sizeof(g_encoding_name), "L16");
+        case 10: snprintf(g_encoding_name, sizeof(g_encoding_name), "L16");  /* L16/44100/2 stereo */
+                 g_sample_rate_in = 44100; return;
+        case 11: snprintf(g_encoding_name, sizeof(g_encoding_name), "L16");  /* L16/44100/1 mono */
                  g_sample_rate_in = 44100; return;
         case 14: snprintf(g_encoding_name, sizeof(g_encoding_name), "MPA");  return;
         default: break;
@@ -479,13 +488,15 @@ int main(int argc, char *argv[])
     if (g_proto == PROTO_RTP && argc > 7)
         snprintf(g_encoding_name, sizeof(g_encoding_name), "%s", argv[7]);
 
-    /* AUTO: 시작 시 빠른 스니핑 시도 (이미 데이터가 오고 있으면 즉시 감지) */
-    if (g_proto == PROTO_RTP && strcmp(g_encoding_name, "AUTO") == 0) {
-        snprintf(g_encoding_name, sizeof(g_encoding_name), "L16"); /* fallback */
-        detect_rtp_codec(port);  /* 데이터 없으면 즉시 반환 (timeout=0) */
-        fprintf(stderr, "[rtp_recv] AUTO mode: using encoding=%s rate=%d\n",
-                g_encoding_name, g_sample_rate_in);
-        g_auto_detect = 1;  /* 실시간 PT 변경 감지 활성화 */
+    /* RTP 모드: 항상 실시간 PT 변경 감지 활성화 (MPA→PCM 등 전환 감지) */
+    if (g_proto == PROTO_RTP) {
+        g_auto_detect = 1;
+        if (strcmp(g_encoding_name, "AUTO") == 0) {
+            snprintf(g_encoding_name, sizeof(g_encoding_name), "L16"); /* fallback */
+            detect_rtp_codec(port);  /* 데이터 없으면 즉시 반환 (timeout=100ms) */
+            fprintf(stderr, "[rtp_recv] AUTO mode: using encoding=%s rate=%d\n",
+                    g_encoding_name, g_sample_rate_in);
+        }
     }
 
     char client_name[64];
@@ -493,6 +504,10 @@ int main(int argc, char *argv[])
     g_buf_ms = argc > 5 ? atoi(argv[5]) : 100;
     if (g_buf_ms < 10)  g_buf_ms = 10;
     if (g_buf_ms > 500) g_buf_ms = 500;
+
+    /* argv[8]: bind/multicast address (default 0.0.0.0) */
+    if (argc > 8 && argv[8][0] != '\0')
+        snprintf(g_bind_address, sizeof(g_bind_address), "%s", argv[8]);
 
     /* ring buffer init */
     memset(&ring, 0, sizeof(ring));
@@ -557,7 +572,10 @@ int main(int argc, char *argv[])
 
     g_pipeline = gst_pipeline_new("rtp_recv");
 
-    g_object_set(src, "port", port, "retrieve-sender-address", TRUE, NULL);
+    /* multicast: address="239.x.x.x" joins that group; unicast: "0.0.0.0" binds all ifaces */
+    g_object_set(src, "port", port, "address", g_bind_address,
+                 "retrieve-sender-address", TRUE, NULL);
+    fprintf(stderr, "[rtp_recv] udpsrc port=%d address=%s\n", port, g_bind_address);
 
     /* capsfilter: JACK용 F32LE interleaved */
     GstCaps *caps = gst_caps_new_simple("audio/x-raw",

@@ -131,19 +131,20 @@ export default function register(socket, { broadcastStatus, config }) {
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 
-  /* rtp_in 설정 변경 (port, protocol[raw|pcm], sampleRate, bufferMs) — 재시작 */
-  socket.on('rtp:in:config', ({ client, port, protocol, sampleRate, codec, bufferMs } = {}, cb) => {
+  /* rtp_in 설정 변경 — 저장만, 재시작 안 함 (시작은 rtp:stream:start로) */
+  socket.on('rtp:in:config', ({ client, port, protocol, address, sampleRate, codec, bufferMs } = {}, cb) => {
     try {
       if (!client) return cb?.({ ok: false, error: 'client required' });
       const updates = {};
       if (port       != null) updates.port       = Number(port);
       if (protocol   != null) updates.protocol   = protocol;
+      if (address    != null) updates.address    = address;
       if (sampleRate != null) updates.sampleRate = Number(sampleRate);
       if (codec      != null) updates.codec      = codec;
       if (bufferMs   != null) updates.bufferMs   = Number(bufferMs);
       updateRtpInConfig(client, updates);
       broadcastStatus();
-      cb?.({ ok: true });
+      cb?.({ ok: true, stream: getRtpStreamDetail(client) });
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 
@@ -168,10 +169,22 @@ export default function register(socket, { broadcastStatus, config }) {
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 
-  /* 개별 스트림 시작 */
-  socket.on('rtp:stream:start', ({ client } = {}, cb) => {
+  /* 개별 스트림 시작 — 시작 시 설정값을 함께 전달 가능 (rtp_in 전용) */
+  socket.on('rtp:stream:start', ({ client, port, protocol, address, sampleRate, codec, bufferMs,
+                                   channels, targets } = {}, cb) => {
     try {
       if (!client) return cb?.({ ok: false, error: 'client required' });
+      /* 설정값이 함께 오면 먼저 업데이트 */
+      const updates = {};
+      if (port       != null) updates.port       = Number(port);
+      if (protocol   != null) updates.protocol   = protocol;
+      if (address    != null) updates.address    = address;
+      if (sampleRate != null) updates.sampleRate = Number(sampleRate);
+      if (codec      != null) updates.codec      = codec;
+      if (bufferMs   != null) updates.bufferMs   = Number(bufferMs);
+      if (channels   != null) updates.channels   = Number(channels);
+      if (targets    != null) updates.targets    = targets;
+      if (Object.keys(updates).length > 0) updateRtpInConfig(client, updates);
       startRtpStream(client);
       broadcastStatus();
       cb?.({ ok: true });

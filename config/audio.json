@@ -40,10 +40,11 @@
       "port": 5004,
       "channels": 2,
       "protocol": "rtp",
-      "rtpEncoding": "MPA",
+      "rtpEncoding": "L16",
       "bufferMs": 100,
       "enabled": true,
-      "sampleRate": 44100
+      "sampleRate": 44100,
+      "address": "239.255.112.1"
     },
     {
       "type": "rtp_out",
@@ -51,10 +52,16 @@
       "client": "rtp_out_1",
       "channels": 2,
       "protocol": "rtp",
-      "codec": "raw",
+      "codec": "mp3",
       "sampleRate": 44100,
-      "targets": [],
-      "enabled": true
+      "targets": [
+        {
+          "host": "192.168.10.146",
+          "port": 12345
+        }
+      ],
+      "enabled": true,
+      "bitrate": 192
     }
   ]
 }

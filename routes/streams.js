@@ -1,97 +1,121 @@
 import { Router } from 'express';
 import { getConfig } from '../lib/config.js';
 import {
-  startRxPipeline,
-  stopRxPipeline,
-  isRxRunning,
-  setRxPort,
-  getRxPort,
-  startTxPipeline,
-  stopTxPipeline,
-  isTxRunning,
-  addTxTarget,
-  removeTxTarget,
-  getGstStatus
+  startRxPipeline, stopRxPipeline, isRxRunning,
+  startTxClient, stopTxClient, isTxRunning,
+  getGstStatus,
+  getRtpStreamStatus, getRtpStreamDetail,
+  startRtpStream, stopRtpStream,
+  updateRtpInConfig,
+  addRtpOutTarget, removeRtpOutTarget, setRtpOutCodec,
 } from '../lib/gstreamer.js';
-
 
 const router = Router();
 
-// GET /streams — overall GStreamer status
+// GET /streams
 router.get('/', (_req, res) => {
   res.json(getGstStatus());
 });
 
-// ── RX ──────────────────────────────────────
+// ── RX (legacy) ──────────────────────────────────────
 
-// POST /streams/rx/start
 router.post('/rx/start', (_req, res) => {
-  if (isRxRunning()) {
-    return res.status(409).json({ error: 'rx pipeline already running' });
-  }
-  startRxPipeline(getConfig().rtp.input);
+  if (isRxRunning()) return res.status(409).json({ error: 'rx pipeline already running' });
+  startRxPipeline(getConfig().rtp?.input ?? {});
   res.json({ ok: true });
 });
 
-// POST /streams/rx/stop
 router.post('/rx/stop', (_req, res) => {
   stopRxPipeline();
   res.json({ ok: true });
 });
 
-// GET /streams/rx/port
-router.get('/rx/port', (_req, res) => {
-  res.json({ port: getRxPort() });
-});
+// ── TX (legacy) ──────────────────────────────────────
 
-// PUT /streams/rx/port  { port }  — change port (restarts pipeline if running)
-router.put('/rx/port', (req, res) => {
-  const { port } = req.body ?? {};
-  if (!port || isNaN(Number(port))) {
-    return res.status(400).json({ error: 'port is required' });
-  }
-  const wasRunning = isRxRunning();
-  if (wasRunning) stopRxPipeline();
-  setRxPort(port);
-  if (wasRunning) startRxPipeline({});
-  res.json({ ok: true, port: getRxPort(), restarted: wasRunning });
-});
-
-// ── TX ──────────────────────────────────────
-
-// POST /streams/tx/start  — start with current configured targets
 router.post('/tx/start', (_req, res) => {
-  if (isTxRunning()) {
-    return res.status(409).json({ error: 'tx pipeline already running' });
-  }
-  startTxPipeline(getConfig().rtp.outputs);
+  if (isTxRunning()) return res.status(409).json({ error: 'tx pipeline already running' });
+  startTxClient();
   res.json({ ok: true });
 });
 
-// POST /streams/tx/stop
 router.post('/tx/stop', (_req, res) => {
-  stopTxPipeline();
+  stopTxClient();
   res.json({ ok: true });
 });
 
-// POST /streams/tx/targets  { host, port }  — add a target (rebuilds pipeline)
-router.post('/tx/targets', (req, res) => {
-  const { host, port } = req.body ?? {};
-  if (!host || !port) {
-    return res.status(400).json({ error: 'host and port are required' });
-  }
-  addTxTarget({ host, port: Number(port) });
-  res.json({ ok: true, targets: getGstStatus().tx.targets });
+// ── rtp_streams ──────────────────────────────────────
+
+// GET /streams/rtp — 전체 목록
+router.get('/rtp', (_req, res) => {
+  res.json({ ok: true, streams: getRtpStreamStatus() });
 });
 
-// DELETE /streams/tx/targets  { host, port }  — remove a target (rebuilds pipeline)
-router.delete('/tx/targets', (req, res) => {
+// GET /streams/rtp/:client — 스트림 상세
+router.get('/rtp/:client', (req, res) => {
+  const detail = getRtpStreamDetail(req.params.client);
+  if (!detail) return res.status(404).json({ error: `stream ${req.params.client} not found` });
+  res.json({ ok: true, stream: detail });
+});
+
+router.post('/rtp/:client/start', (req, res) => {
+  const { client } = req.params;
+  try {
+    const { port, protocol, address, sampleRate, codec, bufferMs, channels, targets, bitrate } = req.body ?? {};
+    const updates = {};
+    if (port       != null) updates.port       = Number(port);
+    if (protocol   != null) updates.protocol   = protocol;
+    if (address    != null) updates.address    = address;
+    if (sampleRate != null) updates.sampleRate = Number(sampleRate);
+    if (codec      != null) updates.codec      = codec;
+    if (bitrate    != null) updates.bitrate    = Number(bitrate);
+    if (bufferMs   != null) updates.bufferMs   = Number(bufferMs);
+    if (channels   != null) updates.channels   = Number(channels);
+    if (targets    != null) updates.targets    = targets;
+    if (Object.keys(updates).length > 0) updateRtpInConfig(client, updates);
+    startRtpStream(client);
+    res.json({ ok: true, stream: getRtpStreamDetail(client) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// POST /streams/rtp/:client/stop
+router.post('/rtp/:client/stop', (req, res) => {
+  try {
+    stopRtpStream(req.params.client);
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// POST /streams/rtp/:client/targets  { host, port } — rtp_out 전송 대상 추가
+router.post('/rtp/:client/targets', (req, res) => {
+  const { client } = req.params;
   const { host, port } = req.body ?? {};
-  if (!host || !port) {
-    return res.status(400).json({ error: 'host and port are required' });
-  }
-  removeTxTarget({ host, port: Number(port) });
-  res.json({ ok: true, targets: getGstStatus().tx.targets });
+  if (!host || !port) return res.status(400).json({ error: 'host and port required' });
+  try {
+    addRtpOutTarget(client, host, Number(port));
+    res.json({ ok: true, stream: getRtpStreamDetail(client) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// DELETE /streams/rtp/:client/targets  { host, port } — rtp_out 전송 대상 제거
+router.delete('/rtp/:client/targets', (req, res) => {
+  const { client } = req.params;
+  const { host, port } = req.body ?? {};
+  if (!host || !port) return res.status(400).json({ error: 'host and port required' });
+  try {
+    removeRtpOutTarget(client, host, Number(port));
+    res.json({ ok: true, stream: getRtpStreamDetail(client) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// PUT /streams/rtp/:client/codec  { codec, bitrate } — rtp_out 코덱 변경
+router.put('/rtp/:client/codec', (req, res) => {
+  const { client } = req.params;
+  const { codec, bitrate } = req.body ?? {};
+  if (!codec) return res.status(400).json({ error: 'codec required' });
+  try {
+    setRtpOutCodec(client, codec, bitrate ? Number(bitrate) : undefined);
+    res.json({ ok: true, stream: getRtpStreamDetail(client) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 export default router;

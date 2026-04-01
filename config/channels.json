@@ -704,10 +704,6 @@
   ],
   "routing": [
     {
-      "src": "gainer:out_2",
-      "dst": "gainer:sin_2"
-    },
-    {
       "src": "gainer:out_1",
       "dst": "gainer:sin_5"
     },

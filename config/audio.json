@@ -12,7 +12,7 @@
       "name": "USB Audio IN",
       "device": "hw:UAC2Gadget",
       "rate": 48000,
-      "period": 256,
+      "period": 512,
       "periods": 4,
       "channels": 2,
       "quality": 4,
@@ -24,7 +24,7 @@
       "name": "USB Audio OUT",
       "device": "hw:UAC2Gadget",
       "rate": 48000,
-      "period": 256,
+      "period": 512,
       "periods": 4,
       "channels": 2,
       "quality": 4,
@@ -54,12 +54,7 @@
       "protocol": "rtp",
       "codec": "mp3",
       "sampleRate": 44100,
-      "targets": [
-        {
-          "host": "192.168.10.146",
-          "port": 12345
-        }
-      ],
+      "targets": [],
       "enabled": true,
       "bitrate": 192
     }

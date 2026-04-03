@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { getNetworkInfo, setStaticIp, setDhcp, rebootSystem } from '../lib/system.js';
 import { getConfig, saveConfig } from '../lib/config.js';
+import { setUsbGadgetEnabled, getUsbGadgetEnabled, isUdcConnected, restartUsbBridges } from '../lib/bridges.js';
 
 const router = Router();
 
@@ -39,19 +40,34 @@ router.get('/usb', (_req, res) => {
     return res.status(404).json({ error: 'USB gadget bridge config not found' });
   }
   const period = usbCfgs[0].period ?? config.jack?.period ?? 256;
-  res.json({ period });
+  res.json({ period, enabled: getUsbGadgetEnabled() });
 });
 
-// POST /system/usb/period — 재부팅 시 적용
+// GET /system/usb/enabled
+router.get('/usb/enabled', (_req, res) => {
+  res.json({ enabled: getUsbGadgetEnabled(), connected: isUdcConnected() });
+});
+
+// POST /system/usb/enabled  { enabled: boolean }
+router.post('/usb/enabled', async (req, res) => {
+  try {
+    const { enabled } = req.body ?? {};
+    await setUsbGadgetEnabled(Boolean(enabled));
+    res.json({ ok: true, enabled: Boolean(enabled) });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+// POST /system/usb/period — 즉시 적용 (브릿지 재시작)
 router.post('/usb/period', async (req, res) => {
   try {
     const { period } = req.body ?? {};
-    console.log('Setting USB gadget period to', period);
     const config = getConfig();
     let updated = false;
     for (const b of (config.bridges ?? [])) {
       if (b.usb_gadget) {
-        b.period = period;
+        b.period = Number(period);
         updated = true;
       }
     }
@@ -59,6 +75,7 @@ router.post('/usb/period', async (req, res) => {
       return res.status(404).json({ error: 'USB gadget bridge config not found' });
     }
     saveConfig();
+    restartUsbBridges();
     res.json({ ok: true, period: Number(period) });
   } catch (e) {
     res.status(400).json({ ok: false, error: e.message });

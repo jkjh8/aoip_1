@@ -1,0 +1,1 @@
+import{A as e,s as t,u as n}from"./runtime-core.esm-bundler-CNDTM5O3.js";import{t as r}from"./_plugin-vue_export-helper-0vLWKQyu.js";var i={},a={class:``};function o(r,i){return e(),n(`div`,a,[...i[0]||=[t(`h1`,null,`Devices`,-1),t(`p`,null,`Manage your audio interfaces and their configurations.`,-1)]])}var s=r(i,[[`render`,o]]);export{s as default};

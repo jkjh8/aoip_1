@@ -1,9 +1,10 @@
 import { Server as SocketIO } from 'socket.io';
 import { getPorts, getConnections, isJackRunning } from '../lib/jack.js';
-import { getBridgeStatus, getUsbGadgetEnabled }      from '../lib/bridges.js';
+import { getBridgeStatus, getUsbGadgetEnabled, isUdcConnected } from '../lib/bridges.js';
 import { getGstStatus, getRxStats, getRtpStreamStatus } from '../lib/gstreamer.js';
 import { getChannels }                              from '../lib/channels.js';
 import { getLimiterMeters }                         from '../lib/dsp.js';
+import { getDaemonStatus }                          from '../lib/aes67daemon.js';
 
 import logger from '../lib/logger.js';
 import registerJack     from './jack.js';
@@ -13,11 +14,14 @@ import registerChannels from './channels.js';
 import registerDsp      from './dsp.js';
 import registerUsb      from './usb.js';
 import registerSystem   from './system.js';
+import registerAes67    from './aes67.js';
 
 const STATUS_INTERVAL = 2000;
+const AES67_INTERVAL  = 10000;  // aes67 상태는 10초마다 (execAsync fork 최소화)
 const LEVEL_INTERVAL  = 80;   // ~12 fps
 
 let cachedConnections = [];
+let cachedAes67Status = { running: false, ready: false, url: 'http://127.0.0.1:8080' };
 const limiterWatchers = new Map();   // socketId → Set<chId>
 
 function watchedChannels() {
@@ -39,9 +43,17 @@ async function snapshot() {
     streams:  { ...getGstStatus(), rtpStreams: getRtpStreamStatus() },
     rxStats:  getRxStats(),
     channels: getChannels(connections),
-    usb:      { enabled: getUsbGadgetEnabled() }
+    usb:      { enabled: getUsbGadgetEnabled(), connected: isUdcConnected() },
+    aes67:    cachedAes67Status,
   };
 }
+
+// aes67 상태는 별도 느린 타이머로만 갱신 (execAsync fork가 RT 스레드 방해 방지)
+async function refreshAes67Status() {
+  try { cachedAes67Status = await getDaemonStatus(); } catch { /* ignore */ }
+}
+refreshAes67Status();
+setInterval(refreshAes67Status, AES67_INTERVAL);
 
 /**
  * Socket.IO 서버를 초기화하고 이벤트 핸들러를 등록합니다.
@@ -106,6 +118,7 @@ export function setupSocket(httpServer, config) {
     registerDsp(socket, ctx);
     registerUsb(socket, ctx);
     registerSystem(socket);
+    registerAes67(socket, ctx);
   });
 
   return { io, broadcastStatus };

@@ -195,6 +195,7 @@ typedef enum {
     CMD_BYPASS,
     CMD_HPF_ENABLE,
     CMD_HPF_COEFFS,
+    CMD_HPF_STAGES,
     CMD_EQ_ENABLE,
     CMD_EQ_COEFFS,
     CMD_LIMITER_ENABLE,
@@ -254,7 +255,8 @@ typedef struct {
 
     /* HPF (input channels only) */
     int    hpf_enabled;
-    Biquad hpf;
+    int    hpf_stages;   /* 1 = 12dB/oct, 2 = 24dB/oct */
+    Biquad hpf[2];
 
     /* Parametric EQ */
     int    eq_enabled[MAX_EQ_BANDS];
@@ -298,8 +300,11 @@ static void apply_cmd(const Cmd *cmd) {
     case CMD_HPF_ENABLE:
         ch->hpf_enabled = cmd->flag;
         break;
+    case CMD_HPF_STAGES:
+        ch->hpf_stages = cmd->flag;
+        break;
     case CMD_HPF_COEFFS: {
-        Biquad *bq = &ch->hpf;
+        Biquad *bq = &ch->hpf[cmd->band];  /* band: 0 or 1 */
         bq->b0 = cmd->coeffs.b0; bq->b1 = cmd->coeffs.b1; bq->b2 = cmd->coeffs.b2;
         bq->a1 = cmd->coeffs.a1; bq->a2 = cmd->coeffs.a2;
         break;
@@ -356,9 +361,12 @@ static void process_channel(Channel *ch, jack_nframes_t nframes, int is_input) {
                 if (peak > g_out_level[idx]) g_out_level[idx] = peak;
             }
         } else {
-            /* HPF (input only) */
-            if (is_input && ch->hpf_enabled)
-                s = bq_process(&ch->hpf, s);
+            /* HPF */
+            if (ch->hpf_enabled) {
+                s = bq_process(&ch->hpf[0], s);
+                if (ch->hpf_stages > 1)
+                    s = bq_process(&ch->hpf[1], s);
+            }
 
             /* Parametric EQ */
             for (int b = 0; b < MAX_EQ_BANDS; b++)
@@ -450,6 +458,7 @@ static void *reporter_thread(void *arg) {
 /* Per-channel raw parameters — used to recompute coefficients */
 typedef struct {
     float   hpf_freq;
+    int     hpf_slope;  /* 12 or 24 (dB/oct) */
     struct  { float freq, gain_db, q; EqType type; } eq[MAX_EQ_BANDS];
     struct  { float threshold_db, attack_ms, release_ms, makeup_db; } lim;
 } ChState;
@@ -502,7 +511,7 @@ static void cmd_loop(void) {
             cmd.flag = atoi(tok[3]);
             ring_push(&cmd);
 
-        /* hpf in <ch> enable|freq <val> */
+        /* hpf in <ch> enable|freq|slope <val> */
         } else if (!strcmp(verb, "hpf") && n >= 5) {
             const char *param = tok[3];
             if (!strcmp(param, "enable")) {
@@ -513,9 +522,28 @@ static void cmd_loop(void) {
                 cs->hpf_freq = (float)atof(tok[4]);
                 BqCoeffs c;
                 calc_hpf(&c, cs->hpf_freq, g_sr);
-                cmd.type   = CMD_HPF_COEFFS;
-                cmd.coeffs = c;
+                cmd.type = CMD_HPF_COEFFS; cmd.band = 0; cmd.coeffs = c;
                 ring_push(&cmd);
+                if (cs->hpf_slope >= 24) {
+                    cmd.band = 1;
+                    ring_push(&cmd);
+                }
+            } else if (!strcmp(param, "slope")) {
+                cs->hpf_slope = atoi(tok[4]);
+                int stages = (cs->hpf_slope >= 24) ? 2 : 1;
+                cmd.type = CMD_HPF_STAGES; cmd.flag = stages;
+                ring_push(&cmd);
+                /* 기울기 변경 시 계수 재계산 */
+                if (cs->hpf_freq > 0.0f) {
+                    BqCoeffs c;
+                    calc_hpf(&c, cs->hpf_freq, g_sr);
+                    cmd.type = CMD_HPF_COEFFS; cmd.band = 0; cmd.coeffs = c;
+                    ring_push(&cmd);
+                    if (stages > 1) {
+                        cmd.band = 1;
+                        ring_push(&cmd);
+                    }
+                }
             }
 
         /* eq in|out <ch> <band> enable|freq|gain|q|type|coeffs <val...> */
@@ -611,7 +639,9 @@ int main(int argc, char *argv[]) {
 
     /* Default per-channel state */
     for (int i = 0; i < g_n_in; i++) {
-        g_in_state[i].hpf_freq = 80.0f;
+        g_in_state[i].hpf_freq  = 80.0f;
+        g_in_state[i].hpf_slope = 12;
+        g_inputs[i].hpf_stages  = 1;
         for (int b = 0; b < MAX_EQ_BANDS; b++) {
             g_in_state[i].eq[b].freq    = 100.0f;
             g_in_state[i].eq[b].gain_db = 0.0f;
@@ -622,6 +652,9 @@ int main(int argc, char *argv[]) {
         g_inputs[i].lim.gr   = 1.0f;
     }
     for (int i = 0; i < g_n_out; i++) {
+        g_out_state[i].hpf_freq  = 80.0f;
+        g_out_state[i].hpf_slope = 12;
+        g_outputs[i].hpf_stages  = 1;
         for (int b = 0; b < MAX_EQ_BANDS; b++) {
             g_out_state[i].eq[b].freq    = 100.0f;
             g_out_state[i].eq[b].gain_db = 0.0f;

@@ -1,8 +1,9 @@
 {
   "jack": {
     "device": "hw:sndrpiaoip8",
+    "name": "Analog",
     "rate": 48000,
-    "period": 256,
+    "period": 128,
     "periods": 3,
     "channels": 2
   },
@@ -30,6 +31,16 @@
       "quality": 4,
       "usb_gadget": true,
       "enabled": true
+    },
+    {
+      "type": "ravenna",
+      "device": "hw:RAVENNA",
+      "name": "AES67",
+      "rate": 48000,
+      "period": 48,
+      "periods": 3,
+      "channels": 2,
+      "enabled": true
     }
   ],
   "rtp_streams": [
@@ -37,7 +48,7 @@
       "type": "rtp_in",
       "name": "Stream IN",
       "client": "rtp_in_1",
-      "port": 5004,
+      "port": 3030,
       "channels": 2,
       "protocol": "rtp",
       "rtpEncoding": "L16",
@@ -52,9 +63,18 @@
       "client": "rtp_out_1",
       "channels": 2,
       "protocol": "rtp",
-      "codec": "mp3",
+      "codec": "raw",
       "sampleRate": 44100,
-      "targets": [],
+      "targets": [
+        {
+          "host": "192.168.10.146",
+          "port": 12345
+        },
+        {
+          "host": "10.20.0.193",
+          "port": 5004
+        }
+      ],
       "enabled": true,
       "bitrate": 192
     }

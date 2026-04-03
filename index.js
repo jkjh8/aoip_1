@@ -13,6 +13,7 @@ import bridgesRoutes from './routes/bridges.js';
 import streamsRoutes from './routes/streams.js';
 import dspRoutes     from './routes/dsp.js';
 import systemRoutes  from './routes/system.js';
+import aes67Routes   from './routes/aes67.js';
 
 import { setupSocket } from './socket/index.js';
 import logger from './lib/logger.js';
@@ -58,6 +59,7 @@ app.use('/bridges', bridgesRoutes);
 app.use('/streams', streamsRoutes);
 app.use('/dsp',     dspRoutes);
 app.use('/system',  systemRoutes);
+app.use('/aes67',   aes67Routes);
 
 // ── SPA 정적 파일 서빙 ────────────────────────────────
 const SPA_DIR = join(__dirname, 'public/spa');
@@ -140,7 +142,7 @@ async function startup() {
   }
 
   logger.info('[startup] Connecting src → gainer inputs...');
-  for (const { id, srcPort } of srcPorts) {
+  for (const { id, srcPort, noRetry } of srcPorts) {
     let src = srcPort;
     // rtp_in 포트: config의 `client:out_N` 대신 실제 등록된 포트명 사용
     const m = src.match(/^([^:]+):out_(\d+)$/);
@@ -148,12 +150,12 @@ async function startup() {
       const actual = rtpPortMap.get(m[1])[Number(m[2]) - 1];
       if (actual) src = actual;
     }
-    await connectWithRetry(src, `gainer:in_${id}`);
+    await connectWithRetry(src, `gainer:in_${id}`, noRetry ? 1 : 5);
   }
 
   logger.info('[startup] Connecting gainer outputs → sinks...');
-  for (const { id, sinkPort } of sinkPorts)
-    await connectWithRetry(`gainer:sout_${id}`, sinkPort);
+  for (const { id, sinkPort, noRetry } of sinkPorts)
+    await connectWithRetry(`gainer:sout_${id}`, sinkPort, noRetry ? 1 : 5);
 
   // 저장된 라우팅 매트릭스 복원 — 현재 활성 채널의 포트만 연결
   const savedRoutes = getSavedRoutes();

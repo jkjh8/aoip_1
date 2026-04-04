@@ -896,11 +896,19 @@
       "dst": "gainer:sin_4"
     },
     {
-      "src": "gainer:out_7",
+      "src": "gainer:out_6",
+      "dst": "gainer:sin_2"
+    },
+    {
+      "src": "gainer:out_5",
       "dst": "gainer:sin_1"
     },
     {
-      "src": "gainer:out_8",
+      "src": "gainer:out_1",
+      "dst": "gainer:sin_1"
+    },
+    {
+      "src": "gainer:out_2",
       "dst": "gainer:sin_2"
     }
   ]

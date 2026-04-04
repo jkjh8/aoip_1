@@ -1,6 +1,6 @@
 {
   "jack": {
-    "device": "hw:sndrpiaoip8",
+    "device": "hw:aoip",
     "name": "Analog",
     "rate": 48000,
     "period": 128,

@@ -11,7 +11,7 @@
       "dsp": {
         "hpf": {
           "enabled": false,
-          "freq": 398,
+          "freq": 80,
           "type": "output",
           "slope": 12,
           "coeffs": []
@@ -79,7 +79,7 @@
       "dsp": {
         "hpf": {
           "enabled": false,
-          "freq": 534,
+          "freq": 80,
           "type": "output",
           "slope": 12
         },
@@ -432,7 +432,7 @@
       "dsp": {
         "eq": [
           {
-            "enabled": true,
+            "enabled": false,
             "b0": 1,
             "b1": -1.9813040347772235,
             "b2": 0.9814737924440637,
@@ -444,7 +444,7 @@
             "q": 0.7
           },
           {
-            "enabled": true,
+            "enabled": false,
             "b0": 1,
             "b1": -1.7565673051433217,
             "b2": 0.7827134057449302,
@@ -524,7 +524,7 @@
             "q": 0.7
           },
           {
-            "enabled": true,
+            "enabled": false,
             "b0": 1,
             "b1": -1.6413274590094986,
             "b2": 0.6957109893981736,
@@ -896,19 +896,51 @@
       "dst": "gainer:sin_4"
     },
     {
-      "src": "gainer:out_6",
+      "src": "gainer:out_2",
+      "dst": "gainer:sin_2"
+    },
+    {
+      "src": "gainer:out_8",
       "dst": "gainer:sin_2"
     },
     {
       "src": "gainer:out_5",
-      "dst": "gainer:sin_1"
+      "dst": "gainer:sin_7"
+    },
+    {
+      "src": "gainer:out_6",
+      "dst": "gainer:sin_8"
+    },
+    {
+      "src": "gainer:out_1",
+      "dst": "gainer:sin_5"
+    },
+    {
+      "src": "gainer:out_2",
+      "dst": "gainer:sin_6"
+    },
+    {
+      "src": "gainer:out_1",
+      "dst": "gainer:sin_7"
+    },
+    {
+      "src": "gainer:out_2",
+      "dst": "gainer:sin_8"
     },
     {
       "src": "gainer:out_1",
       "dst": "gainer:sin_1"
     },
     {
-      "src": "gainer:out_2",
+      "src": "gainer:out_7",
+      "dst": "gainer:sin_1"
+    },
+    {
+      "src": "gainer:out_5",
+      "dst": "gainer:sin_1"
+    },
+    {
+      "src": "gainer:out_6",
       "dst": "gainer:sin_2"
     }
   ]

@@ -934,14 +934,6 @@
     {
       "src": "mixer:out_1",
       "dst": "gainer:sin_1"
-    },
-    {
-      "src": "mixer:out_3",
-      "dst": "gainer:sin_1"
-    },
-    {
-      "src": "mixer:out_4",
-      "dst": "gainer:sin_2"
     }
   ]
 }

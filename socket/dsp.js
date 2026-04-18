@@ -1,5 +1,5 @@
 import { getChannels, setHpf, setEqBand, setLimiter } from '../lib/channels.js';
-import { isDspRunning, sendHpf, sendEqCoeffs, sendLimiter } from '../lib/dsp.js';
+import { isDspRunning, sendHpf, sendEqBand, sendLimiter } from '../lib/dsp.js';
 
 export default function register(socket, { io, getCached, limiterWatchers }) {
   const hpfTimers  = new Map();
@@ -42,7 +42,7 @@ export default function register(socket, { io, getCached, limiterWatchers }) {
           const p = eqPending.get(key);
           eqPending.delete(key);
           if (p && isDspRunning())
-            sendEqCoeffs(p.type === 'input' ? 'in' : 'out', p.id, p.band, p.params);
+            sendEqBand(p.type === 'input' ? 'in' : 'out', p.id, p.band, p.params);
         }, 60));
       }
     } catch (e) { cb?.({ ok: false, error: e.message }); }

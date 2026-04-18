@@ -56,8 +56,8 @@
 /* ── Biquad filter ──────────────────────────────────────── */
 
 typedef struct {
-    double b0, b1, b2, a1, a2;
-    float  x1, x2, y1, y2;
+    float b0, b1, b2, a1, a2;   /* float: NEON float32x4 auto-vectorization */
+    float x1, x2, y1, y2;
 } Biquad;
 
 static inline void bq_reset(Biquad *bq) {
@@ -65,8 +65,8 @@ static inline void bq_reset(Biquad *bq) {
 }
 
 static inline float bq_process(Biquad *bq, float x) {
-    float y = (float)(bq->b0*x + bq->b1*bq->x1 + bq->b2*bq->x2
-                               - bq->a1*bq->y1  - bq->a2*bq->y2);
+    float y = bq->b0*x + bq->b1*bq->x1 + bq->b2*bq->x2
+                       - bq->a1*bq->y1  - bq->a2*bq->y2;
     bq->x2 = bq->x1; bq->x1 = x;
     bq->y2 = bq->y1; bq->y1 = y;
     return y;
@@ -305,8 +305,8 @@ static void apply_cmd(const Cmd *cmd) {
         break;
     case CMD_HPF_COEFFS: {
         Biquad *bq = &ch->hpf[cmd->band];  /* band: 0 or 1 */
-        bq->b0 = cmd->coeffs.b0; bq->b1 = cmd->coeffs.b1; bq->b2 = cmd->coeffs.b2;
-        bq->a1 = cmd->coeffs.a1; bq->a2 = cmd->coeffs.a2;
+        bq->b0 = (float)cmd->coeffs.b0; bq->b1 = (float)cmd->coeffs.b1; bq->b2 = (float)cmd->coeffs.b2;
+        bq->a1 = (float)cmd->coeffs.a1; bq->a2 = (float)cmd->coeffs.a2;
         break;
     }
     case CMD_EQ_ENABLE:
@@ -314,8 +314,8 @@ static void apply_cmd(const Cmd *cmd) {
         break;
     case CMD_EQ_COEFFS: {
         Biquad *bq = &ch->eq[cmd->band];
-        bq->b0 = cmd->coeffs.b0; bq->b1 = cmd->coeffs.b1; bq->b2 = cmd->coeffs.b2;
-        bq->a1 = cmd->coeffs.a1; bq->a2 = cmd->coeffs.a2;
+        bq->b0 = (float)cmd->coeffs.b0; bq->b1 = (float)cmd->coeffs.b1; bq->b2 = (float)cmd->coeffs.b2;
+        bq->a1 = (float)cmd->coeffs.a1; bq->a2 = (float)cmd->coeffs.a2;
         break;
     }
     case CMD_LIMITER_ENABLE:
@@ -611,6 +611,14 @@ static void cmd_loop(void) {
 /* ── Main ───────────────────────────────────────────── */
 
 static jack_client_t *g_client;
+static volatile int   g_jack_alive = 1;  /* JACK shutdown 시 0으로 세팅 */
+
+/* JACK 서버가 먼저 종료될 때 호출 — jack_deactivate 없이 즉시 종료 */
+static void on_jack_shutdown(void *arg) {
+    (void)arg;
+    g_jack_alive = 0;
+    fclose(stdin);  /* cmd_loop의 fgets 깨우기 */
+}
 
 static void sig_handler(int s) {
     (void)s;
@@ -630,9 +638,15 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    g_client = jack_client_open("gainer", JackNoStartServer, NULL);
+    const char *client_name = "gainer";
+    for (int i = 3; i < argc; i++) {
+        if (!strcmp(argv[i], "--name") && i + 1 < argc)
+            client_name = argv[++i];
+    }
+
+    g_client = jack_client_open(client_name, JackNoStartServer, NULL);
     if (!g_client) {
-        fprintf(stderr, "[dsp_engine] JACK connect failed\n");
+        fprintf(stderr, "[dsp_engine] JACK connect failed (client=%s)\n", client_name);
         return 1;
     }
     g_sr = (float)jack_get_sample_rate(g_client);
@@ -696,6 +710,7 @@ int main(int argc, char *argv[]) {
     }
 
     jack_set_process_callback(g_client, process_cb, NULL);
+    jack_on_shutdown(g_client, on_jack_shutdown, NULL);
 
     if (jack_activate(g_client)) {
         fprintf(stderr, "[dsp_engine] jack_activate failed\n");
@@ -709,15 +724,19 @@ int main(int argc, char *argv[]) {
     g_reporter_running = 1;
     pthread_create(&reporter_tid, NULL, reporter_thread, NULL);
 
-    fprintf(stderr, "[dsp_engine] ready (in=%d out=%d sr=%.0f)\n",
-            g_n_in, g_n_out, g_sr);
+    fprintf(stderr, "[dsp_engine] ready client=%s (in=%d out=%d sr=%.0f)\n",
+            client_name, g_n_in, g_n_out, g_sr);
 
     cmd_loop();   /* blocks until stdin closes */
 
     g_reporter_running = 0;
     pthread_join(reporter_tid, NULL);
 
-    jack_deactivate(g_client);
-    jack_client_close(g_client);
+    if (g_jack_alive) {
+        /* 정상 종료 — JACK 서버가 살아 있으므로 정상 해제 */
+        jack_deactivate(g_client);
+        jack_client_close(g_client);
+    }
+    /* JACK이 먼저 죽은 경우: jack_deactivate는 호출하지 않음 (hang 방지) */
     return 0;
 }

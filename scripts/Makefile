@@ -4,7 +4,7 @@ CFLAGS  = -O2 -Wall -Wextra -ffast-math -march=native \
 LDFLAGS = -ljack -lm -lpthread \
           $(shell pkg-config --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-net-1.0 gio-2.0)
 
-DSP_CFLAGS  = -O2 -Wall -Wextra -ffast-math -march=native
+DSP_CFLAGS  = -O3 -Wall -Wextra -ffast-math -march=native -funroll-loops
 DSP_LDFLAGS = -ljack -lm -lpthread
 
 TARGETS = dsp_engine rtp_recv rtp_send

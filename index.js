@@ -19,17 +19,21 @@ import { setupSocket } from './socket/index.js';
 import logger from './lib/logger.js';
 
 import { startJack, waitForJack, checkJackAlive, killExistingJack,
-         setJackReady, connect } from './lib/jack.js';
-import { startBridges, startUsbGadgetWatcher }       from './lib/bridges.js';
+         setJackReady, connect,
+         setJackCrashHandler, setJackRecoverHandler } from './lib/jack.js';
+import { startBridges, stopBridges, startUsbGadgetWatcher, killOrphanBridges,
+         notifyBridgeStartupComplete }                                          from './lib/bridges.js';
 import { startRxPipeline, startTxClient,
          waitForRxReady, waitForTxReady,
          startRtpStreams, waitForRtpStreamsReady,
-         getRtpStreamStatus }                         from './lib/gstreamer.js';
+         getRtpStreamStatus,
+         notifyRtpStartupComplete }                   from './lib/gstreamer.js';
 import { getChannels, startMeters,
          getInputSrcPorts, getOutputSinkPorts,
          getTotalInputCount, getTotalOutputCount,
-         getSavedRoutes }                            from './lib/channels.js';
-import { startDsp, sendGain, sendMute,
+         getSavedRoutes,
+         getDspClientOf, getDspLocalId }             from './lib/channels.js';
+import { startDsp, stopDsp, sendGain, sendMute,
          sendBypass, sendAllDsp }                    from './lib/dsp.js';
 import { getConfig } from './lib/config.js';
 
@@ -95,10 +99,18 @@ async function startup() {
 
   const totalIn  = getTotalInputCount();
   const totalOut = getTotalOutputCount();
-  logger.info('[startup] Starting gainer (in=%d out=%d, active in=%d out=%d)...', totalIn, totalOut, srcPorts.length, sinkPorts.length);
-  try { startDsp(totalIn, totalOut); } catch (e) { logger.warn('[startup] gainer:', e.message); }
+  // gainer: analog ch 1-2 (full DSP), mixer: 나머지 ch 3+ (gain/mute only)
+  const GAINER_CH = config.jack.channels ?? 2;
+  const MIXER_IN  = totalIn  - GAINER_CH;
+  const MIXER_OUT = totalOut - GAINER_CH;
+  logger.info('[startup] Starting DSP engines (gainer %din/%dout, mixer %din/%dout)...',
+    GAINER_CH, GAINER_CH, MIXER_IN, MIXER_OUT);
+  try { startDsp('gainer', GAINER_CH, GAINER_CH); } catch (e) { logger.warn('[startup] gainer:', e.message); }
+  if (MIXER_IN > 0 || MIXER_OUT > 0)
+    try { startDsp('mixer', MIXER_IN, MIXER_OUT); } catch (e) { logger.warn('[startup] mixer:', e.message); }
 
   logger.info('[startup] Starting ALSA bridges...');
+  await killOrphanBridges();
   try { await startBridges(config.bridges); } catch (e) { logger.warn('[startup] bridges:', e.message); }
   startUsbGadgetWatcher();
 
@@ -150,12 +162,12 @@ async function startup() {
       const actual = rtpPortMap.get(m[1])[Number(m[2]) - 1];
       if (actual) src = actual;
     }
-    await connectWithRetry(src, `gainer:in_${id}`, noRetry ? 1 : 5);
+    await connectWithRetry(src, `${getDspClientOf(id)}:in_${getDspLocalId(id)}`, noRetry ? 1 : 5);
   }
 
   logger.info('[startup] Connecting gainer outputs → sinks...');
   for (const { id, sinkPort, noRetry } of sinkPorts)
-    await connectWithRetry(`gainer:sout_${id}`, sinkPort, noRetry ? 1 : 5);
+    await connectWithRetry(`${getDspClientOf(id)}:sout_${getDspLocalId(id)}`, sinkPort, noRetry ? 1 : 5);
 
   // 저장된 라우팅 매트릭스 복원 — 현재 활성 채널의 포트만 연결
   const savedRoutes = getSavedRoutes();
@@ -191,7 +203,47 @@ async function startup() {
   logger.info('[startup] Starting channel meters...');
   try { startMeters(); } catch (e) { logger.warn('[startup] meters:', e.message); }
 
+  notifyRtpStartupComplete();
+  notifyBridgeStartupComplete();
+
   httpServer.listen(PORT, () => logger.info(`[server] http://localhost:${PORT}`));
+
+  // ── JACK 크래시/복구 핸들러 — startup 완료 후 등록 ──────────
+  setJackCrashHandler(() => {
+    logger.warn('[startup] JACK crashed — stopping DSP and bridges');
+    stopDsp();   // 인자 없으면 전체 종료
+    stopBridges();
+  });
+
+  setJackRecoverHandler(async () => {
+    logger.info('[startup] JACK recovered — restarting DSP and bridges');
+    const { inputs, outputs } = getChannels([]);
+    const GAINER_CH = config.jack.channels ?? 2;
+    const tIn = getTotalInputCount(), tOut = getTotalOutputCount();
+    startDsp('gainer', GAINER_CH, GAINER_CH);
+    if (tIn - GAINER_CH > 0 || tOut - GAINER_CH > 0)
+      startDsp('mixer', tIn - GAINER_CH, tOut - GAINER_CH);
+    await new Promise(r => setTimeout(r, 1500)); // DSP 안정화 대기
+    await startBridges(getConfig().bridges);
+    // 포트 재연결
+    for (const { id, srcPort, noRetry } of getInputSrcPorts())
+      await connectWithRetry(srcPort, `${getDspClientOf(id)}:in_${getDspLocalId(id)}`, noRetry ? 1 : 5);
+    for (const { id, sinkPort, noRetry } of getOutputSinkPorts())
+      await connectWithRetry(`${getDspClientOf(id)}:sout_${getDspLocalId(id)}`, sinkPort, noRetry ? 1 : 5);
+    // DSP 상태 복원
+    for (const ch of inputs) {
+      if (ch.bypassDsp) sendBypass('in', ch.id, true);
+      sendGain('in', ch.id, ch.gain);
+      if (ch.muted) sendMute('in', ch.id, true);
+    }
+    for (const ch of outputs) {
+      if (ch.bypassDsp) sendBypass('out', ch.id, true);
+      sendGain('out', ch.id, ch.gain);
+      if (ch.muted) sendMute('out', ch.id, true);
+    }
+    sendAllDsp({ inputs, outputs });
+    logger.info('[startup] JACK recovery complete');
+  });
 }
 
 startup().catch((err) => {

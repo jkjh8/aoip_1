@@ -1,0 +1,28 @@
+[Unit]
+Description=AoIP Backend
+After=network-online.target aoip-soundcard.service
+Wants=network-online.target
+Requires=aoip-soundcard.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/kjh/aoip_1
+ExecStart=/usr/bin/node index.js
+Restart=on-failure
+RestartSec=5
+
+User=kjh
+Group=audio
+
+# Allow real-time scheduling (required for jackd/chrt -f)
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
+LimitNICE=-20
+
+# stdout/stderr to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aoip
+
+[Install]
+WantedBy=multi-user.target

@@ -12,7 +12,7 @@
         "hpf": {
           "enabled": false,
           "freq": 80,
-          "type": "output",
+          "type": "input",
           "slope": 12,
           "coeffs": []
         },
@@ -128,7 +128,7 @@
     {
       "id": 3,
       "label": "USB AUDIO IN 1",
-      "jackPort": "gainer:out_3",
+      "jackPort": "mixer:out_1",
       "srcPort": "USB Audio IN:capture_1",
       "gain": 100,
       "muted": false,
@@ -177,7 +177,7 @@
     {
       "id": 4,
       "label": "USB AUDIO IN 2",
-      "jackPort": "gainer:out_4",
+      "jackPort": "mixer:out_2",
       "srcPort": "USB Audio IN:capture_2",
       "gain": 100,
       "muted": false,
@@ -226,10 +226,10 @@
     {
       "id": 5,
       "label": "Stream IN 1",
-      "jackPort": "gainer:out_5",
+      "jackPort": "mixer:out_3",
       "srcPort": "rtp_in_1:out_1",
       "gain": 100,
-      "muted": false,
+      "muted": true,
       "bypassDsp": true,
       "dsp": {
         "hpf": {
@@ -275,10 +275,10 @@
     {
       "id": 6,
       "label": "Stream IN 2",
-      "jackPort": "gainer:out_6",
+      "jackPort": "mixer:out_4",
       "srcPort": "rtp_in_1:out_2",
       "gain": 100,
-      "muted": false,
+      "muted": true,
       "bypassDsp": true,
       "dsp": {
         "hpf": {
@@ -324,7 +324,7 @@
     {
       "id": 7,
       "label": "AES67 1",
-      "jackPort": "gainer:out_7",
+      "jackPort": "mixer:out_5",
       "srcPort": "AES67_in:capture_1",
       "gain": 100,
       "muted": false,
@@ -373,7 +373,7 @@
     {
       "id": 8,
       "label": "AES67 2",
-      "jackPort": "gainer:out_8",
+      "jackPort": "mixer:out_6",
       "srcPort": "AES67_in:capture_2",
       "gain": 100,
       "muted": false,
@@ -446,38 +446,38 @@
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.7565673051433217,
-            "b2": 0.7827134057449302,
-            "a1": -1.7565673051433217,
-            "a2": 0.7827134057449302,
+            "b1": -1.9066459797557105,
+            "b2": 0.9107370143743273,
+            "a1": -1.9066459797557105,
+            "a2": 0.9107370143743273,
             "bandType": "peak",
-            "freq": 1310,
+            "freq": 500,
             "gain": 0,
             "q": 0.7
           },
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.4700837616907572,
-            "b2": 0.5821835143584392,
-            "a1": -1.4700837616907572,
-            "a2": 0.5821835143584392,
+            "b1": -1.6304323980330466,
+            "b2": 0.6879478254525045,
+            "a1": -1.6304323980330466,
+            "a2": 0.6879478254525045,
             "bandType": "peak",
-            "freq": 2893,
+            "freq": 2000,
             "gain": 0,
             "q": 0.7
           },
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.0793698217996914,
-            "b2": 0.35388038632860525,
-            "a1": -1.0793698217996914,
-            "a2": 0.35388038632860525,
-            "freq": 4951,
+            "b1": -7.143772995026227e-17,
+            "b2": 0.16666666666666666,
+            "a1": -7.143772995026227e-17,
+            "a2": 0.16666666666666666,
+            "freq": 12000,
             "gain": 0,
-            "bandType": "high_shelf",
-            "q": 0.8
+            "bandType": "peak",
+            "q": 0.7
           }
         ],
         "limiter": {
@@ -560,7 +560,7 @@
     {
       "id": 3,
       "label": "USB AUDIO OUT 1",
-      "jackPort": "gainer:sin_3",
+      "jackPort": "mixer:sin_1",
       "sinkPort": "USB Audio OUT:playback_1",
       "gain": 100,
       "muted": false,
@@ -612,7 +612,7 @@
     {
       "id": 4,
       "label": "USB AUDIO OUT 2",
-      "jackPort": "gainer:sin_4",
+      "jackPort": "mixer:sin_2",
       "sinkPort": "USB Audio OUT:playback_2",
       "gain": 100,
       "muted": false,
@@ -664,7 +664,7 @@
     {
       "id": 5,
       "label": "Stream OUT 1",
-      "jackPort": "gainer:sin_5",
+      "jackPort": "mixer:sin_3",
       "sinkPort": "rtp_out_1:in_src_1",
       "gain": 100,
       "muted": false,
@@ -716,7 +716,7 @@
     {
       "id": 6,
       "label": "Stream OUT 2",
-      "jackPort": "gainer:sin_6",
+      "jackPort": "mixer:sin_4",
       "sinkPort": "rtp_out_1:in_src_2",
       "gain": 100,
       "muted": false,
@@ -768,7 +768,7 @@
     {
       "id": 7,
       "label": "AES67 1",
-      "jackPort": "gainer:sin_7",
+      "jackPort": "mixer:sin_5",
       "sinkPort": "AES67_out:playback_1",
       "gain": 100,
       "muted": false,
@@ -820,7 +820,7 @@
     {
       "id": 8,
       "label": "AES67 2",
-      "jackPort": "gainer:sin_8",
+      "jackPort": "mixer:sin_6",
       "sinkPort": "AES67_out:playback_2",
       "gain": 100,
       "muted": false,
@@ -872,75 +872,75 @@
   ],
   "routing": [
     {
-      "src": "gainer:out_3",
-      "dst": "gainer:sin_5"
+      "src": "mixer:out_1",
+      "dst": "mixer:sin_5"
     },
     {
-      "src": "gainer:out_4",
-      "dst": "gainer:sin_6"
+      "src": "mixer:out_2",
+      "dst": "mixer:sin_6"
     },
     {
-      "src": "gainer:out_3",
-      "dst": "gainer:sin_7"
+      "src": "mixer:out_5",
+      "dst": "mixer:sin_1"
     },
     {
-      "src": "gainer:out_4",
-      "dst": "gainer:sin_8"
-    },
-    {
-      "src": "gainer:out_7",
-      "dst": "gainer:sin_3"
-    },
-    {
-      "src": "gainer:out_8",
-      "dst": "gainer:sin_4"
+      "src": "mixer:out_6",
+      "dst": "mixer:sin_2"
     },
     {
       "src": "gainer:out_2",
       "dst": "gainer:sin_2"
     },
     {
-      "src": "gainer:out_8",
+      "src": "mixer:out_6",
       "dst": "gainer:sin_2"
     },
     {
-      "src": "gainer:out_5",
-      "dst": "gainer:sin_7"
+      "src": "mixer:out_3",
+      "dst": "mixer:sin_5"
     },
     {
-      "src": "gainer:out_6",
-      "dst": "gainer:sin_8"
+      "src": "mixer:out_4",
+      "dst": "mixer:sin_6"
     },
     {
       "src": "gainer:out_1",
-      "dst": "gainer:sin_5"
+      "dst": "mixer:sin_5"
     },
     {
       "src": "gainer:out_2",
-      "dst": "gainer:sin_6"
-    },
-    {
-      "src": "gainer:out_1",
-      "dst": "gainer:sin_7"
-    },
-    {
-      "src": "gainer:out_2",
-      "dst": "gainer:sin_8"
+      "dst": "mixer:sin_6"
     },
     {
       "src": "gainer:out_1",
       "dst": "gainer:sin_1"
     },
     {
-      "src": "gainer:out_7",
+      "src": "mixer:out_5",
+      "dst": "mixer:sin_3"
+    },
+    {
+      "src": "mixer:out_6",
+      "dst": "mixer:sin_4"
+    },
+    {
+      "src": "mixer:out_5",
       "dst": "gainer:sin_1"
     },
     {
-      "src": "gainer:out_5",
+      "src": "mixer:out_2",
+      "dst": "gainer:sin_2"
+    },
+    {
+      "src": "mixer:out_1",
       "dst": "gainer:sin_1"
     },
     {
-      "src": "gainer:out_6",
+      "src": "mixer:out_3",
+      "dst": "gainer:sin_1"
+    },
+    {
+      "src": "mixer:out_4",
       "dst": "gainer:sin_2"
     }
   ]

@@ -2,30 +2,28 @@ import { Router } from 'express';
 import { startDsp, stopDsp, isDspRunning,
          sendGain, sendMute, sendAllDsp } from '../lib/dsp.js';
 import { connect, disconnect } from '../lib/jack.js';
-import { getInputSrcPorts, getOutputSinkPorts,
-         getTotalInputCount, getTotalOutputCount, getChannels,
-         getDspClientOf, getDspLocalId } from '../lib/channels.js';
-import { getConfig } from '../lib/config.js';
+import { getInputSrcPorts, getOutputSinkPorts, getChannels,
+         getDspClientOf, getDspLocalId,
+         getDspChannelCounts } from '../lib/channels.js';
 
 const router = Router();
 
-// GET /gainer/bypass  — 현재 매트릭스 라우팅을 읽어 gainer 없이 직결
+// GET /dsp/bypass  — 현재 매트릭스 라우팅을 읽어 DSP 없이 직결
 router.get('/bypass', async (_req, res) => {
   try {
     const { getConnections } = await import('../lib/jack.js');
     const srcPorts  = getInputSrcPorts();
     const sinkPorts = getOutputSinkPorts();
 
-    // 현재 연결 스냅샷: gainer 체인 매핑 파악
     const conns = await getConnections();
     const portMap = new Map(conns.map(({ port, connections }) => [port, connections]));
     const sinkByJackPort = new Map(
-      sinkPorts.map(({ id, sinkPort }) => [`${getDspClientOf(id)}:sin_${getDspLocalId(id)}`, sinkPort])
+      sinkPorts.map(({ id, sinkPort }) => [`${getDspClientOf(id,'out')}:sin_${getDspLocalId(id,'out')}`, sinkPort])
     );
 
     const pairs = [];
     for (const { id, srcPort } of srcPorts) {
-      const dspOut = `${getDspClientOf(id)}:out_${getDspLocalId(id)}`;
+      const dspOut = `${getDspClientOf(id,'in')}:out_${getDspLocalId(id,'in')}`;
       const dsts = portMap.get(dspOut) ?? [];
       for (const dspSin of dsts) {
         const dst = sinkByJackPort.get(dspSin);
@@ -52,24 +50,20 @@ router.get('/bypass', async (_req, res) => {
   }
 });
 
-// POST /gainer/restore  — 직결 해제 후 gainer 재시작 및 연결 복원
+// GET /dsp/restore  — 직결 해제 후 DSP 재시작 및 연결 복원
 router.get('/restore', async (_req, res) => {
   try {
     const srcPorts  = getInputSrcPorts();
     const sinkPorts = getOutputSinkPorts();
     for (const { srcPort } of srcPorts)
       try { await disconnect(srcPort, srcPort); } catch { /* ignore */ }
-    const cfg = getConfig();
-    const GAINER_CH = cfg.jack?.channels ?? 2;
-    const totalIn = getTotalInputCount(), totalOut = getTotalOutputCount();
-    startDsp('gainer', GAINER_CH, GAINER_CH);
-    if (totalIn - GAINER_CH > 0 || totalOut - GAINER_CH > 0)
-      startDsp('mixer', totalIn - GAINER_CH, totalOut - GAINER_CH);
+    for (const [name, { n_in, n_out }] of getDspChannelCounts())
+      startDsp(name, n_in, n_out);
     await new Promise(r => setTimeout(r, 1000));
     for (const { id, srcPort } of srcPorts)
-      try { await connect(srcPort, `${getDspClientOf(id)}:in_${getDspLocalId(id)}`); } catch { /* ignore */ }
+      try { await connect(srcPort, `${getDspClientOf(id,'in')}:in_${getDspLocalId(id,'in')}`); } catch { /* ignore */ }
     for (const { id, sinkPort } of sinkPorts)
-      try { await connect(`${getDspClientOf(id)}:sout_${getDspLocalId(id)}`, sinkPort); } catch { /* ignore */ }
+      try { await connect(`${getDspClientOf(id,'out')}:sout_${getDspLocalId(id,'out')}`, sinkPort); } catch { /* ignore */ }
     const { inputs, outputs } = getChannels([]);
     for (const ch of inputs)  { sendGain('in',  ch.id, ch.gain); if (ch.muted) sendMute('in',  ch.id, true); }
     for (const ch of outputs) { sendGain('out', ch.id, ch.gain); if (ch.muted) sendMute('out', ch.id, true); }
@@ -80,9 +74,13 @@ router.get('/restore', async (_req, res) => {
   }
 });
 
-// GET /gainer/status
+// GET /dsp/status
 router.get('/status', (_req, res) => {
-  res.json({ running: isDspRunning('gainer') || isDspRunning('mixer') });
+  const counts = getDspChannelCounts();
+  const status = Object.fromEntries(
+    [...counts.keys()].map(name => [name, isDspRunning(name)])
+  );
+  res.json({ running: Object.values(status).some(Boolean), engines: status });
 });
 
 export default router;

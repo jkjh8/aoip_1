@@ -1,10 +1,9 @@
 import { getChannels, setGain, setMute, setLabel,
          getInputSrcPorts, getOutputSinkPorts,
-         getTotalInputCount, getTotalOutputCount,
-         getDspClientOf, getDspLocalId } from '../lib/channels.js';
+         getDspClientOf, getDspLocalId,
+         getDspChannelCounts } from '../lib/channels.js';
 import { startDsp, stopDsp,
          sendGain, sendMute, sendAllDsp } from '../lib/dsp.js';
-import { getConfig } from '../lib/config.js';
 import { connect, disconnect } from '../lib/jack.js';
 
 export default function register(socket, { broadcastStatus }) {
@@ -56,17 +55,13 @@ export default function register(socket, { broadcastStatus }) {
         const dst = sinkById.get(id);
         if (dst) try { await disconnect(srcPort, dst); } catch { /* ignore */ }
       }
-      const cfg = getConfig();
-      const GAINER_CH = cfg.jack?.channels ?? 2;
-      const totalIn = getTotalInputCount(), totalOut = getTotalOutputCount();
-      startDsp('gainer', GAINER_CH, GAINER_CH);
-      if (totalIn - GAINER_CH > 0 || totalOut - GAINER_CH > 0)
-        startDsp('mixer', totalIn - GAINER_CH, totalOut - GAINER_CH);
+      for (const [name, { n_in, n_out }] of getDspChannelCounts())
+        startDsp(name, n_in, n_out);
       await new Promise(r => setTimeout(r, 1000));
       for (const { id, srcPort } of srcPorts)
-        try { await connect(srcPort, `${getDspClientOf(id)}:in_${getDspLocalId(id)}`); } catch { /* ignore */ }
+        try { await connect(srcPort, `${getDspClientOf(id,'in')}:in_${getDspLocalId(id,'in')}`); } catch { /* ignore */ }
       for (const { id, sinkPort } of sinkPorts)
-        try { await connect(`${getDspClientOf(id)}:sout_${getDspLocalId(id)}`, sinkPort); } catch { /* ignore */ }
+        try { await connect(`${getDspClientOf(id,'out')}:sout_${getDspLocalId(id,'out')}`, sinkPort); } catch { /* ignore */ }
       const { inputs, outputs } = getChannels([]);
       for (const ch of inputs)  { sendGain('in',  ch.id, ch.gain); if (ch.muted) sendMute('in',  ch.id, true); }
       for (const ch of outputs) { sendGain('out', ch.id, ch.gain); if (ch.muted) sendMute('out', ch.id, true); }

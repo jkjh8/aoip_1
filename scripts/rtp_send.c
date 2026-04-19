@@ -22,6 +22,7 @@
  */
 
 #include <gst/gst.h>
+#include <gst/base/gstbasesrc.h>
 #include <jack/jack.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +31,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #define MAX_TARGETS 16
 
@@ -50,6 +52,10 @@ static int           g_use_rtp  = 0;
 static int           g_out_rate = 0;   /* 0 = keep JACK rate */
 static volatile int  g_quit     = 0;
 static char          g_client_name[64] = "rtp_send";
+
+/* pipe 입력 모드: jackaudiosrc 대신 named FIFO에서 F32LE 읽기 */
+static char g_input_fifo[256] = "";
+static int  g_input_fd        = -1;
 
 static GstElement     *g_pipeline = NULL;
 static GstElement     *g_jaksrc   = NULL;   /* jackaudiosrc */
@@ -92,6 +98,12 @@ static void pipeline_stop(void)
         g_pipeline = NULL;
         g_jaksrc   = NULL;
     }
+    /* fdsrc may close the fd when the pipeline is unreffed (versions without
+     * close-fd property).  Reset so pipeline_build() always reopens it. */
+    if (g_input_fifo[0] && g_input_fd >= 0) {
+        close(g_input_fd);
+        g_input_fd = -1;
+    }
 }
 
 static int pipeline_build(void)
@@ -109,36 +121,71 @@ static int pipeline_build(void)
     }
     int out_rate = (g_out_rate > 0) ? g_out_rate : jack_rate;
 
-    GstElement *pipe    = gst_pipeline_new("rtp_send");
-    GstElement *src     = gst_element_factory_make("jackaudiosrc",  "src");
-    GstElement *cvt     = gst_element_factory_make("audioconvert",  "cvt");
-    GstElement *resamp  = (out_rate != jack_rate) ?
-                          gst_element_factory_make("audioresample", "resamp") : NULL;
+    GstElement *pipe   = gst_pipeline_new("rtp_send");
+    GstElement *cvt    = gst_element_factory_make("audioconvert",  "cvt");
+    GstElement *resamp = (out_rate != jack_rate) ?
+                         gst_element_factory_make("audioresample", "resamp") : NULL;
 
-    if (!src || !cvt) goto fail;
+    if (!cvt) goto fail;
     if (out_rate != jack_rate && !resamp) goto fail;
 
-    /* jackaudiosrc: client name, no auto-connect (Node.js handles JACK wiring) */
-    g_object_set(src,
-        "client-name", g_client_name,
-        "connect",     0,             /* JackConnectNone */
-        NULL);
+    GstElement *last_cvt;
 
-    /* build: src → cvt [→ resamp] → encoder/capsfilter → [payloader] → sink(s) */
-    /* Force jackaudiosrc to create g_ch JACK ports via caps filter on src→cvt link */
-    GstCaps *src_caps = gst_caps_new_simple("audio/x-raw",
-        "channels", G_TYPE_INT, g_ch, NULL);
+    if (g_input_fifo[0]) {
+        /* ── Pipe 모드: fdsrc → capsfilter(F32LE) → cvt [→ resamp] ── */
+        if (g_input_fd < 0) {
+            g_input_fd = open(g_input_fifo, O_RDONLY);
+            if (g_input_fd < 0) { perror("[rtp_send] open input fifo"); goto fail; }
+        }
+        GstElement *src  = gst_element_factory_make("fdsrc",      "src");
+        GstElement *cf   = gst_element_factory_make("capsfilter",  "cf_in");
+        if (!src || !cf) goto fail;
 
-    if (resamp) {
-        gst_bin_add_many(GST_BIN(pipe), src, cvt, resamp, NULL);
-        if (!gst_element_link_filtered(src, cvt, src_caps)) { gst_caps_unref(src_caps); goto fail; }
-        if (!gst_element_link(cvt, resamp)) { gst_caps_unref(src_caps); goto fail; }
+        GstCaps *in_caps = gst_caps_new_simple("audio/x-raw",
+            "format",   G_TYPE_STRING, "F32LE",
+            "rate",     G_TYPE_INT,    jack_rate,
+            "channels", G_TYPE_INT,    g_ch,
+            "layout",   G_TYPE_STRING, "interleaved", NULL);
+        g_object_set(src, "fd", g_input_fd, NULL);
+        gst_base_src_set_do_timestamp(GST_BASE_SRC(src), TRUE);
+        gst_base_src_set_live(GST_BASE_SRC(src), TRUE);
+        g_object_set(cf,  "caps", in_caps, NULL);
+        gst_caps_unref(in_caps);
+
+        if (resamp) {
+            gst_bin_add_many(GST_BIN(pipe), src, cf, cvt, resamp, NULL);
+            if (!gst_element_link(src, cf))     goto fail;
+            if (!gst_element_link(cf,  cvt))    goto fail;
+            if (!gst_element_link(cvt, resamp)) goto fail;
+        } else {
+            gst_bin_add_many(GST_BIN(pipe), src, cf, cvt, NULL);
+            if (!gst_element_link(src, cf))  goto fail;
+            if (!gst_element_link(cf,  cvt)) goto fail;
+        }
+        last_cvt  = resamp ? resamp : cvt;
+        g_jaksrc  = NULL;
     } else {
-        gst_bin_add_many(GST_BIN(pipe), src, cvt, NULL);
-        if (!gst_element_link_filtered(src, cvt, src_caps)) { gst_caps_unref(src_caps); goto fail; }
+        /* ── JACK 모드: jackaudiosrc → cvt [→ resamp] ── */
+        GstElement *src = gst_element_factory_make("jackaudiosrc", "src");
+        if (!src) goto fail;
+
+        g_object_set(src, "client-name", g_client_name, "connect", 0, NULL);
+
+        GstCaps *src_caps = gst_caps_new_simple("audio/x-raw",
+            "channels", G_TYPE_INT, g_ch, NULL);
+
+        if (resamp) {
+            gst_bin_add_many(GST_BIN(pipe), src, cvt, resamp, NULL);
+            if (!gst_element_link_filtered(src, cvt, src_caps)) { gst_caps_unref(src_caps); goto fail; }
+            if (!gst_element_link(cvt, resamp)) { gst_caps_unref(src_caps); goto fail; }
+        } else {
+            gst_bin_add_many(GST_BIN(pipe), src, cvt, NULL);
+            if (!gst_element_link_filtered(src, cvt, src_caps)) { gst_caps_unref(src_caps); goto fail; }
+        }
+        gst_caps_unref(src_caps);
+        last_cvt = resamp ? resamp : cvt;
+        g_jaksrc  = src;
     }
-    gst_caps_unref(src_caps);
-    GstElement *last_cvt = resamp ? resamp : cvt;
 
     GstElement *enc      = NULL;
     GstElement *caps_flt = NULL;
@@ -237,7 +284,7 @@ static int pipeline_build(void)
     if (bus) { gst_bus_add_watch(bus, bus_cb, NULL); gst_object_unref(bus); }
 
     g_pipeline = pipe;
-    g_jaksrc   = src;
+    /* g_jaksrc는 각 모드 블록 안에서 이미 설정됨 */
 
     GstStateChangeReturn ret = gst_element_set_state(g_pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
@@ -443,14 +490,23 @@ int main(int argc, char *argv[])
     g_use_rtp  = (argc > 3 && strcmp(argv[3], "rtp") == 0) ? 1 : 0;
     g_out_rate = (argc > 4) ? atoi(argv[4]) : 0;
     if (g_use_rtp) g_codec = CODEC_RAW;
+    /* pipe 모드: argv[5]="pipe"  argv[6]=fifo_path */
+    if (argc > 5 && strcmp(argv[5], "pipe") == 0 && argc > 6)
+        snprintf(g_input_fifo, sizeof(g_input_fifo), "%s", argv[6]);
 
     pthread_mutex_lock(&pipe_mutex);
     pipeline_build();
     pthread_mutex_unlock(&pipe_mutex);
 
-    /* poll for JACK ports every 100ms until jackaudiosrc registers them */
-    { PortPollCtx *ctx = g_new0(PortPollCtx, 1); ctx->send_ready = 1;
-      g_timeout_add(100, report_ports_cb, ctx); }
+    if (!g_input_fifo[0]) {
+        /* JACK 모드: jackaudiosrc가 포트를 등록할 때까지 100ms 간격으로 폴링 */
+        PortPollCtx *ctx = g_new0(PortPollCtx, 1); ctx->send_ready = 1;
+        g_timeout_add(100, report_ports_cb, ctx);
+    } else {
+        /* pipe 모드: 포트는 jack_pipe_out이 담당, ready 신호만 전송 */
+        fprintf(stdout, "[rtp_send] ready\n");
+        fflush(stdout);
+    }
 
     pthread_t stdin_tid, stats_tid;
     pthread_create(&stdin_tid, NULL, stdin_thread, NULL);

@@ -22,7 +22,8 @@ import { startJack, waitForJack, checkJackAlive, killExistingJack,
          setJackReady, connect,
          setJackCrashHandler, setJackRecoverHandler } from './lib/jack.js';
 import { startBridges, stopBridges, startUsbGadgetWatcher, killOrphanBridges,
-         notifyBridgeStartupComplete }                                          from './lib/bridges.js';
+         notifyBridgeStartupComplete, setOnBridgeReady,
+         restartBridge }                                                         from './lib/bridges.js';
 import { startRxPipeline, startTxClient,
          waitForRxReady, waitForTxReady,
          startRtpStreams, waitForRtpStreamsReady,
@@ -30,11 +31,12 @@ import { startRxPipeline, startTxClient,
          notifyRtpStartupComplete }                   from './lib/gstreamer.js';
 import { getChannels, startMeters,
          getInputSrcPorts, getOutputSinkPorts,
-         getTotalInputCount, getTotalOutputCount,
-         getSavedRoutes,
-         getDspClientOf, getDspLocalId }             from './lib/channels.js';
+         getSavedRoutes, getBridgeChannelDef,
+         getDspClientOf, getDspLocalId,
+         getDspChannelCounts }                       from './lib/channels.js';
 import { startDsp, stopDsp, sendGain, sendMute,
-         sendBypass, sendAllDsp }                    from './lib/dsp.js';
+         sendBypass, sendAllDsp,
+         waitForDspReady }                           from './lib/dsp.js';
 import { getConfig } from './lib/config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -77,6 +79,25 @@ setupSocket(httpServer, config);
 
 // ── Startup ───────────────────────────────────────────
 
+async function connectWithRetry(src, dst, retries = 5) {
+  for (let i = 0; i < retries; i++) {
+    try { await connect(src, dst); return true; } catch (e) {
+      if (i < retries - 1) await new Promise(r => setTimeout(r, 1000));
+      else logger.warn('[startup] connect %s→%s failed: %s', src, dst, e.message);
+    }
+  }
+  return false;
+}
+
+async function connectBridgePorts(bridgeName) {
+  const def = getBridgeChannelDef(bridgeName);
+  if (!def) return;
+  for (const ch of def.inputs)
+    await connectWithRetry(ch.srcPort, `${getDspClientOf(ch.id,'in')}:in_${getDspLocalId(ch.id,'in')}`, 3);
+  for (const ch of def.outputs)
+    await connectWithRetry(`${getDspClientOf(ch.id,'out')}:sout_${getDspLocalId(ch.id,'out')}`, ch.sinkPort, 3);
+}
+
 async function startup() {
   if (await checkJackAlive()) {
     logger.info('[startup] JACK already running — reusing existing instance');
@@ -97,17 +118,14 @@ async function startup() {
   const srcPorts  = getInputSrcPorts();
   const sinkPorts = getOutputSinkPorts();
 
-  const totalIn  = getTotalInputCount();
-  const totalOut = getTotalOutputCount();
-  // gainer: analog ch 1-2 (full DSP), mixer: 나머지 ch 3+ (gain/mute only)
-  const GAINER_CH = config.jack.channels ?? 2;
-  const MIXER_IN  = totalIn  - GAINER_CH;
-  const MIXER_OUT = totalOut - GAINER_CH;
-  logger.info('[startup] Starting DSP engines (gainer %din/%dout, mixer %din/%dout)...',
-    GAINER_CH, GAINER_CH, MIXER_IN, MIXER_OUT);
-  try { startDsp('gainer', GAINER_CH, GAINER_CH); } catch (e) { logger.warn('[startup] gainer:', e.message); }
-  if (MIXER_IN > 0 || MIXER_OUT > 0)
-    try { startDsp('mixer', MIXER_IN, MIXER_OUT); } catch (e) { logger.warn('[startup] mixer:', e.message); }
+  const dspCounts = getDspChannelCounts();
+  logger.info('[startup] Starting DSP engines: %s',
+    [...dspCounts.entries()].map(([n, c]) => `${n}(${c.n_in}in/${c.n_out}out)`).join(', '));
+  for (const [name, { n_in, n_out }] of dspCounts) {
+    try { startDsp(name, n_in, n_out); } catch (e) { logger.warn('[startup] dsp %s:', name, e.message); }
+  }
+  try { await Promise.all([...dspCounts.keys()].map(name => waitForDspReady(name))); }
+  catch (e) { logger.warn('[startup] dsp ready timeout: %s', e.message); }
 
   logger.info('[startup] Starting ALSA bridges...');
   await killOrphanBridges();
@@ -137,14 +155,8 @@ async function startup() {
     await new Promise(r => setTimeout(r, 2000));
   }
 
-  async function connectWithRetry(src, dst, retries = 5) {
-    for (let i = 0; i < retries; i++) {
-      try { await connect(src, dst); return; } catch (e) {
-        if (i < retries - 1) await new Promise(r => setTimeout(r, 1000));
-        else logger.warn('[startup] connect %s→%s failed: %s', src, dst, e.message);
-      }
-    }
-  }
+  const connectedSrcIds  = new Set();
+  const connectedSinkIds = new Set();
 
   // rtp_in 실제 JACK 포트명 맵 (config client명 → 실제 등록 포트 목록)
   const rtpPortMap = new Map();
@@ -153,8 +165,8 @@ async function startup() {
       rtpPortMap.set(s.client, s.ports);
   }
 
-  logger.info('[startup] Connecting src → gainer inputs...');
-  for (const { id, srcPort, noRetry } of srcPorts) {
+  logger.info('[startup] Connecting src → DSP inputs...');
+  for (const { id, srcPort, noRetry, usbGadget } of srcPorts) {
     let src = srcPort;
     // rtp_in 포트: config의 `client:out_N` 대신 실제 등록된 포트명 사용
     const m = src.match(/^([^:]+):out_(\d+)$/);
@@ -162,19 +174,22 @@ async function startup() {
       const actual = rtpPortMap.get(m[1])[Number(m[2]) - 1];
       if (actual) src = actual;
     }
-    await connectWithRetry(src, `${getDspClientOf(id)}:in_${getDspLocalId(id)}`, noRetry ? 1 : 5);
+    const ok = await connectWithRetry(src, `${getDspClientOf(id,'in')}:in_${getDspLocalId(id,'in')}`, noRetry ? 1 : 5);
+    if (ok && noRetry && !usbGadget) connectedSrcIds.add(id);
   }
 
-  logger.info('[startup] Connecting gainer outputs → sinks...');
-  for (const { id, sinkPort, noRetry } of sinkPorts)
-    await connectWithRetry(`${getDspClientOf(id)}:sout_${getDspLocalId(id)}`, sinkPort, noRetry ? 1 : 5);
+  logger.info('[startup] Connecting DSP outputs → sinks...');
+  for (const { id, sinkPort, noRetry, usbGadget } of sinkPorts) {
+    const ok = await connectWithRetry(`${getDspClientOf(id,'out')}:sout_${getDspLocalId(id,'out')}`, sinkPort, noRetry ? 1 : 5);
+    if (ok && noRetry && !usbGadget) connectedSinkIds.add(id);
+  }
 
   // 저장된 라우팅 매트릭스 복원 — 현재 활성 채널의 포트만 연결
   const savedRoutes = getSavedRoutes();
   if (savedRoutes.length > 0) {
     const { inputs: activeIn, outputs: activeOut } = getChannels([]);
-    const validSrcs = new Set(activeIn.map(ch => ch.jackPort));   // gainer:out_N
-    const validDsts = new Set(activeOut.map(ch => ch.jackPort));  // gainer:sin_N
+    const validSrcs = new Set(activeIn.map(ch => ch.jackPort));
+    const validDsts = new Set(activeOut.map(ch => ch.jackPort));
 
     logger.info('[startup] Restoring %d saved routes...', savedRoutes.length);
     for (const { src, dst } of savedRoutes) {
@@ -206,6 +221,49 @@ async function startup() {
   notifyRtpStartupComplete();
   notifyBridgeStartupComplete();
 
+  // zita 브릿지가 재시작 후 안정화되면 포트 자동 재연결
+  setOnBridgeReady(async (bridgeName) => {
+    logger.info('[startup] bridge %s ready — reconnecting JACK ports', bridgeName);
+    await connectBridgePorts(bridgeName);
+  });
+
+  // AES67 브리지 포트 연결 재시도 + 스턱 감지 시 브리지 재시작
+  const aes67Bridges = (config.bridges ?? []).filter(b => b.aes67 && b.enabled !== false);
+  const bridgeFailCount = Object.fromEntries(aes67Bridges.map(b => [b.name, 0]));
+
+  const retryNoRetryPorts = async () => {
+    const pendingSrc  = srcPorts.filter(p => p.noRetry && !p.usbGadget && !connectedSrcIds.has(p.id));
+    const pendingSink = sinkPorts.filter(p => p.noRetry && !p.usbGadget && !connectedSinkIds.has(p.id));
+    if (!pendingSrc.length && !pendingSink.length) return;
+    logger.info('[startup] delayed reconnect: checking %d noRetry ports...', pendingSrc.length + pendingSink.length);
+    for (const { id, srcPort } of pendingSrc) {
+      const ok = await connectWithRetry(srcPort, `${getDspClientOf(id,'in')}:in_${getDspLocalId(id,'in')}`, 1);
+      if (ok) connectedSrcIds.add(id);
+    }
+    for (const { id, sinkPort } of pendingSink) {
+      const ok = await connectWithRetry(`${getDspClientOf(id,'out')}:sout_${getDspLocalId(id,'out')}`, sinkPort, 1);
+      if (ok) connectedSinkIds.add(id);
+    }
+
+    // AES67 브리지가 45s 이상 포트 등록을 못하면 강제 재시작
+    for (const b of aes67Bridges) {
+      const def = getBridgeChannelDef(b.name);
+      if (!def) continue;
+      const allDone = def.inputs.every(ch => connectedSrcIds.has(ch.id)) &&
+                      def.outputs.every(ch => connectedSinkIds.has(ch.id));
+      if (allDone) { bridgeFailCount[b.name] = 0; continue; }
+      bridgeFailCount[b.name]++;
+      if (bridgeFailCount[b.name] >= 3) {
+        logger.warn('[startup] %s stuck (%d retries) — force restart', b.name, bridgeFailCount[b.name]);
+        restartBridge(b.name);
+        bridgeFailCount[b.name] = 0;
+      }
+    }
+
+    setTimeout(retryNoRetryPorts, 15000);
+  };
+  setTimeout(retryNoRetryPorts, 15000);
+
   httpServer.listen(PORT, () => logger.info(`[server] http://localhost:${PORT}`));
 
   // ── JACK 크래시/복구 핸들러 — startup 완료 후 등록 ──────────
@@ -218,18 +276,15 @@ async function startup() {
   setJackRecoverHandler(async () => {
     logger.info('[startup] JACK recovered — restarting DSP and bridges');
     const { inputs, outputs } = getChannels([]);
-    const GAINER_CH = config.jack.channels ?? 2;
-    const tIn = getTotalInputCount(), tOut = getTotalOutputCount();
-    startDsp('gainer', GAINER_CH, GAINER_CH);
-    if (tIn - GAINER_CH > 0 || tOut - GAINER_CH > 0)
-      startDsp('mixer', tIn - GAINER_CH, tOut - GAINER_CH);
+    for (const [name, { n_in, n_out }] of getDspChannelCounts())
+      startDsp(name, n_in, n_out);
     await new Promise(r => setTimeout(r, 1500)); // DSP 안정화 대기
     await startBridges(getConfig().bridges);
     // 포트 재연결
     for (const { id, srcPort, noRetry } of getInputSrcPorts())
-      await connectWithRetry(srcPort, `${getDspClientOf(id)}:in_${getDspLocalId(id)}`, noRetry ? 1 : 5);
+      await connectWithRetry(srcPort, `${getDspClientOf(id,'in')}:in_${getDspLocalId(id,'in')}`, noRetry ? 1 : 5);
     for (const { id, sinkPort, noRetry } of getOutputSinkPorts())
-      await connectWithRetry(`${getDspClientOf(id)}:sout_${getDspLocalId(id)}`, sinkPort, noRetry ? 1 : 5);
+      await connectWithRetry(`${getDspClientOf(id,'out')}:sout_${getDspLocalId(id,'out')}`, sinkPort, noRetry ? 1 : 5);
     // DSP 상태 복원
     for (const ch of inputs) {
       if (ch.bypassDsp) sendBypass('in', ch.id, true);

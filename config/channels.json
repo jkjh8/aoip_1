@@ -3,7 +3,7 @@
     {
       "id": 1,
       "label": "Analog 1",
-      "jackPort": "gainer:out_1",
+      "jackPort": "analog:out_1",
       "srcPort": "system:capture_1",
       "gain": 100,
       "muted": false,
@@ -11,59 +11,40 @@
       "dsp": {
         "hpf": {
           "enabled": false,
-          "freq": 80,
-          "type": "input",
-          "slope": 12,
-          "coeffs": []
+          "freq": 80
         },
         "eq": [
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.9813040347772235,
-            "b2": 0.9814737924440637,
-            "a1": -1.9813040347772235,
-            "a2": 0.9814737924440637,
-            "gain": 0,
-            "bandType": "peak",
-            "freq": 100,
-            "q": 0.7
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.9066459797557105,
-            "b2": 0.9107370143743273,
-            "a1": -1.9066459797557105,
-            "a2": 0.9107370143743273,
-            "gain": 0,
-            "bandType": "peak",
-            "freq": 500,
-            "q": 0.7
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.8878394453306535,
-            "b2": 0.893696544740608,
-            "a1": -1.8878394453306535,
-            "a2": 0.893696544740608,
-            "gain": 0,
-            "bandType": "peak",
-            "freq": 601,
-            "q": 0.7
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.6615215394385545,
-            "b2": 0.710305020043452,
-            "a1": -1.6615215394385545,
-            "a2": 0.710305020043452,
-            "freq": 1829,
-            "gain": 0,
-            "bandType": "peak",
-            "q": 0.7
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           }
         ]
       }
@@ -71,7 +52,7 @@
     {
       "id": 2,
       "label": "Analog 2",
-      "jackPort": "gainer:out_2",
+      "jackPort": "analog:out_2",
       "srcPort": "system:capture_2",
       "gain": 100,
       "muted": false,
@@ -79,48 +60,40 @@
       "dsp": {
         "hpf": {
           "enabled": false,
-          "freq": 80,
-          "type": "output",
-          "slope": 12
+          "freq": 80
         },
         "eq": [
           {
             "enabled": false,
-            "b0": null,
-            "b1": null,
-            "b2": null,
-            "a1": null,
-            "a2": null,
-            "bandType": "peak"
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
-            "b0": null,
-            "b1": null,
-            "b2": null,
-            "a1": null,
-            "a2": null,
-            "bandType": "peak"
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
-            "b0": null,
-            "b1": null,
-            "b2": null,
-            "a1": null,
-            "a2": null,
-            "bandType": "peak"
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
-            "b0": null,
-            "b1": null,
-            "b2": null,
-            "a1": null,
-            "a2": null,
-            "freq": 1408,
-            "gain": -2.1,
-            "bandType": "peak"
+            "b0": 1,
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           }
         ]
       }
@@ -128,7 +101,7 @@
     {
       "id": 3,
       "label": "USB AUDIO IN 1",
-      "jackPort": "mixer:out_1",
+      "jackPort": "usb:out_1",
       "srcPort": "USB Audio IN:capture_1",
       "gain": 100,
       "muted": false,
@@ -177,7 +150,7 @@
     {
       "id": 4,
       "label": "USB AUDIO IN 2",
-      "jackPort": "mixer:out_2",
+      "jackPort": "usb:out_2",
       "srcPort": "USB Audio IN:capture_2",
       "gain": 100,
       "muted": false,
@@ -226,10 +199,10 @@
     {
       "id": 5,
       "label": "Stream IN 1",
-      "jackPort": "mixer:out_3",
+      "jackPort": "stream:out_1",
       "srcPort": "rtp_in_1:out_1",
       "gain": 100,
-      "muted": true,
+      "muted": false,
       "bypassDsp": true,
       "dsp": {
         "hpf": {
@@ -275,10 +248,10 @@
     {
       "id": 6,
       "label": "Stream IN 2",
-      "jackPort": "mixer:out_4",
+      "jackPort": "stream:out_2",
       "srcPort": "rtp_in_1:out_2",
       "gain": 100,
-      "muted": true,
+      "muted": false,
       "bypassDsp": true,
       "dsp": {
         "hpf": {
@@ -324,7 +297,7 @@
     {
       "id": 7,
       "label": "AES67 1",
-      "jackPort": "mixer:out_5",
+      "jackPort": "aes67:out_1",
       "srcPort": "AES67_in:capture_1",
       "gain": 100,
       "muted": false,
@@ -373,7 +346,7 @@
     {
       "id": 8,
       "label": "AES67 2",
-      "jackPort": "mixer:out_6",
+      "jackPort": "aes67:out_2",
       "srcPort": "AES67_in:capture_2",
       "gain": 100,
       "muted": false,
@@ -424,7 +397,7 @@
     {
       "id": 1,
       "label": "Analog 1",
-      "jackPort": "gainer:sin_1",
+      "jackPort": "analog:sin_1",
       "sinkPort": "system:playback_1",
       "gain": 100,
       "muted": false,
@@ -434,56 +407,40 @@
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.9813040347772235,
-            "b2": 0.9814737924440637,
-            "a1": -1.9813040347772235,
-            "a2": 0.9814737924440637,
-            "bandType": "peak",
-            "freq": 100,
-            "gain": 0,
-            "q": 0.7
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.9066459797557105,
-            "b2": 0.9107370143743273,
-            "a1": -1.9066459797557105,
-            "a2": 0.9107370143743273,
-            "bandType": "peak",
-            "freq": 500,
-            "gain": 0,
-            "q": 0.7
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.6304323980330466,
-            "b2": 0.6879478254525045,
-            "a1": -1.6304323980330466,
-            "a2": 0.6879478254525045,
-            "bandType": "peak",
-            "freq": 2000,
-            "gain": 0,
-            "q": 0.7
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "b0": 1,
-            "b1": -7.143772995026227e-17,
-            "b2": 0.16666666666666666,
-            "a1": -7.143772995026227e-17,
-            "a2": 0.16666666666666666,
-            "freq": 12000,
-            "gain": 0,
-            "bandType": "peak",
-            "q": 0.7
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           }
         ],
         "limiter": {
           "enabled": false,
-          "threshold": -21.5,
-          "attack": 1,
+          "threshold": -6,
+          "attack": 5,
           "release": 100,
           "makeup": 0
         }
@@ -492,7 +449,7 @@
     {
       "id": 2,
       "label": "Analog 2",
-      "jackPort": "gainer:sin_2",
+      "jackPort": "analog:sin_2",
       "sinkPort": "system:playback_2",
       "gain": 100,
       "muted": false,
@@ -502,55 +459,39 @@
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.9665373642613544,
-            "b2": 0.9669266856710688,
-            "a1": -1.9665373642613544,
-            "a2": 0.9669266856710688,
-            "bandType": "low_shelf",
-            "freq": 152,
-            "gain": 0,
-            "q": 0.7
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.8495539614337466,
-            "b2": 0.8599217255755893,
-            "a1": -1.8495539614337466,
-            "a2": 0.8599217255755893,
-            "bandType": "peak",
-            "freq": 807,
-            "gain": 0,
-            "q": 0.7
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.6413274590094986,
-            "b2": 0.6957109893981736,
-            "a1": -1.6413274590094986,
-            "a2": 0.6957109893981736,
-            "bandType": "peak",
-            "freq": 1940,
-            "gain": 0,
-            "q": 0.7
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           },
           {
             "enabled": false,
             "b0": 1,
-            "b1": -1.6689929860937336,
-            "b2": 0.7157728186551734,
-            "a1": -1.6689929860937336,
-            "a2": 0.7157728186551734,
-            "freq": 1788,
-            "gain": 0,
-            "bandType": "peak",
-            "q": 0.7
+            "b1": 0,
+            "b2": 0,
+            "a1": 0,
+            "a2": 0
           }
         ],
         "limiter": {
           "enabled": false,
-          "threshold": -30,
+          "threshold": -6,
           "attack": 5,
           "release": 100,
           "makeup": 0
@@ -560,7 +501,7 @@
     {
       "id": 3,
       "label": "USB AUDIO OUT 1",
-      "jackPort": "mixer:sin_1",
+      "jackPort": "usb:sin_1",
       "sinkPort": "USB Audio OUT:playback_1",
       "gain": 100,
       "muted": false,
@@ -612,11 +553,11 @@
     {
       "id": 4,
       "label": "USB AUDIO OUT 2",
-      "jackPort": "mixer:sin_2",
+      "jackPort": "usb:sin_2",
       "sinkPort": "USB Audio OUT:playback_2",
       "gain": 100,
       "muted": false,
-      "bypassDsp": false,
+      "bypassDsp": true,
       "dsp": {
         "eq": [
           {
@@ -664,7 +605,7 @@
     {
       "id": 5,
       "label": "Stream OUT 1",
-      "jackPort": "mixer:sin_3",
+      "jackPort": "stream:sin_1",
       "sinkPort": "rtp_out_1:in_src_1",
       "gain": 100,
       "muted": false,
@@ -716,7 +657,7 @@
     {
       "id": 6,
       "label": "Stream OUT 2",
-      "jackPort": "mixer:sin_4",
+      "jackPort": "stream:sin_2",
       "sinkPort": "rtp_out_1:in_src_2",
       "gain": 100,
       "muted": false,
@@ -768,7 +709,7 @@
     {
       "id": 7,
       "label": "AES67 1",
-      "jackPort": "mixer:sin_5",
+      "jackPort": "aes67:sin_1",
       "sinkPort": "AES67_out:playback_1",
       "gain": 100,
       "muted": false,
@@ -820,7 +761,7 @@
     {
       "id": 8,
       "label": "AES67 2",
-      "jackPort": "mixer:sin_6",
+      "jackPort": "aes67:sin_2",
       "sinkPort": "AES67_out:playback_2",
       "gain": 100,
       "muted": false,
@@ -872,68 +813,28 @@
   ],
   "routing": [
     {
-      "src": "mixer:out_1",
-      "dst": "mixer:sin_5"
+      "src": "aes67:out_2",
+      "dst": "analog:sin_2"
     },
     {
-      "src": "mixer:out_2",
-      "dst": "mixer:sin_6"
+      "src": "aes67:out_1",
+      "dst": "stream:sin_1"
     },
     {
-      "src": "mixer:out_5",
-      "dst": "mixer:sin_1"
+      "src": "aes67:out_2",
+      "dst": "stream:sin_2"
     },
     {
-      "src": "mixer:out_6",
-      "dst": "mixer:sin_2"
+      "src": "stream:out_2",
+      "dst": "aes67:sin_2"
     },
     {
-      "src": "gainer:out_2",
-      "dst": "gainer:sin_2"
+      "src": "aes67:out_1",
+      "dst": "analog:sin_1"
     },
     {
-      "src": "mixer:out_6",
-      "dst": "gainer:sin_2"
-    },
-    {
-      "src": "mixer:out_3",
-      "dst": "mixer:sin_5"
-    },
-    {
-      "src": "mixer:out_4",
-      "dst": "mixer:sin_6"
-    },
-    {
-      "src": "gainer:out_1",
-      "dst": "mixer:sin_5"
-    },
-    {
-      "src": "gainer:out_2",
-      "dst": "mixer:sin_6"
-    },
-    {
-      "src": "gainer:out_1",
-      "dst": "gainer:sin_1"
-    },
-    {
-      "src": "mixer:out_5",
-      "dst": "mixer:sin_3"
-    },
-    {
-      "src": "mixer:out_6",
-      "dst": "mixer:sin_4"
-    },
-    {
-      "src": "mixer:out_5",
-      "dst": "gainer:sin_1"
-    },
-    {
-      "src": "mixer:out_2",
-      "dst": "gainer:sin_2"
-    },
-    {
-      "src": "mixer:out_1",
-      "dst": "gainer:sin_1"
+      "src": "stream:out_1",
+      "dst": "aes67:sin_1"
     }
   ]
 }

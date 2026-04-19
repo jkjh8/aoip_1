@@ -7,7 +7,7 @@ LDFLAGS = -ljack -lm -lpthread \
 DSP_CFLAGS  = -O3 -Wall -Wextra -ffast-math -march=native -funroll-loops
 DSP_LDFLAGS = -ljack -lm -lpthread
 
-TARGETS = dsp_engine rtp_recv rtp_send jack_pipe_out
+TARGETS = dsp_engine rtp_recv rtp_send jack_pipe_out jack_pipe_in
 
 all: $(TARGETS)
 
@@ -21,6 +21,9 @@ rtp_send: rtp_send.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 jack_pipe_out: jack_pipe_out.c
+	$(CC) $(DSP_CFLAGS) -o $@ $< $(DSP_LDFLAGS)
+
+jack_pipe_in: jack_pipe_in.c
 	$(CC) $(DSP_CFLAGS) -o $@ $< $(DSP_LDFLAGS)
 
 clean:

@@ -110,6 +110,10 @@ static char            g_src_ip[64] = "";
 static int             g_src_port   = 0;
 static pthread_mutex_t g_addr_mtx   = PTHREAD_MUTEX_INITIALIZER;
 
+/* pipe 출력 모드: JACK 대신 named FIFO에 F32LE interleaved 기록 */
+static char g_output_fifo[256] = "";
+static int  g_output_fd        = -1;
+
 /* ── JACK process callback ───────────────────────── */
 static int jack_process(jack_nframes_t nframes, void *arg)
 {
@@ -158,8 +162,13 @@ static GstFlowReturn on_new_sample(GstAppSink *sink, gpointer data)
     GstBuffer *buffer = gst_sample_get_buffer(sample);
     GstMapInfo map;
     if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-        int nframes = (int)(map.size / (sizeof(float) * (unsigned)g_ch));
-        ring_write((const float *)map.data, nframes);
+        if (g_output_fd >= 0) {
+            /* pipe 모드: FIFO에 F32LE interleaved 기록 (non-blocking, full drop on EAGAIN) */
+            write(g_output_fd, map.data, map.size);
+        } else {
+            int nframes = (int)(map.size / (sizeof(float) * (unsigned)g_ch));
+            ring_write((const float *)map.data, nframes);
+        }
         atomic_fetch_add_explicit(&g_packets, 1, memory_order_relaxed);
         gst_buffer_unmap(buffer, &map);
     }
@@ -291,9 +300,14 @@ static void *stats_thread(void *arg)
         src_port = g_src_port;
         pthread_mutex_unlock(&g_addr_mtx);
 
-        unsigned wp   = atomic_load(&ring.wp);
-        unsigned rp   = atomic_load(&ring.rp);
-        int buf_ms    = (int)((float)(wp - rp) / (float)g_rate * 1000.0f);
+        int buf_ms;
+        if (g_output_fd >= 0) {
+            buf_ms = 0;
+        } else {
+            unsigned wp = atomic_load(&ring.wp);
+            unsigned rp = atomic_load(&ring.rp);
+            buf_ms = (int)((float)(wp - rp) / (float)g_rate * 1000.0f);
+        }
         unsigned long pkts  = atomic_load(&g_packets);
         unsigned long drops = atomic_load(&g_drops);
 
@@ -509,36 +523,52 @@ int main(int argc, char *argv[])
     if (argc > 8 && argv[8][0] != '\0')
         snprintf(g_bind_address, sizeof(g_bind_address), "%s", argv[8]);
 
-    /* ring buffer init */
+    /* argv[9]="pipe"  argv[10]=fifo_path → pipe 출력 모드 */
+    if (argc > 9 && strcmp(argv[9], "pipe") == 0 && argc > 10)
+        snprintf(g_output_fifo, sizeof(g_output_fifo), "%s", argv[10]);
+
+    /* ring buffer init (JACK 모드에서만 사용) */
     memset(&ring, 0, sizeof(ring));
     ring.ch = g_ch;
 
-    /* ── JACK setup ── */
-    g_jclient = jack_client_open(client_name, JackNoStartServer | JackUseExactName, NULL);
-    if (!g_jclient) {
-        fprintf(stderr, "[rtp_recv] jack_client_open failed\n");
-        return 1;
-    }
-    g_rate = (int)jack_get_sample_rate(g_jclient);
+    if (g_output_fifo[0]) {
+        /* ── pipe 모드: FIFO 열기, JACK 불필요 ── */
+        g_output_fd = open(g_output_fifo, O_WRONLY | O_NONBLOCK);
+        if (g_output_fd < 0) {
+            fprintf(stderr, "[rtp_recv] open fifo %s failed: %s\n",
+                    g_output_fifo, strerror(errno));
+            return 1;
+        }
+        g_rate = g_sample_rate_in > 0 ? g_sample_rate_in : 48000;
+        fprintf(stderr, "[rtp_recv] pipe mode → %s\n", g_output_fifo);
+    } else {
+        /* ── JACK 모드 ── */
+        g_jclient = jack_client_open(client_name, JackNoStartServer | JackUseExactName, NULL);
+        if (!g_jclient) {
+            fprintf(stderr, "[rtp_recv] jack_client_open failed\n");
+            return 1;
+        }
+        g_rate = (int)jack_get_sample_rate(g_jclient);
 
-    for (int c = 0; c < g_ch; c++) {
-        char name[32];
-        snprintf(name, sizeof(name), "out_%d", c + 1);
-        jports[c] = jack_port_register(g_jclient, name,
-                                       JACK_DEFAULT_AUDIO_TYPE,
-                                       JackPortIsOutput, 0);
-        if (!jports[c]) {
-            fprintf(stderr, "[rtp_recv] jack_port_register %s failed\n", name);
+        for (int c = 0; c < g_ch; c++) {
+            char name[32];
+            snprintf(name, sizeof(name), "out_%d", c + 1);
+            jports[c] = jack_port_register(g_jclient, name,
+                                           JACK_DEFAULT_AUDIO_TYPE,
+                                           JackPortIsOutput, 0);
+            if (!jports[c]) {
+                fprintf(stderr, "[rtp_recv] jack_port_register %s failed\n", name);
+                jack_client_close(g_jclient);
+                return 1;
+            }
+        }
+
+        jack_set_process_callback(g_jclient, jack_process, NULL);
+        if (jack_activate(g_jclient)) {
+            fprintf(stderr, "[rtp_recv] jack_activate failed\n");
             jack_client_close(g_jclient);
             return 1;
         }
-    }
-
-    jack_set_process_callback(g_jclient, jack_process, NULL);
-    if (jack_activate(g_jclient)) {
-        fprintf(stderr, "[rtp_recv] jack_activate failed\n");
-        jack_client_close(g_jclient);
-        return 1;
     }
 
     /* ── GStreamer pipeline ── */
@@ -747,7 +777,8 @@ int main(int argc, char *argv[])
 
     gst_element_set_state(g_pipeline, GST_STATE_NULL);
     gst_object_unref(g_pipeline);
-    jack_client_close(g_jclient);
+    if (g_jclient) jack_client_close(g_jclient);
+    if (g_output_fd >= 0) close(g_output_fd);
 
     fprintf(stderr, "[rtp_recv] exiting\n");
     return g_exit_code;

@@ -102,7 +102,7 @@
       "id": 3,
       "label": "USB AUDIO IN 1",
       "jackPort": "usb:out_1",
-      "srcPort": "USB Audio IN:capture_1",
+      "srcPort": "USB Audio IN:audio_in_1",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -151,7 +151,7 @@
       "id": 4,
       "label": "USB AUDIO IN 2",
       "jackPort": "usb:out_2",
-      "srcPort": "USB Audio IN:capture_2",
+      "srcPort": "USB Audio IN:audio_in_2",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -202,7 +202,7 @@
       "jackPort": "stream:out_1",
       "srcPort": "rtp_in_1:out_1",
       "gain": 100,
-      "muted": false,
+      "muted": true,
       "bypassDsp": true,
       "dsp": {
         "hpf": {
@@ -251,7 +251,7 @@
       "jackPort": "stream:out_2",
       "srcPort": "rtp_in_1:out_2",
       "gain": 100,
-      "muted": false,
+      "muted": true,
       "bypassDsp": true,
       "dsp": {
         "hpf": {
@@ -298,7 +298,7 @@
       "id": 7,
       "label": "AES67 1",
       "jackPort": "aes67:out_1",
-      "srcPort": "AES67_in:capture_1",
+      "srcPort": "AES67_in:audio_in_1",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -347,7 +347,7 @@
       "id": 8,
       "label": "AES67 2",
       "jackPort": "aes67:out_2",
-      "srcPort": "AES67_in:capture_2",
+      "srcPort": "AES67_in:audio_in_2",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -502,7 +502,7 @@
       "id": 3,
       "label": "USB AUDIO OUT 1",
       "jackPort": "usb:sin_1",
-      "sinkPort": "USB Audio OUT:playback_1",
+      "sinkPort": "USB Audio OUT:audio_out_1",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -554,7 +554,7 @@
       "id": 4,
       "label": "USB AUDIO OUT 2",
       "jackPort": "usb:sin_2",
-      "sinkPort": "USB Audio OUT:playback_2",
+      "sinkPort": "USB Audio OUT:audio_out_2",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -710,7 +710,7 @@
       "id": 7,
       "label": "AES67 1",
       "jackPort": "aes67:sin_1",
-      "sinkPort": "AES67_out:playback_1",
+      "sinkPort": "AES67_out:audio_out_1",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -762,7 +762,7 @@
       "id": 8,
       "label": "AES67 2",
       "jackPort": "aes67:sin_2",
-      "sinkPort": "AES67_out:playback_2",
+      "sinkPort": "AES67_out:audio_out_2",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -813,22 +813,6 @@
   ],
   "routing": [
     {
-      "src": "stream:out_1",
-      "dst": "aes67:sin_1"
-    },
-    {
-      "src": "stream:out_2",
-      "dst": "aes67:sin_2"
-    },
-    {
-      "src": "aes67:out_1",
-      "dst": "analog:sin_1"
-    },
-    {
-      "src": "aes67:out_2",
-      "dst": "analog:sin_2"
-    },
-    {
       "src": "usb:out_1",
       "dst": "stream:sin_1"
     },
@@ -843,6 +827,30 @@
     {
       "src": "analog:out_2",
       "dst": "stream:sin_2"
+    },
+    {
+      "src": "aes67:out_1",
+      "dst": "aes67:sin_1"
+    },
+    {
+      "src": "aes67:out_2",
+      "dst": "aes67:sin_2"
+    },
+    {
+      "src": "aes67:out_1",
+      "dst": "analog:sin_1"
+    },
+    {
+      "src": "aes67:out_2",
+      "dst": "analog:sin_2"
+    },
+    {
+      "src": "stream:out_1",
+      "dst": "analog:sin_1"
+    },
+    {
+      "src": "stream:out_2",
+      "dst": "analog:sin_2"
     }
   ]
 }

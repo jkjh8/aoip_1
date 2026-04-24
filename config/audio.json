@@ -3,13 +3,13 @@
     "device": "hw:aoip",
     "name": "Analog",
     "rate": 48000,
-    "period": 96,
+    "period": 192,
     "periods": 3,
     "channels": 2
   },
   "bridges": [
     {
-      "type": "alsa_in",
+      "type": "audio_in",
       "name": "USB Audio IN",
       "device": "hw:UAC2Gadget",
       "rate": 48000,
@@ -20,7 +20,7 @@
       "enabled": true
     },
     {
-      "type": "alsa_out",
+      "type": "audio_out",
       "name": "USB Audio OUT",
       "device": "hw:UAC2Gadget",
       "rate": 48000,
@@ -31,23 +31,23 @@
       "enabled": true
     },
     {
-      "type": "alsa_in",
+      "type": "audio_in",
       "name": "AES67_in",
       "device": "hw:RAVENNA",
       "rate": 48000,
       "period": 48,
-      "periods": 3,
+      "periods": 8,
       "channels": 2,
       "aes67": true,
       "enabled": true
     },
     {
-      "type": "alsa_out",
+      "type": "audio_out",
       "name": "AES67_out",
       "device": "hw:RAVENNA",
       "rate": 48000,
       "period": 48,
-      "periods": 3,
+      "periods": 8,
       "channels": 2,
       "aes67": true,
       "enabled": true

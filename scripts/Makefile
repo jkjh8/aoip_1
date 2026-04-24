@@ -7,7 +7,7 @@ LDFLAGS = -ljack -lm -lpthread \
 DSP_CFLAGS  = -O3 -Wall -Wextra -ffast-math -march=native -funroll-loops
 DSP_LDFLAGS = -ljack -lm -lpthread
 
-TARGETS = dsp_engine rtp_recv rtp_send jack_pipe_out jack_pipe_in alsa_in alsa_out
+TARGETS = dsp_engine rtp_recv rtp_send jack_pipe_out jack_pipe_in audio_in audio_out
 
 ALSA_CFLAGS  = -O3 -Wall -Wextra -ffast-math -march=native -funroll-loops
 ALSA_LDFLAGS = -ljack -lasound -lsamplerate -lm -lpthread
@@ -29,13 +29,13 @@ jack_pipe_out: jack_pipe_out.c
 jack_pipe_in: jack_pipe_in.c
 	$(CC) $(ALSA_CFLAGS) -o $@ $< $(ALSA_LDFLAGS)
 
-alsa_in: alsa_in.c
+audio_in: audio_in.c
 	$(CC) $(ALSA_CFLAGS) -o $@ $< $(ALSA_LDFLAGS)
 
-alsa_out: alsa_out.c
+audio_out: audio_out.c
 	$(CC) $(ALSA_CFLAGS) -o $@ $< $(ALSA_LDFLAGS)
 
 clean:
-	rm -f $(TARGETS)
+	rm -f $(TARGETS) alsa_in alsa_out
 
 .PHONY: all clean

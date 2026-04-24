@@ -1,12 +1,12 @@
 /*
- * alsa_out.c — JACK input ports → ALSA playback (adaptive drift correction)
+ * audio_out.c — JACK input ports → ALSA playback (adaptive drift correction)
  *
- * JACK process_cb (SRC_LINEAR 드리프트 보정) → ring buffer → ALSA 재생 스레드
+ * JACK process_cb (SRC_SINC_FASTEST 드리프트 보정) → ring buffer → ALSA 재생 스레드
  *
- * Usage: alsa_out <client_name> <alsa_device> <rate> <period> <nperiods> <channels>
+ * Usage: audio_out <client_name> <alsa_device> <rate> <period> <nperiods> <channels> [ring_frames]
  *
  * Stdout:
- *   [alsa_out] ready
+ *   [audio_out] ready
  */
 
 #define _GNU_SOURCE
@@ -22,20 +22,20 @@
 #include <unistd.h>
 
 #define MAX_CH       8
-#define RING_FRAMES  8192
 #define RATIO_GAIN   0.00002f
-#define RATIO_MIN    0.998f
-#define RATIO_MAX    1.002f
+#define RATIO_MIN    0.99999f
+#define RATIO_MAX    1.00001f
 
 /* ── lock-free ring buffer (single producer / single consumer) ── */
-static float       g_ring[RING_FRAMES * MAX_CH];
-static atomic_uint g_wp = 0;
-static atomic_uint g_rp = 0;
+static float       *g_ring = NULL;
+static int          g_ring_frames = 8192;
+static atomic_uint  g_wp = 0;
+static atomic_uint  g_rp = 0;
 
 static int ring_free(void) {
     unsigned wp = atomic_load_explicit(&g_wp, memory_order_relaxed);
     unsigned rp = atomic_load_explicit(&g_rp, memory_order_acquire);
-    return (int)(RING_FRAMES - (wp - rp));
+    return (int)((unsigned)g_ring_frames - (wp - rp));
 }
 
 static int ring_avail(void) {
@@ -47,7 +47,7 @@ static int ring_avail(void) {
 static void ring_write_n(const float *src, int n, int ch) {
     unsigned wp = atomic_load_explicit(&g_wp, memory_order_relaxed);
     for (int i = 0; i < n; i++) {
-        unsigned idx = (wp + (unsigned)i) & (RING_FRAMES - 1);
+        unsigned idx = (wp + (unsigned)i) % (unsigned)g_ring_frames;
         memcpy(&g_ring[idx * ch], &src[i * ch], (size_t)ch * sizeof(float));
     }
     atomic_store_explicit(&g_wp, wp + (unsigned)n, memory_order_release);
@@ -58,7 +58,7 @@ static int ring_read_n(float *dst, int n, int ch) {
     unsigned wp = atomic_load_explicit(&g_wp, memory_order_acquire);
     if ((int)(wp - rp) < n) return 0;
     for (int i = 0; i < n; i++) {
-        unsigned idx = (rp + (unsigned)i) & (RING_FRAMES - 1);
+        unsigned idx = (rp + (unsigned)i) % (unsigned)g_ring_frames;
         memcpy(&dst[i * ch], &g_ring[idx * ch], (size_t)ch * sizeof(float));
     }
     atomic_store_explicit(&g_rp, rp + (unsigned)n, memory_order_release);
@@ -83,7 +83,7 @@ static int process_cb(jack_nframes_t nframes, void *arg)
     (void)arg;
 
     /* 드리프트 보정 ratio: ring이 비면 ratio↑ (더 많이 쓰기), 차면 ratio↓ */
-    float fill_ratio = (float)ring_avail() / (float)(RING_FRAMES / 2);
+    float fill_ratio = (float)ring_avail() / (float)(g_ring_frames / 2);
     g_ratio += (1.0f - fill_ratio) * RATIO_GAIN;
     if (g_ratio < RATIO_MIN) g_ratio = RATIO_MIN;
     if (g_ratio > RATIO_MAX) g_ratio = RATIO_MAX;
@@ -97,7 +97,7 @@ static int process_cb(jack_nframes_t nframes, void *arg)
 
     /* SRC: nframes 입력 → nframes * ratio 출력 */
     long out_max = (long)((double)nframes * g_ratio) + 4;
-    if (out_max > (long)(RING_FRAMES / 2)) out_max = (long)(RING_FRAMES / 2);
+    if (out_max > (long)(g_ring_frames / 2)) out_max = (long)(g_ring_frames / 2);
     if ((int)ring_free() < (int)out_max) return 0; /* ring 가득 → drop */
 
     SRC_DATA sd = {
@@ -154,13 +154,13 @@ static void *alsa_thread(void *arg)
 {
     (void)arg;
     snd_pcm_t *pcm = alsa_open_playback();
-    if (!pcm) { fprintf(stderr, "[alsa_out] cannot open %s\n", g_dev); g_quit = 1; return NULL; }
+    if (!pcm) { fprintf(stderr, "[audio_out] cannot open %s\n", g_dev); g_quit = 1; return NULL; }
 
     float   *fbuf = malloc((size_t)(g_period * g_ch) * sizeof(float));
     int32_t *ibuf = malloc((size_t)(g_period * g_ch) * sizeof(int32_t));
 
     /* 재생 시작 전 ring이 절반 찰 때까지 대기 */
-    while (!g_quit && ring_avail() < RING_FRAMES / 2) usleep(1000);
+    while (!g_quit && ring_avail() < g_ring_frames / 2) usleep(1000);
 
     while (!g_quit) {
         if (!ring_read_n(fbuf, g_period, g_ch)) {
@@ -178,14 +178,14 @@ static void *alsa_thread(void *arg)
         if (n == -EPIPE) {
             ring_reset();
             snd_pcm_prepare(pcm);
-            while (!g_quit && ring_avail() < RING_FRAMES / 2) usleep(1000);
+            while (!g_quit && ring_avail() < g_ring_frames / 2) usleep(1000);
         } else if (n == -ESTRPIPE) {
             ring_reset();
             while (!g_quit && snd_pcm_resume(pcm) == -EAGAIN) usleep(10000);
             snd_pcm_prepare(pcm);
-            while (!g_quit && ring_avail() < RING_FRAMES / 2) usleep(1000);
+            while (!g_quit && ring_avail() < g_ring_frames / 2) usleep(1000);
         } else if (n < 0) {
-            fprintf(stderr, "[alsa_out] ALSA error: %s — waiting for device\n", snd_strerror((int)n));
+            fprintf(stderr, "[audio_out] ALSA error: %s — waiting for device\n", snd_strerror((int)n));
             snd_pcm_close(pcm);
             pcm = NULL;
             ring_reset();
@@ -193,8 +193,8 @@ static void *alsa_thread(void *arg)
                 usleep(500000);
                 pcm = alsa_open_playback();
                 if (pcm) {
-                    fprintf(stderr, "[alsa_out] device reopened\n");
-                    while (!g_quit && ring_avail() < RING_FRAMES / 2) usleep(1000);
+                    fprintf(stderr, "[audio_out] device reopened\n");
+                    while (!g_quit && ring_avail() < g_ring_frames / 2) usleep(1000);
                     break;
                 }
             }
@@ -211,41 +211,46 @@ int main(int argc, char *argv[])
 {
     if (argc < 7) {
         fprintf(stderr,
-            "Usage: alsa_out <client> <device> <rate> <period> <nperiods> <channels>\n");
+            "Usage: audio_out <client> <device> <rate> <period> <nperiods> <channels> [ring_frames]\n");
         return 1;
     }
     const char *client = argv[1];
     snprintf(g_dev, sizeof(g_dev), "%s", argv[2]);
-    g_rate     = atoi(argv[3]);
-    g_period   = atoi(argv[4]);
-    g_nperiods = atoi(argv[5]);
-    g_ch       = atoi(argv[6]);
+    g_rate        = atoi(argv[3]);
+    g_period      = atoi(argv[4]);
+    g_nperiods    = atoi(argv[5]);
+    g_ch          = atoi(argv[6]);
+    g_ring_frames = argc > 7 ? atoi(argv[7]) : 8192;
+    if (g_ring_frames < 64) g_ring_frames = 64;
 
     if (g_ch < 1 || g_ch > MAX_CH) {
-        fprintf(stderr, "[alsa_out] channels out of range\n");
+        fprintf(stderr, "[audio_out] channels out of range\n");
         return 1;
     }
+
+    g_ring = calloc((size_t)(g_ring_frames * MAX_CH), sizeof(float));
+    if (!g_ring) { fprintf(stderr, "[audio_out] ring alloc failed\n"); return 1; }
 
     signal(SIGTERM, on_signal);
     signal(SIGINT,  on_signal);
 
     int err;
-    g_src = src_new(SRC_LINEAR, g_ch, &err);
+    g_src = src_new(SRC_SINC_FASTEST, g_ch, &err);
     if (!g_src) {
-        fprintf(stderr, "[alsa_out] src_new failed: %s\n", src_strerror(err));
+        fprintf(stderr, "[audio_out] src_new failed: %s\n", src_strerror(err));
         return 1;
     }
 
     g_jack = jack_client_open(client, JackNoStartServer, NULL);
-    if (!g_jack) { fprintf(stderr, "[alsa_out] JACK connect failed\n"); return 1; }
+    if (!g_jack) { fprintf(stderr, "[audio_out] JACK connect failed\n"); return 1; }
 
     for (int c = 0; c < g_ch; c++) {
         char name[32];
-        snprintf(name, sizeof(name), "playback_%d", c + 1);
+        snprintf(name, sizeof(name), "audio_out_%d", c + 1);
         g_ports[c] = jack_port_register(g_jack, name,
             JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
         if (!g_ports[c]) {
-            fprintf(stderr, "[alsa_out] port register failed ch=%d\n", c + 1);
+            fprintf(stderr, "[audio_out] port register failed ch=%d\n", c + 1);
             return 1;
         }
     }
@@ -253,14 +258,14 @@ int main(int argc, char *argv[])
     jack_set_process_callback(g_jack, process_cb, NULL);
     jack_on_shutdown(g_jack, on_jack_shutdown, NULL);
     if (jack_activate(g_jack)) {
-        fprintf(stderr, "[alsa_out] jack_activate failed\n");
+        fprintf(stderr, "[audio_out] jack_activate failed\n");
         return 1;
     }
 
     pthread_t tid;
     pthread_create(&tid, NULL, alsa_thread, NULL);
 
-    fprintf(stdout, "[alsa_out] ready\n");
+    fprintf(stdout, "[audio_out] ready\n");
     fflush(stdout);
 
     while (!g_quit) usleep(10000);
@@ -268,5 +273,6 @@ int main(int argc, char *argv[])
     pthread_join(tid, NULL);
     if (g_jack_alive) { jack_deactivate(g_jack); jack_client_close(g_jack); }
     src_delete(g_src);
+    free(g_ring);
     return 0;
 }

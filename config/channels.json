@@ -11,7 +11,9 @@
       "dsp": {
         "hpf": {
           "enabled": false,
-          "freq": 80
+          "freq": 20,
+          "type": "output",
+          "slope": 12
         },
         "eq": [
           {
@@ -298,7 +300,7 @@
       "id": 7,
       "label": "AES67 1",
       "jackPort": "aes67:out_1",
-      "srcPort": "AES67_in:audio_in_1",
+      "srcPort": "Analog In:audio_in_1",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -347,7 +349,7 @@
       "id": 8,
       "label": "AES67 2",
       "jackPort": "aes67:out_2",
-      "srcPort": "AES67_in:audio_in_2",
+      "srcPort": "Analog In:audio_in_2",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -414,11 +416,15 @@
           },
           {
             "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
+            "b0": 0.9211216766988778,
+            "b1": -1.7358137565323313,
+            "b2": 0.827859246486972,
+            "a1": -1.7358137565323313,
+            "a2": 0.7489809231858499,
+            "freq": 938,
+            "gain": -8.6,
+            "q": 0.7,
+            "bandType": "peak"
           },
           {
             "enabled": false,
@@ -439,7 +445,7 @@
         ],
         "limiter": {
           "enabled": false,
-          "threshold": -6,
+          "threshold": -30,
           "attack": 5,
           "release": 100,
           "makeup": 0
@@ -491,7 +497,7 @@
         ],
         "limiter": {
           "enabled": false,
-          "threshold": -6,
+          "threshold": -30,
           "attack": 5,
           "release": 100,
           "makeup": 0
@@ -710,7 +716,7 @@
       "id": 7,
       "label": "AES67 1",
       "jackPort": "aes67:sin_1",
-      "sinkPort": "AES67_out:audio_out_1",
+      "sinkPort": "Analog Out:audio_out_1",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -762,7 +768,7 @@
       "id": 8,
       "label": "AES67 2",
       "jackPort": "aes67:sin_2",
-      "sinkPort": "AES67_out:audio_out_2",
+      "sinkPort": "Analog Out:audio_out_2",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -837,19 +843,31 @@
       "dst": "aes67:sin_2"
     },
     {
-      "src": "aes67:out_1",
-      "dst": "analog:sin_1"
-    },
-    {
       "src": "aes67:out_2",
       "dst": "analog:sin_2"
+    },
+    {
+      "src": "stream:out_2",
+      "dst": "analog:sin_2"
+    },
+    {
+      "src": "aes67:out_1",
+      "dst": "analog:sin_1"
     },
     {
       "src": "stream:out_1",
       "dst": "analog:sin_1"
     },
     {
-      "src": "stream:out_2",
+      "src": "analog:out_1",
+      "dst": "aes67:sin_1"
+    },
+    {
+      "src": "analog:out_2",
+      "dst": "aes67:sin_2"
+    },
+    {
+      "src": "analog:out_2",
       "dst": "analog:sin_2"
     }
   ]

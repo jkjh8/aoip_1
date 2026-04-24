@@ -1,9 +1,9 @@
 {
   "jack": {
-    "device": "hw:aoip",
+    "device": "hw:sndrpiaoip2",
     "name": "Analog",
     "rate": 48000,
-    "period": 192,
+    "period": 512,
     "periods": 3,
     "channels": 2
   },
@@ -36,7 +36,7 @@
       "device": "hw:RAVENNA",
       "rate": 48000,
       "period": 48,
-      "periods": 8,
+      "periods": 12,
       "channels": 2,
       "aes67": true,
       "enabled": true
@@ -47,7 +47,7 @@
       "device": "hw:RAVENNA",
       "rate": 48000,
       "period": 48,
-      "periods": 8,
+      "periods": 12,
       "channels": 2,
       "aes67": true,
       "enabled": true

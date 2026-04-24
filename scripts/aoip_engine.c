@@ -403,12 +403,22 @@ static void sig_handler(int s) { (void)s; g_quit = 1; fclose(stdin); }
 static snd_pcm_t *alsa_open(const char *dev, int stream, int rate,
                               int period, int nperiods, int ch) {
     snd_pcm_t *pcm = NULL;
-    if (snd_pcm_open(&pcm, dev, stream, 0) < 0) return NULL;
+    int err;
+    if ((err = snd_pcm_open(&pcm, dev, stream, 0)) < 0) {
+        fprintf(stderr, "[aoip_engine] alsa_open %s (%s): %s\n",
+                dev, stream == SND_PCM_STREAM_CAPTURE ? "cap" : "play",
+                snd_strerror(err));
+        return NULL;
+    }
     snd_pcm_hw_params_t *hw;
     snd_pcm_hw_params_alloca(&hw);
     snd_pcm_hw_params_any(pcm, hw);
     snd_pcm_hw_params_set_access(pcm, hw, SND_PCM_ACCESS_RW_INTERLEAVED);
-    snd_pcm_hw_params_set_format(pcm, hw, SND_PCM_FORMAT_S32_LE);
+    if ((err = snd_pcm_hw_params_set_format(pcm, hw, SND_PCM_FORMAT_S32_LE)) < 0) {
+        fprintf(stderr, "[aoip_engine] alsa_open %s: S32_LE not supported: %s\n",
+                dev, snd_strerror(err));
+        snd_pcm_close(pcm); return NULL;
+    }
     snd_pcm_hw_params_set_channels(pcm, hw, (unsigned)ch);
     unsigned r = (unsigned)rate;
     snd_pcm_hw_params_set_rate_near(pcm, hw, &r, 0);
@@ -416,7 +426,15 @@ static snd_pcm_t *alsa_open(const char *dev, int stream, int rate,
     snd_pcm_hw_params_set_period_size_near(pcm, hw, &p, 0);
     snd_pcm_uframes_t buf = p * (snd_pcm_uframes_t)nperiods;
     snd_pcm_hw_params_set_buffer_size_near(pcm, hw, &buf);
-    if (snd_pcm_hw_params(pcm, hw) < 0) { snd_pcm_close(pcm); return NULL; }
+    if ((err = snd_pcm_hw_params(pcm, hw)) < 0) {
+        fprintf(stderr, "[aoip_engine] alsa_open %s hw_params: %s\n",
+                dev, snd_strerror(err));
+        snd_pcm_close(pcm); return NULL;
+    }
+    if (r != (unsigned)rate)
+        fprintf(stderr, "[aoip_engine] alsa_open %s: rate %d → %u\n", dev, rate, r);
+    if (p != (snd_pcm_uframes_t)period)
+        fprintf(stderr, "[aoip_engine] alsa_open %s: period %d → %lu\n", dev, period, (unsigned long)p);
     snd_pcm_prepare(pcm);
     return pcm;
 }
@@ -430,10 +448,7 @@ static void *alsa_capture_thread(void *arg) {
 
     snd_pcm_t *pcm = alsa_open(d->dev, SND_PCM_STREAM_CAPTURE,
                                 d->rate, d->period, d->nperiods, d->channels);
-    if (!pcm) {
-        fprintf(stderr, "[aoip_engine] cap: cannot open %s\n", d->dev);
-        return NULL;
-    }
+    if (!pcm) return NULL;
 
     int32_t *ibuf = malloc((size_t)(d->period * d->channels) * sizeof(int32_t));
     float   *fbuf = malloc((size_t)(d->period * d->channels) * sizeof(float));
@@ -478,7 +493,6 @@ static void *alsa_playback_thread(void *arg) {
     snd_pcm_t *pcm = alsa_open(d->dev, SND_PCM_STREAM_PLAYBACK,
                                 d->rate, d->period, d->nperiods, d->channels);
     if (!pcm) {
-        fprintf(stderr, "[aoip_engine] play: cannot open %s\n", d->dev);
         return NULL;
     }
 
@@ -541,39 +555,44 @@ static void *rtp_fifo_reader_thread(void *arg) {
     struct sched_param sp = { .sched_priority = 75 };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
 
-    /* Non-blocking으로 반복 시도 (writer가 연결될 때까지) */
-    while (!r->quit && !g_quit) {
-        r->fd = open(r->fifo_path, O_RDONLY | O_NONBLOCK);
-        if (r->fd >= 0) break;
-        usleep(100000);
-    }
-    if (r->fd < 0) return NULL;
-
-    /* 연결 후 블로킹 모드로 전환 */
-    int flags = fcntl(r->fd, F_GETFL);
-    fcntl(r->fd, F_SETFL, flags & ~O_NONBLOCK);
-
     size_t frame_bytes = (size_t)r->channels * sizeof(float);
     size_t want = (size_t)PERIOD_FRAMES * frame_bytes;
     float *buf  = malloc(want);
 
     while (!r->quit && !g_quit) {
-        /* PERIOD_FRAMES 만큼 정확히 읽기 */
-        size_t got = 0;
-        while (got < want && !r->quit && !g_quit) {
-            ssize_t n = read(r->fd, (char *)buf + got, want - got);
-            if (n <= 0) {
-                if (errno == EINTR) continue;
-                goto reader_eof;
-            }
-            got += (size_t)n;
+        /* writer(rtp_recv)가 연결될 때까지 반복 시도 */
+        while (!r->quit && !g_quit) {
+            r->fd = open(r->fifo_path, O_RDONLY | O_NONBLOCK);
+            if (r->fd >= 0) break;
+            usleep(100000);
         }
-        if (got == want) rb_write(&r->ring, buf, PERIOD_FRAMES);
+        if (r->fd < 0) break;
+
+        /* 블로킹 모드로 전환 */
+        int flags = fcntl(r->fd, F_GETFL);
+        fcntl(r->fd, F_SETFL, flags & ~O_NONBLOCK);
+
+        /* 읽기 루프 — EOF 시 재연결 대기로 복귀 */
+        while (!r->quit && !g_quit) {
+            size_t got = 0;
+            while (got < want && !r->quit && !g_quit) {
+                ssize_t n = read(r->fd, (char *)buf + got, want - got);
+                if (n <= 0) {
+                    if (errno == EINTR) continue;
+                    goto reader_reconnect;  /* EOF: writer 재연결 대기 */
+                }
+                got += (size_t)n;
+            }
+            if (got == want) rb_write(&r->ring, buf, PERIOD_FRAMES);
+        }
+
+reader_reconnect:
+        close(r->fd); r->fd = -1;
+        /* rb 비우기: 무음으로 초기화 */
+        rb_init(&r->ring, r->ring.ring_frames, r->channels);
     }
 
-reader_eof:
     free(buf);
-    if (r->fd >= 0) { close(r->fd); r->fd = -1; }
     return NULL;
 }
 
@@ -584,33 +603,38 @@ static void *rtp_fifo_writer_thread(void *arg) {
     struct sched_param sp = { .sched_priority = 75 };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
 
-    /* Non-blocking으로 반복 시도 (reader가 연결될 때까지) */
-    while (!r->quit && !g_quit) {
-        r->fd = open(r->fifo_path, O_WRONLY | O_NONBLOCK);
-        if (r->fd >= 0) break;
-        usleep(100000);
-    }
-    if (r->fd < 0) return NULL;
-
-    /* 블로킹 모드로 전환 (쓰기 차단으로 자연스러운 back-pressure) */
-    int flags = fcntl(r->fd, F_GETFL);
-    fcntl(r->fd, F_SETFL, flags & ~O_NONBLOCK);
-
     size_t frame_bytes = (size_t)r->channels * sizeof(float);
     size_t want = (size_t)PERIOD_FRAMES * frame_bytes;
     float *buf  = malloc(want);
 
     while (!r->quit && !g_quit) {
-        if (!rb_read(&r->ring, buf, PERIOD_FRAMES)) {
-            usleep(1000);
-            continue;
+        /* reader(rtp_send)가 연결될 때까지 반복 시도 */
+        while (!r->quit && !g_quit) {
+            r->fd = open(r->fifo_path, O_WRONLY | O_NONBLOCK);
+            if (r->fd >= 0) break;
+            usleep(100000);
         }
-        ssize_t n = write(r->fd, buf, want);
-        if (n < 0 && errno != EINTR) break;
+        if (r->fd < 0) break;
+
+        /* 블로킹 모드로 전환 */
+        int flags = fcntl(r->fd, F_GETFL);
+        fcntl(r->fd, F_SETFL, flags & ~O_NONBLOCK);
+
+        /* 쓰기 루프 — EPIPE 등 에러 시 재연결 대기 */
+        while (!r->quit && !g_quit) {
+            if (!rb_read(&r->ring, buf, PERIOD_FRAMES)) {
+                usleep(1000);
+                continue;
+            }
+            ssize_t n = write(r->fd, buf, want);
+            if (n < 0 && errno != EINTR) break;
+        }
+
+        close(r->fd); r->fd = -1;
+        rb_init(&r->ring, r->ring.ring_frames, r->channels);
     }
 
     free(buf);
-    if (r->fd >= 0) { close(r->fd); r->fd = -1; }
     return NULL;
 }
 

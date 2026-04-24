@@ -204,7 +204,7 @@
       "jackPort": "stream:out_1",
       "srcPort": "rtp_in_1:out_1",
       "gain": 100,
-      "muted": false,
+      "muted": true,
       "bypassDsp": true,
       "dsp": {
         "hpf": {
@@ -253,7 +253,7 @@
       "jackPort": "stream:out_2",
       "srcPort": "rtp_in_1:out_2",
       "gain": 100,
-      "muted": false,
+      "muted": true,
       "bypassDsp": true,
       "dsp": {
         "hpf": {

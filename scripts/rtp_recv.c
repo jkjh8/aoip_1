@@ -423,8 +423,13 @@ int main(int argc, char *argv[])
         fprintf(stderr, "[rtp_recv] fifo path required (argv[9]=pipe argv[10]=<path>)\n");
         return 1;
     }
-    /* O_WRONLY blocks until aoip_engine opens the reader side */
-    g_output_fd = open(g_output_fifo, O_WRONLY);
+    /* aoip_engine reader가 열릴 때까지 최대 5초 재시도 */
+    for (int _i = 0; _i < 50; _i++) {
+        g_output_fd = open(g_output_fifo, O_WRONLY | O_NONBLOCK);
+        if (g_output_fd >= 0) break;
+        if (errno != ENXIO) break;  /* ENXIO 외 에러는 즉시 실패 */
+        usleep(100000);             /* 100ms 대기 후 재시도 */
+    }
     if (g_output_fd < 0) {
         fprintf(stderr, "[rtp_recv] open fifo %s failed: %s\n",
                 g_output_fifo, strerror(errno));

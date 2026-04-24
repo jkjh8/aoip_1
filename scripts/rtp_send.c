@@ -1,13 +1,11 @@
 /*
- * rtp_send.c — JACK → GStreamer RTP/UDP sender
+ * rtp_send.c — GStreamer RTP/UDP sender (pipe mode, FIFO input)
  *
  * GStreamer pipeline:
- *   jackaudiosrc → audioconvert → audioresample → capsfilter
+ *   fdsrc(F32LE) → audioconvert → [audioresample] → capsfilter
  *     → [rtpL16pay|rtpmpapay|rtpopuspay] → tee → udpsink × N
  *
- * JACK ports: <client>:in_1 … <client>:in_N  (GStreamer registers them)
- *
- * Usage:   rtp_send [channels=2] [client=rtp_send] [protocol=raw|rtp] [outRate=0]
+ * Usage:   rtp_send <channels> <client> <proto> <outRate> pipe <fifo_path>
  *
  * Stdin commands:
  *   add <host> <port>           — add TX target (rebuilds pipeline)
@@ -15,15 +13,13 @@
  *   codec <mp3|opus|raw> [br]   — set codec / bitrate
  *   quit                        — clean shutdown
  *
- * Stdout (parsed by Node.js):
- *   ports: <client>:in_1, ...
+ * Stderr:
  *   [rtp_send] ready
  *   stats targets=N codec=X bitrateKbps=N bytesSent=N
  */
 
 #include <gst/gst.h>
 #include <gst/base/gstbasesrc.h>
-#include <jack/jack.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,7 +54,6 @@ static char g_input_fifo[256] = "";
 static int  g_input_fd        = -1;
 
 static GstElement     *g_pipeline = NULL;
-static GstElement     *g_jaksrc   = NULL;   /* jackaudiosrc */
 static pthread_mutex_t pipe_mutex  = PTHREAD_MUTEX_INITIALIZER;
 
 /* stats: bytes passing through udpsink sink pad */
@@ -96,7 +91,6 @@ static void pipeline_stop(void)
         gst_element_set_state(g_pipeline, GST_STATE_NULL);
         gst_object_unref(g_pipeline);
         g_pipeline = NULL;
-        g_jaksrc   = NULL;
     }
     /* fdsrc may close the fd when the pipeline is unreffed (versions without
      * close-fd property).  Reset so pipeline_build() always reopens it. */
@@ -110,82 +104,49 @@ static int pipeline_build(void)
 {
     pipeline_stop();
 
-    int jack_rate = 48000;
-    {
-        jack_client_t *tmp = jack_client_open("_rate_probe",
-            JackNoStartServer | JackUseExactName, NULL);
-        if (tmp) {
-            jack_rate = (int)jack_get_sample_rate(tmp);
-            jack_client_close(tmp);
-        }
-    }
-    int out_rate = (g_out_rate > 0) ? g_out_rate : jack_rate;
+    int in_rate  = 48000;   /* aoip_engine → FIFO → F32LE @ 48kHz */
+    int out_rate = (g_out_rate > 0) ? g_out_rate : in_rate;
 
     GstElement *pipe   = gst_pipeline_new("rtp_send");
     GstElement *cvt    = gst_element_factory_make("audioconvert",  "cvt");
-    GstElement *resamp = (out_rate != jack_rate) ?
+    GstElement *resamp = (out_rate != in_rate) ?
                          gst_element_factory_make("audioresample", "resamp") : NULL;
 
     if (!cvt) goto fail;
-    if (out_rate != jack_rate && !resamp) goto fail;
+    if (out_rate != in_rate && !resamp) goto fail;
+
+    /* fdsrc → capsfilter(F32LE) → cvt [→ resamp] */
+    if (g_input_fd < 0) {
+        g_input_fd = open(g_input_fifo, O_RDONLY);
+        if (g_input_fd < 0) { perror("[rtp_send] open input fifo"); goto fail; }
+    }
+    GstElement *src = gst_element_factory_make("fdsrc",     "src");
+    GstElement *cf  = gst_element_factory_make("capsfilter", "cf_in");
+    if (!src || !cf) goto fail;
+
+    GstCaps *in_caps = gst_caps_new_simple("audio/x-raw",
+        "format",   G_TYPE_STRING, "F32LE",
+        "rate",     G_TYPE_INT,    in_rate,
+        "channels", G_TYPE_INT,    g_ch,
+        "layout",   G_TYPE_STRING, "interleaved", NULL);
+    g_object_set(src, "fd", g_input_fd, NULL);
+    gst_base_src_set_do_timestamp(GST_BASE_SRC(src), TRUE);
+    gst_base_src_set_live(GST_BASE_SRC(src), TRUE);
+    g_object_set(cf, "caps", in_caps, NULL);
+    gst_caps_unref(in_caps);
 
     GstElement *last_cvt;
-
-    if (g_input_fifo[0]) {
-        /* ── Pipe 모드: fdsrc → capsfilter(F32LE) → cvt [→ resamp] ── */
-        if (g_input_fd < 0) {
-            g_input_fd = open(g_input_fifo, O_RDONLY);
-            if (g_input_fd < 0) { perror("[rtp_send] open input fifo"); goto fail; }
-        }
-        GstElement *src  = gst_element_factory_make("fdsrc",      "src");
-        GstElement *cf   = gst_element_factory_make("capsfilter",  "cf_in");
-        if (!src || !cf) goto fail;
-
-        GstCaps *in_caps = gst_caps_new_simple("audio/x-raw",
-            "format",   G_TYPE_STRING, "F32LE",
-            "rate",     G_TYPE_INT,    jack_rate,
-            "channels", G_TYPE_INT,    g_ch,
-            "layout",   G_TYPE_STRING, "interleaved", NULL);
-        g_object_set(src, "fd", g_input_fd, NULL);
-        gst_base_src_set_do_timestamp(GST_BASE_SRC(src), TRUE);
-        gst_base_src_set_live(GST_BASE_SRC(src), TRUE);
-        g_object_set(cf,  "caps", in_caps, NULL);
-        gst_caps_unref(in_caps);
-
-        if (resamp) {
-            gst_bin_add_many(GST_BIN(pipe), src, cf, cvt, resamp, NULL);
-            if (!gst_element_link(src, cf))     goto fail;
-            if (!gst_element_link(cf,  cvt))    goto fail;
-            if (!gst_element_link(cvt, resamp)) goto fail;
-        } else {
-            gst_bin_add_many(GST_BIN(pipe), src, cf, cvt, NULL);
-            if (!gst_element_link(src, cf))  goto fail;
-            if (!gst_element_link(cf,  cvt)) goto fail;
-        }
-        last_cvt  = resamp ? resamp : cvt;
-        g_jaksrc  = NULL;
+    if (resamp) {
+        gst_bin_add_many(GST_BIN(pipe), src, cf, cvt, resamp, NULL);
+        if (!gst_element_link(src, cf))     goto fail;
+        if (!gst_element_link(cf,  cvt))    goto fail;
+        if (!gst_element_link(cvt, resamp)) goto fail;
     } else {
-        /* ── JACK 모드: jackaudiosrc → cvt [→ resamp] ── */
-        GstElement *src = gst_element_factory_make("jackaudiosrc", "src");
-        if (!src) goto fail;
-
-        g_object_set(src, "client-name", g_client_name, "connect", 0, NULL);
-
-        GstCaps *src_caps = gst_caps_new_simple("audio/x-raw",
-            "channels", G_TYPE_INT, g_ch, NULL);
-
-        if (resamp) {
-            gst_bin_add_many(GST_BIN(pipe), src, cvt, resamp, NULL);
-            if (!gst_element_link_filtered(src, cvt, src_caps)) { gst_caps_unref(src_caps); goto fail; }
-            if (!gst_element_link(cvt, resamp)) { gst_caps_unref(src_caps); goto fail; }
-        } else {
-            gst_bin_add_many(GST_BIN(pipe), src, cvt, NULL);
-            if (!gst_element_link_filtered(src, cvt, src_caps)) { gst_caps_unref(src_caps); goto fail; }
-        }
-        gst_caps_unref(src_caps);
-        last_cvt = resamp ? resamp : cvt;
-        g_jaksrc  = src;
+        gst_bin_add_many(GST_BIN(pipe), src, cf, cvt, NULL);
+        if (!gst_element_link(src, cf))  goto fail;
+        if (!gst_element_link(cf,  cvt)) goto fail;
     }
+    last_cvt = resamp ? resamp : cvt;
 
     GstElement *enc      = NULL;
     GstElement *caps_flt = NULL;
@@ -290,82 +251,19 @@ static int pipeline_build(void)
     if (ret == GST_STATE_CHANGE_FAILURE) {
         fprintf(stderr, "[rtp_send] pipeline failed to start PLAYING\n");
         gst_object_unref(g_pipeline);
-        g_pipeline = NULL; g_jaksrc = NULL;
+        g_pipeline = NULL;
         return 0;
     }
     fprintf(stderr, "[rtp_send] pipeline built: %s%s rate=%d→%d targets=%d\n",
             g_codec == CODEC_MP3 ? "mp3" : g_codec == CODEC_OPUS ? "opus" : "raw",
             g_use_rtp ? "+rtp" : "",
-            jack_rate, out_rate, n_targets);
+            in_rate, out_rate, n_targets);
     return 1;
 
 fail:
     fprintf(stderr, "[rtp_send] pipeline build failed\n");
     gst_object_unref(pipe);
     return 0;
-}
-
-/* ── port reporter ───────────────────────────────── */
-typedef struct { int count; int send_ready; } PortPollCtx;
-
-
-static gboolean report_ports_cb(gpointer data)
-{
-    PortPollCtx *ctx = (PortPollCtx *)data;
-    ctx->count++;
-
-    jack_client_t *probe = jack_client_open("_port_probe",
-        JackNoStartServer, NULL);
-    if (!probe) {
-        if (ctx->count < 20) return G_SOURCE_CONTINUE;
-        goto fallback;
-    }
-
-    {
-        char pattern[128];
-        snprintf(pattern, sizeof(pattern), "^%s:", g_client_name);
-        const char **ports = jack_get_ports(probe, pattern, NULL, 0);
-        int nports = 0;
-        if (ports) { while (ports[nports]) nports++; }
-
-        if (nports < g_ch && ctx->count < 20) {
-            if (ports) jack_free(ports);
-            jack_client_close(probe);
-            return G_SOURCE_CONTINUE;
-        }
-
-        if (nports > 0) {
-            fprintf(stdout, "ports:");
-            for (int i = 0; i < nports; i++) {
-                if (i) fprintf(stdout, ",");
-                fprintf(stdout, " %s", ports[i]);
-            }
-            fprintf(stdout, "\n");
-            jack_free(ports);
-            jack_client_close(probe);
-            goto done;
-        }
-        if (ports) jack_free(ports);
-        jack_client_close(probe);
-    }
-
-fallback:
-    fprintf(stdout, "ports:");
-    for (int c = 0; c < g_ch; c++) {
-        if (c) fprintf(stdout, ",");
-        fprintf(stdout, " %s:in_src_%d", g_client_name, c + 1);
-    }
-    fprintf(stdout, "\n");
-
-done:
-    if (ctx->send_ready) {
-        fprintf(stdout, "[rtp_send] ready\n");
-        fprintf(stderr, "[rtp_send] started client=%s ch=%d use_rtp=%d out_rate=%d\n",
-                g_client_name, g_ch, g_use_rtp, g_out_rate);
-    }
-    fflush(stdout);
-    g_free(ctx);
-    return G_SOURCE_REMOVE;
 }
 
 /* ── stats thread (~2 Hz) ────────────────────────── */
@@ -421,9 +319,6 @@ static void *stdin_thread(void *arg)
             pthread_mutex_lock(&pipe_mutex);
             pipeline_build();
             pthread_mutex_unlock(&pipe_mutex);
-            /* re-report ports so Node.js can reconnect JACK after rebuild */
-            { PortPollCtx *ctx = g_new0(PortPollCtx, 1); ctx->send_ready = 0;
-              g_timeout_add(100, report_ports_cb, ctx); }
             fprintf(stderr, "[rtp_send] add target %s:%d (total=%d)\n", h, p, n_targets);
             continue;
         }
@@ -440,8 +335,6 @@ static void *stdin_thread(void *arg)
             pthread_mutex_lock(&pipe_mutex);
             pipeline_build();
             pthread_mutex_unlock(&pipe_mutex);
-            { PortPollCtx *ctx = g_new0(PortPollCtx, 1); ctx->send_ready = 0;
-              g_timeout_add(100, report_ports_cb, ctx); }
             fprintf(stderr, "[rtp_send] remove target %s:%d (total=%d)\n", h, p, n_targets);
             continue;
         }
@@ -464,8 +357,6 @@ static void *stdin_thread(void *arg)
             pthread_mutex_lock(&pipe_mutex);
             pipeline_build();
             pthread_mutex_unlock(&pipe_mutex);
-            { PortPollCtx *ctx = g_new0(PortPollCtx, 1); ctx->send_ready = 0;
-              g_timeout_add(100, report_ports_cb, ctx); }
             fprintf(stderr, "[rtp_send] codec=%s bitrate=%d\n", codec_str, br);
             continue;
         }
@@ -494,19 +385,16 @@ int main(int argc, char *argv[])
     if (argc > 5 && strcmp(argv[5], "pipe") == 0 && argc > 6)
         snprintf(g_input_fifo, sizeof(g_input_fifo), "%s", argv[6]);
 
+    if (!g_input_fifo[0]) {
+        fprintf(stderr, "[rtp_send] fifo path required (argv[5]=pipe argv[6]=<path>)\n");
+        return 1;
+    }
+
     pthread_mutex_lock(&pipe_mutex);
     pipeline_build();
     pthread_mutex_unlock(&pipe_mutex);
 
-    if (!g_input_fifo[0]) {
-        /* JACK 모드: jackaudiosrc가 포트를 등록할 때까지 100ms 간격으로 폴링 */
-        PortPollCtx *ctx = g_new0(PortPollCtx, 1); ctx->send_ready = 1;
-        g_timeout_add(100, report_ports_cb, ctx);
-    } else {
-        /* pipe 모드: 포트는 jack_pipe_out이 담당, ready 신호만 전송 */
-        fprintf(stdout, "[rtp_send] ready\n");
-        fflush(stdout);
-    }
+    fprintf(stderr, "[rtp_send] ready\n");
 
     pthread_t stdin_tid, stats_tid;
     pthread_create(&stdin_tid, NULL, stdin_thread, NULL);

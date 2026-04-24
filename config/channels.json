@@ -204,7 +204,7 @@
       "jackPort": "stream:out_1",
       "srcPort": "rtp_in_1:out_1",
       "gain": 100,
-      "muted": true,
+      "muted": false,
       "bypassDsp": true,
       "dsp": {
         "hpf": {
@@ -253,7 +253,7 @@
       "jackPort": "stream:out_2",
       "srcPort": "rtp_in_1:out_2",
       "gain": 100,
-      "muted": true,
+      "muted": false,
       "bypassDsp": true,
       "dsp": {
         "hpf": {
@@ -300,7 +300,7 @@
       "id": 7,
       "label": "AES67 1",
       "jackPort": "aes67:out_1",
-      "srcPort": "Analog In:audio_in_1",
+      "srcPort": "AES67_in:audio_in_1",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -349,7 +349,7 @@
       "id": 8,
       "label": "AES67 2",
       "jackPort": "aes67:out_2",
-      "srcPort": "Analog In:audio_in_2",
+      "srcPort": "AES67_in:audio_in_2",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -408,11 +408,15 @@
         "eq": [
           {
             "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
+            "b0": 0.9753424763374113,
+            "b1": -1.8756367759958343,
+            "b2": 0.9047152000975037,
+            "a1": -1.8756367759958343,
+            "a2": 0.880057676434915,
+            "freq": 524,
+            "gain": -4.6,
+            "q": 0.7,
+            "bandType": "peak"
           },
           {
             "enabled": false,
@@ -716,7 +720,7 @@
       "id": 7,
       "label": "AES67 1",
       "jackPort": "aes67:sin_1",
-      "sinkPort": "Analog Out:audio_out_1",
+      "sinkPort": "AES67_out:audio_out_1",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,
@@ -768,7 +772,7 @@
       "id": 8,
       "label": "AES67 2",
       "jackPort": "aes67:sin_2",
-      "sinkPort": "Analog Out:audio_out_2",
+      "sinkPort": "AES67_out:audio_out_2",
       "gain": 100,
       "muted": false,
       "bypassDsp": true,

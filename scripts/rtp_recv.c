@@ -1,24 +1,19 @@
 /*
- * rtp_recv.c — UDP stream receiver → JACK output ports
+ * rtp_recv.c — UDP stream receiver → named FIFO (pipe mode)
  *
- * JACK client:  rtp_in
- * JACK ports:   rtp_in:out_1 … rtp_in:out_N  (output/source ports)
+ * GStreamer:  udpsrc → [depay] → audioconvert → audioresample → appsink
+ * Bridge:     appsink → write(F32LE interleaved) → FIFO → aoip_engine
  *
- * GStreamer:    udpsrc → decodebin → audioconvert → audioresample → appsink
- * Bridge:       appsink → ring buffer → JACK process callback
+ * Usage:  rtp_recv <port> <channels> <proto> <name> <bufMs> <rate> <enc> <addr> pipe <fifo>
  *
- * Usage:   rtp_recv <port> [channels=2] [bufferMs=100]
- *
- * Stdout (parsed by Node.js):
+ * Stderr:
  *   [rtp_recv] ready
- *   ports: rtp_in:out_1, rtp_in:out_2
- *   stats codec=mp3 bufMs=N packets=N drops=N
+ *   stats codec=... bufMs=N packets=N drops=N
  */
 
 #include <gst/gst.h>
 #include <gst/net/net.h>
 #include <gst/app/gstappsink.h>
-#include <jack/jack.h>
 #include <gio/gio.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,7 +30,7 @@
 
 
 #define MAX_CH       2
-#define RING_FRAMES  16384   /* must be power of 2 */
+#define RING_FRAMES  16384   /* unused, kept for reference */
 
 typedef enum { PROTO_RAW = 0, PROTO_PCM, PROTO_RTP } ProtoMode;
 static ProtoMode g_proto = PROTO_RAW;
@@ -43,55 +38,7 @@ static int       g_sample_rate_in = 44100;  /* input sample rate (PCM/RTP mode) 
 static char      g_encoding_name[32] = "L16"; /* RTP encoding name (L24, L16, OPUS, ...) */
 static char      g_bind_address[64]  = "0.0.0.0"; /* bind/multicast address */
 
-/* ── ring buffer ─────────────────────────────────── */
-typedef struct {
-    float       buf[RING_FRAMES * MAX_CH];
-    atomic_uint wp;      /* write pointer (frames) */
-    atomic_uint rp;      /* read pointer  (frames) */
-    int         ch;
-} Ring;
-
-static Ring ring;
-
-static void ring_write(const float *src, int nframes)
-{
-    unsigned wp = atomic_load_explicit(&ring.wp, memory_order_relaxed);
-    unsigned rp = atomic_load_explicit(&ring.rp, memory_order_acquire);
-    //if ((int)(RING_FRAMES - (wp - rp)) < nframes) {
-    //    atomic_fetch_add_explicit(&ring.rp,
-    //        (unsigned)nframes, memory_order_release); /* discard oldest */
-    //}
-    unsigned free = RING_FRAMES - (wp - rp);
-    if ((int)free < nframes) {
-        unsigned drop = nframes - free;
-        atomic_fetch_add_explicit(&ring.rp, drop, memory_order_release);
-    }
-    for (int i = 0; i < nframes; i++) {
-        unsigned idx = (wp + i) & (RING_FRAMES - 1);
-        memcpy(&ring.buf[idx * ring.ch], &src[i * ring.ch],
-               (unsigned)ring.ch * sizeof(float));
-    }
-    atomic_store_explicit(&ring.wp, wp + (unsigned)nframes, memory_order_release);
-}
-
-/* returns 1 on success, 0 on underrun */
-static int ring_read(float *dst, int nframes)
-{
-    unsigned rp = atomic_load_explicit(&ring.rp, memory_order_relaxed);
-    unsigned wp = atomic_load_explicit(&ring.wp, memory_order_acquire);
-    if ((int)(wp - rp) < nframes) return 0;
-    for (int i = 0; i < nframes; i++) {
-        unsigned idx = (rp + i) & (RING_FRAMES - 1);
-        memcpy(&dst[i * ring.ch], &ring.buf[idx * ring.ch],
-               (unsigned)ring.ch * sizeof(float));
-    }
-    atomic_store_explicit(&ring.rp, rp + (unsigned)nframes, memory_order_release);
-    return 1;
-}
-
 /* ── globals ─────────────────────────────────────── */
-static jack_client_t  *g_jclient;
-static jack_port_t    *jports[MAX_CH];
 static int             g_ch      = 2;
 static int             g_rate    = 44100;
 static int             g_buf_ms  = 100;   /* pre-fill target in ms */
@@ -99,7 +46,6 @@ static int             g_buf_ms  = 100;   /* pre-fill target in ms */
 static volatile int    g_quit = 0;
 static volatile int    g_exit_code = 0;
 static int             g_auto_detect = 0;  /* 1 = AUTO 모드, 실시간 PT 감지 활성 */
-static atomic_int      g_prebuffered = 0;  /* 1 = pre-fill 완료, 재생 중 */
 static GstElement     *g_pipeline;
 
 static char            g_codec[64]  = "unknown";
@@ -110,47 +56,9 @@ static char            g_src_ip[64] = "";
 static int             g_src_port   = 0;
 static pthread_mutex_t g_addr_mtx   = PTHREAD_MUTEX_INITIALIZER;
 
-/* pipe 출력 모드: JACK 대신 named FIFO에 F32LE interleaved 기록 */
+/* named FIFO 출력 */
 static char g_output_fifo[256] = "";
 static int  g_output_fd        = -1;
-
-/* ── JACK process callback ───────────────────────── */
-static int jack_process(jack_nframes_t nframes, void *arg)
-{
-    (void)arg;
-    // float tmp[4096 * MAX_CH];
-    static float tmp[RING_FRAMES * MAX_CH];
-    unsigned wp = atomic_load_explicit(&ring.wp, memory_order_acquire);
-    unsigned rp = atomic_load_explicit(&ring.rp, memory_order_relaxed);
-    int available = (int)(wp - rp);
-
-    /* 아직 pre-fill 안 됐으면 무음 대기 */
-    if (!atomic_load_explicit(&g_prebuffered, memory_order_relaxed)) {
-        int prefill = (int)((float)g_buf_ms / 1000.0f * (float)g_rate);
-        if (available < prefill) {
-            for (int c = 0; c < g_ch; c++)
-                memset(jack_port_get_buffer(jports[c], nframes), 0, nframes * sizeof(float));
-            return 0;
-        }
-        atomic_store_explicit(&g_prebuffered, 1, memory_order_relaxed);
-    }
-
-    /* pre-fill 완료 → underrun 전까지 계속 재생 */
-    if (ring_read(tmp, (int)nframes)) {
-        for (int c = 0; c < g_ch; c++) {
-            float *out = jack_port_get_buffer(jports[c], nframes);
-            for (jack_nframes_t f = 0; f < nframes; f++)
-                out[f] = tmp[f * g_ch + c];
-        }
-    } else {
-        /* 실제 underrun: 무음 출력 + pre-fill 재트리거 */
-        atomic_store_explicit(&g_prebuffered, 0, memory_order_relaxed);
-        atomic_fetch_add_explicit(&g_drops, 1, memory_order_relaxed);
-        for (int c = 0; c < g_ch; c++)
-            memset(jack_port_get_buffer(jports[c], nframes), 0, nframes * sizeof(float));
-    }
-    return 0;
-}
 
 /* ── GStreamer appsink callback ──────────────────── */
 static GstFlowReturn on_new_sample(GstAppSink *sink, gpointer data)
@@ -162,13 +70,8 @@ static GstFlowReturn on_new_sample(GstAppSink *sink, gpointer data)
     GstBuffer *buffer = gst_sample_get_buffer(sample);
     GstMapInfo map;
     if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-        if (g_output_fd >= 0) {
-            /* pipe 모드: FIFO에 F32LE interleaved 기록 (non-blocking, full drop on EAGAIN) */
+        if (g_output_fd >= 0)
             write(g_output_fd, map.data, map.size);
-        } else {
-            int nframes = (int)(map.size / (sizeof(float) * (unsigned)g_ch));
-            ring_write((const float *)map.data, nframes);
-        }
         atomic_fetch_add_explicit(&g_packets, 1, memory_order_relaxed);
         gst_buffer_unmap(buffer, &map);
     }
@@ -279,17 +182,13 @@ static void *stats_thread(void *arg)
         int has_data = (cur_udp != prev_udp);
         prev_udp = cur_udp;
 
-        /* no data this interval → clear sender info + flush ring buffer */
+        /* no data this interval → clear sender info */
         if (!has_data) {
             pthread_mutex_lock(&g_addr_mtx);
             g_src_ip[0] = '\0';
             g_src_port  = 0;
             pthread_mutex_unlock(&g_addr_mtx);
             snprintf(g_codec, sizeof(g_codec), "unknown");
-            /* 버퍼 비우기: rp를 wp로 이동, prebuffered 리셋 */
-            unsigned wp_now = atomic_load_explicit(&ring.wp, memory_order_acquire);
-            atomic_store_explicit(&ring.rp, wp_now, memory_order_release);
-            atomic_store_explicit(&g_prebuffered, 0, memory_order_relaxed);
         }
 
         /* sender address captured by pad probe */
@@ -300,14 +199,7 @@ static void *stats_thread(void *arg)
         src_port = g_src_port;
         pthread_mutex_unlock(&g_addr_mtx);
 
-        int buf_ms;
-        if (g_output_fd >= 0) {
-            buf_ms = 0;
-        } else {
-            unsigned wp = atomic_load(&ring.wp);
-            unsigned rp = atomic_load(&ring.rp);
-            buf_ms = (int)((float)(wp - rp) / (float)g_rate * 1000.0f);
-        }
+        int buf_ms = 0;
         unsigned long pkts  = atomic_load(&g_packets);
         unsigned long drops = atomic_load(&g_drops);
 
@@ -523,53 +415,23 @@ int main(int argc, char *argv[])
     if (argc > 8 && argv[8][0] != '\0')
         snprintf(g_bind_address, sizeof(g_bind_address), "%s", argv[8]);
 
-    /* argv[9]="pipe"  argv[10]=fifo_path → pipe 출력 모드 */
+    /* argv[9]="pipe"  argv[10]=fifo_path */
     if (argc > 9 && strcmp(argv[9], "pipe") == 0 && argc > 10)
         snprintf(g_output_fifo, sizeof(g_output_fifo), "%s", argv[10]);
 
-    /* ring buffer init (JACK 모드에서만 사용) */
-    memset(&ring, 0, sizeof(ring));
-    ring.ch = g_ch;
-
-    if (g_output_fifo[0]) {
-        /* ── pipe 모드: FIFO 열기, JACK 불필요 ── */
-        g_output_fd = open(g_output_fifo, O_WRONLY | O_NONBLOCK);
-        if (g_output_fd < 0) {
-            fprintf(stderr, "[rtp_recv] open fifo %s failed: %s\n",
-                    g_output_fifo, strerror(errno));
-            return 1;
-        }
-        g_rate = g_sample_rate_in > 0 ? g_sample_rate_in : 48000;
-        fprintf(stderr, "[rtp_recv] pipe mode → %s\n", g_output_fifo);
-    } else {
-        /* ── JACK 모드 ── */
-        g_jclient = jack_client_open(client_name, JackNoStartServer | JackUseExactName, NULL);
-        if (!g_jclient) {
-            fprintf(stderr, "[rtp_recv] jack_client_open failed\n");
-            return 1;
-        }
-        g_rate = (int)jack_get_sample_rate(g_jclient);
-
-        for (int c = 0; c < g_ch; c++) {
-            char name[32];
-            snprintf(name, sizeof(name), "out_%d", c + 1);
-            jports[c] = jack_port_register(g_jclient, name,
-                                           JACK_DEFAULT_AUDIO_TYPE,
-                                           JackPortIsOutput, 0);
-            if (!jports[c]) {
-                fprintf(stderr, "[rtp_recv] jack_port_register %s failed\n", name);
-                jack_client_close(g_jclient);
-                return 1;
-            }
-        }
-
-        jack_set_process_callback(g_jclient, jack_process, NULL);
-        if (jack_activate(g_jclient)) {
-            fprintf(stderr, "[rtp_recv] jack_activate failed\n");
-            jack_client_close(g_jclient);
-            return 1;
-        }
+    if (!g_output_fifo[0]) {
+        fprintf(stderr, "[rtp_recv] fifo path required (argv[9]=pipe argv[10]=<path>)\n");
+        return 1;
     }
+    /* O_WRONLY blocks until aoip_engine opens the reader side */
+    g_output_fd = open(g_output_fifo, O_WRONLY);
+    if (g_output_fd < 0) {
+        fprintf(stderr, "[rtp_recv] open fifo %s failed: %s\n",
+                g_output_fifo, strerror(errno));
+        return 1;
+    }
+    g_rate = g_sample_rate_in > 0 ? g_sample_rate_in : 48000;
+    fprintf(stderr, "[rtp_recv] pipe mode → %s\n", g_output_fifo);
 
     /* ── GStreamer pipeline ── */
     const char *mode_str = g_proto == PROTO_PCM ? "pcm" :
@@ -596,7 +458,6 @@ int main(int argc, char *argv[])
     if (g_proto == PROTO_RAW) ok = ok && decode;
     if (!ok) {
         fprintf(stderr, "[rtp_recv] failed to create GStreamer elements\n");
-        jack_client_close(g_jclient);
         return 1;
     }
 
@@ -642,7 +503,6 @@ int main(int argc, char *argv[])
         if (!jitter) {
             fprintf(stderr, "[rtp_recv] failed to create rtpjitterbuffer\n");
             gst_object_unref(g_pipeline);
-            jack_client_close(g_jclient);
             return 1;
         }
         g_object_set(jitter, "latency", (guint)g_buf_ms, NULL);
@@ -666,7 +526,6 @@ int main(int argc, char *argv[])
         if (!depay || (rtp_needs_decode && !rtp_decode)) {
             fprintf(stderr, "[rtp_recv] failed to create depay element (%s)\n", depay_name);
             gst_object_unref(g_pipeline);
-            jack_client_close(g_jclient);
             return 1;
         }
 
@@ -727,7 +586,6 @@ int main(int argc, char *argv[])
     if (!link_ok) {
         fprintf(stderr, "[rtp_recv] pipeline link failed (mode=%s)\n", mode_str);
         gst_object_unref(g_pipeline);
-        jack_client_close(g_jclient);
         return 1;
     }
 
@@ -749,14 +607,6 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* report ports first, then ready — Node.js uses ready as the trigger */
-    /* ports/ready → stderr (JACK이 fd1을 오염시켜도 fd2는 안전) */
-    fprintf(stderr, "ports:");
-    for (int c = 0; c < g_ch; c++) {
-        if (c) fprintf(stderr, ",");
-        fprintf(stderr, " %s:out_%d", client_name, c + 1);
-    }
-    fprintf(stderr, "\n");
     fprintf(stderr, "[rtp_recv] ready\n");
     fflush(stderr);
 
@@ -777,7 +627,6 @@ int main(int argc, char *argv[])
 
     gst_element_set_state(g_pipeline, GST_STATE_NULL);
     gst_object_unref(g_pipeline);
-    if (g_jclient) jack_client_close(g_jclient);
     if (g_output_fd >= 0) close(g_output_fd);
 
     fprintf(stderr, "[rtp_recv] exiting\n");

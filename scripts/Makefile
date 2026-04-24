@@ -1,21 +1,18 @@
 CC      = gcc
 CFLAGS  = -O2 -Wall -Wextra -ffast-math -march=native \
           $(shell pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 gstreamer-net-1.0 gio-2.0)
-LDFLAGS = -ljack -lm -lpthread \
+LDFLAGS = -lm -lpthread \
           $(shell pkg-config --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-net-1.0 gio-2.0)
 
-DSP_CFLAGS  = -O3 -Wall -Wextra -ffast-math -march=native -funroll-loops
-DSP_LDFLAGS = -ljack -lm -lpthread
+AOIP_CFLAGS  = -O3 -Wall -Wextra -ffast-math -march=native -funroll-loops
+AOIP_LDFLAGS = -lrt -lasound -lsamplerate -lm -lpthread
 
-TARGETS = dsp_engine rtp_recv rtp_send jack_pipe_out jack_pipe_in audio_in audio_out
-
-ALSA_CFLAGS  = -O3 -Wall -Wextra -ffast-math -march=native -funroll-loops
-ALSA_LDFLAGS = -ljack -lasound -lsamplerate -lm -lpthread
+TARGETS = aoip_engine rtp_recv rtp_send
 
 all: $(TARGETS)
 
-dsp_engine: dsp_engine.c
-	$(CC) $(DSP_CFLAGS) -o $@ $< $(DSP_LDFLAGS)
+aoip_engine: aoip_engine.c
+	$(CC) $(AOIP_CFLAGS) -o $@ $< $(AOIP_LDFLAGS)
 
 rtp_recv: rtp_recv.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
@@ -23,19 +20,7 @@ rtp_recv: rtp_recv.c
 rtp_send: rtp_send.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-jack_pipe_out: jack_pipe_out.c
-	$(CC) $(DSP_CFLAGS) -o $@ $< $(DSP_LDFLAGS)
-
-jack_pipe_in: jack_pipe_in.c
-	$(CC) $(ALSA_CFLAGS) -o $@ $< $(ALSA_LDFLAGS)
-
-audio_in: audio_in.c
-	$(CC) $(ALSA_CFLAGS) -o $@ $< $(ALSA_LDFLAGS)
-
-audio_out: audio_out.c
-	$(CC) $(ALSA_CFLAGS) -o $@ $< $(ALSA_LDFLAGS)
-
 clean:
-	rm -f $(TARGETS) alsa_in alsa_out
+	rm -f $(TARGETS)
 
 .PHONY: all clean

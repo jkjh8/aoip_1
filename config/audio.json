@@ -1,4 +1,10 @@
 {
+  "engine": {
+    "bypassDsp": false,
+    "dspPrio": 75,
+    "alsaPrio": 60,
+    "ravennaPrio": 70
+  },
   "jack": {
     "device": "hw:sndrpiaoip2",
     "name": "Analog",
@@ -36,7 +42,7 @@
       "device": "hw:RAVENNA",
       "rate": 48000,
       "period": 48,
-      "periods": 12,
+      "periods": 8,
       "channels": 2,
       "aes67": true,
       "enabled": true
@@ -47,7 +53,7 @@
       "device": "hw:RAVENNA",
       "rate": 48000,
       "period": 48,
-      "periods": 12,
+      "periods": 8,
       "channels": 2,
       "aes67": true,
       "enabled": true
@@ -73,18 +79,9 @@
       "client": "rtp_out_1",
       "channels": 2,
       "protocol": "rtp",
-      "codec": "raw",
+      "codec": "mp3",
       "sampleRate": 44100,
-      "targets": [
-        {
-          "host": "10.20.0.193",
-          "port": 5004
-        },
-        {
-          "host": "192.168.10.146",
-          "port": 12345
-        }
-      ],
+      "targets": [],
       "enabled": true,
       "bitrate": 192
     }

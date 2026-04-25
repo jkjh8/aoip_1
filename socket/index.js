@@ -1,8 +1,8 @@
 import { Server as SocketIO } from 'socket.io';
-import { getPorts, getConnections, isJackRunning } from '../lib/jack.js';
+import { isJackRunning } from '../lib/jack.js';
 import { getBridgeStatus, getUsbGadgetEnabled, isUdcConnected } from '../lib/bridges.js';
 import { getGstStatus, getRxStats, getRtpStreamStatus } from '../lib/gstreamer.js';
-import { getChannels }                              from '../lib/channels.js';
+import { getChannels, getSavedRoutes }              from '../lib/channels.js';
 import { getLimiterMeters }                         from '../lib/dsp.js';
 import { getDaemonStatus }                          from '../lib/aes67daemon.js';
 
@@ -30,15 +30,22 @@ function watchedChannels() {
   return ids;
 }
 
-async function snapshot() {
-  const [ports, connections] = isJackRunning()
-    ? await Promise.all([getPorts(), getConnections()]).catch(() => [[], []])
-    : [[], []];
+/** state.routing ({ src, dst }[]) → JACK connections 형식으로 변환 */
+function _routesToConnections(routes) {
+  const map = new Map();
+  for (const { src, dst } of routes) {
+    if (!map.has(src)) map.set(src, []);
+    map.get(src).push(dst);
+  }
+  return Array.from(map.entries()).map(([port, connections]) => ({ port, connections }));
+}
 
+async function snapshot() {
+  const connections = _routesToConnections(getSavedRoutes());
   cachedConnections = connections;
 
   return {
-    jack:     { running: isJackRunning(), ports, connections },
+    jack:     { running: false, ports: [], connections },
     bridges:  getBridgeStatus(),
     streams:  { ...getGstStatus(), rtpStreams: getRtpStreamStatus() },
     rxStats:  getRxStats(),

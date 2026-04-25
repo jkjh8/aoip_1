@@ -199,104 +199,6 @@
       }
     },
     {
-      "id": 5,
-      "label": "Stream IN 1",
-      "jackPort": "stream:out_1",
-      "srcPort": "rtp_in_1:out_1",
-      "gain": 100,
-      "muted": true,
-      "bypassDsp": true,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80
-        },
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ]
-      }
-    },
-    {
-      "id": 6,
-      "label": "Stream IN 2",
-      "jackPort": "stream:out_2",
-      "srcPort": "rtp_in_1:out_2",
-      "gain": 100,
-      "muted": true,
-      "bypassDsp": true,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80
-        },
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ]
-      }
-    },
-    {
       "id": 7,
       "label": "AES67 1",
       "jackPort": "aes67:out_1",
@@ -613,110 +515,6 @@
       }
     },
     {
-      "id": 5,
-      "label": "Stream OUT 1",
-      "jackPort": "stream:sin_1",
-      "sinkPort": "rtp_out_1:in_src_1",
-      "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 100,
-          "makeup": 0
-        }
-      }
-    },
-    {
-      "id": 6,
-      "label": "Stream OUT 2",
-      "jackPort": "stream:sin_2",
-      "sinkPort": "rtp_out_1:in_src_2",
-      "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 100,
-          "makeup": 0
-        }
-      }
-    },
-    {
       "id": 7,
       "label": "AES67 1",
       "jackPort": "aes67:sin_1",
@@ -823,44 +621,12 @@
   ],
   "routing": [
     {
-      "src": "usb:out_1",
-      "dst": "stream:sin_1"
-    },
-    {
-      "src": "usb:out_2",
-      "dst": "stream:sin_2"
-    },
-    {
-      "src": "analog:out_1",
-      "dst": "stream:sin_1"
-    },
-    {
-      "src": "analog:out_2",
-      "dst": "stream:sin_2"
-    },
-    {
-      "src": "aes67:out_1",
-      "dst": "aes67:sin_1"
-    },
-    {
-      "src": "aes67:out_2",
-      "dst": "aes67:sin_2"
-    },
-    {
-      "src": "aes67:out_2",
-      "dst": "analog:sin_2"
-    },
-    {
-      "src": "stream:out_2",
-      "dst": "analog:sin_2"
-    },
-    {
       "src": "aes67:out_1",
       "dst": "analog:sin_1"
     },
     {
-      "src": "stream:out_1",
-      "dst": "analog:sin_1"
+      "src": "aes67:out_2",
+      "dst": "analog:sin_2"
     },
     {
       "src": "analog:out_1",
@@ -871,8 +637,12 @@
       "dst": "aes67:sin_2"
     },
     {
-      "src": "analog:out_2",
-      "dst": "analog:sin_2"
+      "src": "aes67:out_1",
+      "dst": "aes67:sin_1"
+    },
+    {
+      "src": "aes67:out_2",
+      "dst": "aes67:sin_2"
     }
   ]
 }

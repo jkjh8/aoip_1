@@ -1,5 +1,5 @@
 import {
-  getDaemonStatus, startDaemon, stopDaemon, restartDaemon,
+  getDaemonStatus,
   getConfig, setConfig,
   getPtpConfig, setPtpConfig, getPtpStatus,
   getSources, addSource, removeSource, getSourceSdp,
@@ -10,10 +10,7 @@ import {
 /**
  * socket events:
  *
- *   aes67:status          → { running, ready, pid, url }
- *   aes67:start           → { ok }
- *   aes67:stop            → { ok }
- *   aes67:restart         → { ok }
+ *   aes67:status          → { running, ready, url }
  *
  *   aes67:config:get      → { ...daemonConf }
  *   aes67:config:set      { ...fields }  → { ok }
@@ -34,35 +31,11 @@ import {
  *
  *   aes67:browse          { type?: 'mdns'|'sap'|'all' }  → [ remote source, ... ]
  */
-export default function register(socket, { broadcastStatus }) {
-  // ── 생명주기 ────────────────────────────────────────────
+export default function register(socket, ctx) {
+  // ── 상태 조회 ──────────────────────────────────────────
 
   socket.on('aes67:status', async (cb) => {
     cb?.(await getDaemonStatus());
-  });
-
-  socket.on('aes67:start', async (cb) => {
-    try {
-      await startDaemon();
-      await broadcastStatus();
-      cb?.({ ok: true });
-    } catch (e) { cb?.({ ok: false, error: e.message }); }
-  });
-
-  socket.on('aes67:stop', async (cb) => {
-    try {
-      await stopDaemon();
-      await broadcastStatus();
-      cb?.({ ok: true });
-    } catch (e) { cb?.({ ok: false, error: e.message }); }
-  });
-
-  socket.on('aes67:restart', async (cb) => {
-    try {
-      await restartDaemon();
-      await broadcastStatus();
-      cb?.({ ok: true });
-    } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 
   // ── 데몬 설정 ──────────────────────────────────────────

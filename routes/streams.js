@@ -6,9 +6,24 @@ import {
   getGstStatus,
   getRtpStreamStatus, getRtpStreamDetail,
   startRtpStream, stopRtpStream,
-  updateRtpInConfig,
+  updateRtpInConfig, updateRtpOutConfig,
   addRtpOutTarget, removeRtpOutTarget, setRtpOutCodec,
 } from '../lib/gstreamer.js';
+
+function parseBody(body = {}) {
+  const updates = {};
+  const { port, protocol, address, sampleRate, codec, bitrate, bufferMs, channels, targets } = body;
+  if (port       != null) updates.port       = Number(port);
+  if (protocol   != null) updates.protocol   = protocol;
+  if (address    != null) updates.address    = address;
+  if (sampleRate != null) updates.sampleRate = Number(sampleRate);
+  if (codec      != null) updates.codec      = codec;
+  if (bitrate    != null) updates.bitrate    = Number(bitrate);
+  if (bufferMs   != null) updates.bufferMs   = Number(bufferMs);
+  if (channels   != null) updates.channels   = Number(channels);
+  if (targets    != null) updates.targets    = targets;
+  return updates;
+}
 
 const router = Router();
 
@@ -60,19 +75,27 @@ router.get('/rtp/:client', (req, res) => {
 router.post('/rtp/:client/start', (req, res) => {
   const { client } = req.params;
   try {
-    const { port, protocol, address, sampleRate, codec, bufferMs, channels, targets, bitrate } = req.body ?? {};
-    const updates = {};
-    if (port       != null) updates.port       = Number(port);
-    if (protocol   != null) updates.protocol   = protocol;
-    if (address    != null) updates.address    = address;
-    if (sampleRate != null) updates.sampleRate = Number(sampleRate);
-    if (codec      != null) updates.codec      = codec;
-    if (bitrate    != null) updates.bitrate    = Number(bitrate);
-    if (bufferMs   != null) updates.bufferMs   = Number(bufferMs);
-    if (channels   != null) updates.channels   = Number(channels);
-    if (targets    != null) updates.targets    = targets;
-    if (Object.keys(updates).length > 0) updateRtpInConfig(client, updates);
+    const updates = parseBody(req.body);
+    const detail  = getRtpStreamDetail(client);
+    if (!detail) return res.status(404).json({ error: `stream ${client} not found` });
+    if (Object.keys(updates).length > 0 && detail.type === 'rtp_in')
+      updateRtpInConfig(client, updates);
     startRtpStream(client);
+    res.json({ ok: true, stream: getRtpStreamDetail(client) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// PUT /streams/rtp/:client/config — rtp_in 설정 변경 (저장만, 적용은 재시작 필요)
+router.put('/rtp/:client/config', (req, res) => {
+  const { client } = req.params;
+  try {
+    const detail = getRtpStreamDetail(client);
+    if (!detail) return res.status(404).json({ error: `stream ${client} not found` });
+    const updates = parseBody(req.body);
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'no fields to update' });
+    if (detail.type === 'rtp_in')       updateRtpInConfig(client, updates);
+    else if (detail.type === 'rtp_out') updateRtpOutConfig(client, updates);
+    else return res.status(400).json({ error: 'unsupported stream type' });
     res.json({ ok: true, stream: getRtpStreamDetail(client) });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });

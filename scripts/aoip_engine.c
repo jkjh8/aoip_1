@@ -465,12 +465,21 @@ static void *alsa_capture_thread(void *arg) {
     struct sched_param sp = { .sched_priority = d->thread_priority };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
 
-    snd_pcm_t *pcm = alsa_open(d->dev, SND_PCM_STREAM_CAPTURE,
-                                d->rate, d->period, d->nperiods, d->channels);
+    /* 초기 오픈 실패 시 재시도 (예: PTP 동기화 전 RAVENNA 장치 미준비) */
+    snd_pcm_t *pcm = NULL;
+    while (!d->quit_cap && !g_quit) {
+        pcm = alsa_open(d->dev, SND_PCM_STREAM_CAPTURE,
+                        d->rate, d->period, d->nperiods, d->channels);
+        if (pcm) break;
+        fprintf(stderr, "[aoip_engine] cap %s: open failed, retry in 2s\n", d->name);
+        usleep(2000000);
+    }
     if (!pcm) return NULL;
 
     int32_t *ibuf = malloc((size_t)(d->period * d->channels) * sizeof(int32_t));
     float   *fbuf = malloc((size_t)(d->period * d->channels) * sizeof(float));
+
+    int cap_err_count = 0;
 
     while (!d->quit_cap && !g_quit) {
         snd_pcm_sframes_t n = snd_pcm_readi(pcm, ibuf, (snd_pcm_uframes_t)d->period);
@@ -479,18 +488,36 @@ static void *alsa_capture_thread(void *arg) {
             while (!g_quit && snd_pcm_resume(pcm) == -EAGAIN) usleep(10000);
             snd_pcm_prepare(pcm); continue;
         }
-        if (n < 0) {
-            fprintf(stderr, "[aoip_engine] cap %s: %s\n", d->name, snd_strerror((int)n));
-            snd_pcm_close(pcm); pcm = NULL;
-            rb_reset(&d->in_ring);
-            while (!d->quit_cap && !g_quit) {
-                usleep(500000);
-                pcm = alsa_open(d->dev, SND_PCM_STREAM_CAPTURE,
-                                d->rate, d->period, d->nperiods, d->channels);
-                if (pcm) { fprintf(stderr, "[aoip_engine] cap %s reopened\n", d->name); break; }
-            }
+        if (n == -EIO) {
+            /* UAC2 가젯: 호스트가 스트림을 열지 않은 경우. prepare 후 재시도. */
+            cap_err_count++;
+            // if (cap_err_count == 1)
+            //     fprintf(stderr, "[aoip_engine] cap %s: host not ready (EIO), waiting\n",
+            //             d->name);
+            // snd_pcm_prepare(pcm);
+            // usleep(100000);
             continue;
         }
+        if (n < 0) {
+            // cap_err_count++;
+            // if (cap_err_count == 1)
+            //     fprintf(stderr, "[aoip_engine] cap %s: %s (will suppress repeats)\n",
+            //             d->name, snd_strerror((int)n));
+            // snd_pcm_close(pcm); pcm = NULL;
+            // rb_reset(&d->in_ring);
+            // while (!d->quit_cap && !g_quit) {
+            //     usleep(500000);
+            //     pcm = alsa_open(d->dev, SND_PCM_STREAM_CAPTURE,
+            //                     d->rate, d->period, d->nperiods, d->channels);
+            //     if (pcm) {
+            //         fprintf(stderr, "[aoip_engine] cap %s reopened\n", d->name);
+            //         cap_err_count = 0;
+            //         break;
+            //     }
+            // }
+            continue;
+        }
+        cap_err_count = 0;
         for (int i = 0; i < (int)n * d->channels; i++)
             fbuf[i] = (float)ibuf[i] * (1.0f / 2147483648.0f);
         rb_write(&d->in_ring, fbuf, (int)n);
@@ -508,12 +535,21 @@ static void *alsa_playback_thread(void *arg) {
     struct sched_param sp = { .sched_priority = d->thread_priority };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
 
-    snd_pcm_t *pcm = alsa_open(d->dev, SND_PCM_STREAM_PLAYBACK,
-                                d->rate, d->period, d->nperiods, d->channels);
+    /* 초기 오픈 실패 시 재시도 (예: PTP 동기화 전 RAVENNA 장치 미준비) */
+    snd_pcm_t *pcm = NULL;
+    while (!d->quit_play && !g_quit) {
+        pcm = alsa_open(d->dev, SND_PCM_STREAM_PLAYBACK,
+                        d->rate, d->period, d->nperiods, d->channels);
+        if (pcm) break;
+        fprintf(stderr, "[aoip_engine] play %s: open failed, retry in 2s\n", d->name);
+        usleep(2000000);
+    }
     if (!pcm) return NULL;
 
     float   *fbuf = malloc((size_t)(d->period * d->channels) * sizeof(float));
     int32_t *ibuf = malloc((size_t)(d->period * d->channels) * sizeof(int32_t));
+
+    int play_err_count = 0;
 
     while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < PREBUF_FRAMES)
         usleep(1000);
@@ -541,8 +577,20 @@ static void *alsa_playback_thread(void *arg) {
             snd_pcm_prepare(pcm);
             while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < PREBUF_FRAMES)
                 usleep(1000);
+        } else if (n == -EIO) {
+            /* UAC2 가젯: 호스트가 스트림을 열지 않은 경우 EIO 반환.
+             * close/reopen 하지 않고 prepare 후 재시도 (100ms 대기). */
+            play_err_count++;
+            if (play_err_count == 1)
+                fprintf(stderr, "[aoip_engine] play %s: host not ready (EIO), waiting\n",
+                        d->name);
+            snd_pcm_prepare(pcm);
+            usleep(100000);
         } else if (n < 0) {
-            fprintf(stderr, "[aoip_engine] play %s: %s\n", d->name, snd_strerror((int)n));
+            play_err_count++;
+            if (play_err_count == 1)
+                fprintf(stderr, "[aoip_engine] play %s: %s (will suppress repeats)\n",
+                        d->name, snd_strerror((int)n));
             snd_pcm_close(pcm); pcm = NULL;
             rb_reset(&d->out_ring);
             while (!d->quit_play && !g_quit) {
@@ -550,11 +598,15 @@ static void *alsa_playback_thread(void *arg) {
                 pcm = alsa_open(d->dev, SND_PCM_STREAM_PLAYBACK,
                                 d->rate, d->period, d->nperiods, d->channels);
                 if (pcm) {
+                    fprintf(stderr, "[aoip_engine] play %s reopened\n", d->name);
+                    play_err_count = 0;
                     while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < PREBUF_FRAMES)
                         usleep(1000);
                     break;
                 }
             }
+        } else {
+            play_err_count = 0;
         }
     }
 
@@ -687,7 +739,12 @@ static void *dsp_thread(void *arg) {
          */
         for (int ri = 0; ri < g_n_rtp_in; ri++) {
             ShmBuf *r = &g_rtp_in[ri];
-            if (!r->enabled || !r->shm) continue;
+            if (!r->enabled || !r->shm) {
+                /* 비활성 슬롯: 잔류 데이터 노이즈 방지 — 해당 채널 무음 */
+                for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
+                    memset(g_in_buf[r->ch_start+c], 0, PERIOD_FRAMES*sizeof(float));
+                continue;
+            }
 
             ShmRing *ring = r->shm;
             uint32_t wp = atomic_load_explicit(&ring->wp, memory_order_acquire);
@@ -724,14 +781,14 @@ static void *dsp_thread(void *arg) {
 
             for (int i = 0; i < PERIOD_FRAMES; i++) {
                 float s = buf[i];
-                if (!ic->bypass_dsp && !g_bypass_all_dsp) {
-                    if (ic->hpf_enabled) {
-                        s = bq_process(&ic->hpf[0], s);
-                        if (ic->hpf_stages > 1) s = bq_process(&ic->hpf[1], s);
-                    }
-                    for (int b = 0; b < MAX_EQ_BANDS; b++)
-                        if (ic->eq_enabled[b]) s = bq_process(&ic->eq[b], s);
-                }
+                // if (!ic->bypass_dsp && !g_bypass_all_dsp) {
+                //     if (ic->hpf_enabled) {
+                //         s = bq_process(&ic->hpf[0], s);
+                //         if (ic->hpf_stages > 1) s = bq_process(&ic->hpf[1], s);
+                //     }
+                //     for (int b = 0; b < MAX_EQ_BANDS; b++)
+                //         if (ic->eq_enabled[b]) s = bq_process(&ic->eq[b], s);
+                // }
                 float peak = fabsf(s);
                 if (peak > g_in_level[ch]) g_in_level[ch] = peak;
                 cur += step;
@@ -768,16 +825,16 @@ static void *dsp_thread(void *arg) {
             for (int i = 0; i < PERIOD_FRAMES; i++) {
                 float s = buf[i];
                 if (!oc->bypass_dsp && !g_bypass_all_dsp) {
-                    for (int b = 0; b < MAX_EQ_BANDS; b++)
-                        if (oc->eq_enabled[b]) s = bq_process(&oc->eq[b], s);
+                    // for (int b = 0; b < MAX_EQ_BANDS; b++)
+                    //     if (oc->eq_enabled[b]) s = bq_process(&oc->eq[b], s);
 
-                    float pre_peak = fabsf(s);
-                    if (pre_peak > g_lim_pre[ch]) g_lim_pre[ch] = pre_peak;
+                    // float pre_peak = fabsf(s);
+                    // if (pre_peak > g_lim_pre[ch]) g_lim_pre[ch] = pre_peak;
 
-                    if (oc->lim.enabled) s = lim_process(&oc->lim, s);
+                    // if (oc->lim.enabled) s = lim_process(&oc->lim, s);
 
                     float post_peak = fabsf(s);
-                    if (post_peak > g_lim_post[ch]) g_lim_post[ch] = post_peak;
+                    // if (post_peak > g_lim_post[ch]) g_lim_post[ch] = post_peak;
                     if (post_peak > g_out_level[ch]) g_out_level[ch] = post_peak;
                 } else {
                     float peak = fabsf(s);

@@ -1,7 +1,31 @@
-import { getChannels, setGain, setMute, setLabel } from '../lib/channels.js';
+import { getChannels, setGain, setMute, setLabel, addRoute, removeRoute } from '../lib/channels.js';
 import { sendGain, sendMute, sendBypass, sendAllDsp } from '../lib/dsp.js';
+import { connect, disconnect } from '../lib/jack.js';
 
 export default function register(socket, { broadcastStatus }) {
+  // ── 라우팅 매트릭스 ──────────────────────────────────
+
+  socket.on('route:add', async ({ src, dst } = {}, cb) => {
+    try {
+      if (!src || !dst) return cb?.({ ok: false, error: 'src and dst required' });
+      await connect(src, dst);
+      addRoute(src, dst);
+      await broadcastStatus();
+      cb?.({ ok: true });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  socket.on('route:remove', async ({ src, dst } = {}, cb) => {
+    try {
+      if (!src || !dst) return cb?.({ ok: false, error: 'src and dst required' });
+      await disconnect(src, dst);
+      removeRoute(src, dst);
+      await broadcastStatus();
+      cb?.({ ok: true });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  // ── 채널 ─────────────────────────────────────────────
   socket.on('ch:gain', async ({ type, id, gain } = {}, cb) => {
     try {
       setGain(type, id, gain);

@@ -1,13 +1,11 @@
 import { Server as SocketIO } from 'socket.io';
-import { isJackRunning } from '../lib/jack.js';
 import { getBridgeStatus, getUsbGadgetEnabled, isUdcConnected } from '../lib/bridges.js';
 import { getGstStatus, getRxStats, getRtpStreamStatus } from '../lib/gstreamer.js';
 import { getChannels, getSavedRoutes }              from '../lib/channels.js';
-import { getLimiterMeters }                         from '../lib/dsp.js';
+import { isDspRunning, getLimiterMeters }           from '../lib/dsp.js';
 import { getDaemonStatus }                          from '../lib/aes67daemon.js';
 
 import logger from '../lib/logger.js';
-import registerJack     from './jack.js';
 import registerBridges  from './bridges.js';
 import registerStreams   from './streams.js';
 import registerChannels from './channels.js';
@@ -17,12 +15,12 @@ import registerSystem   from './system.js';
 import registerAes67    from './aes67.js';
 
 const STATUS_INTERVAL = 2000;
-const AES67_INTERVAL  = 10000;  // aes67 상태는 10초마다 (execAsync fork 최소화)
+const AES67_INTERVAL  = 10000;
 const LEVEL_INTERVAL  = 80;   // ~12 fps
 
 let cachedConnections = [];
 let cachedAes67Status = { running: false, ready: false, url: 'http://127.0.0.1:8080' };
-const limiterWatchers = new Map();   // socketId → Set<chId>
+const limiterWatchers = new Map();
 
 function watchedChannels() {
   const ids = new Set();
@@ -30,7 +28,6 @@ function watchedChannels() {
   return ids;
 }
 
-/** state.routing ({ src, dst }[]) → JACK connections 형식으로 변환 */
 function _routesToConnections(routes) {
   const map = new Map();
   for (const { src, dst } of routes) {
@@ -45,17 +42,17 @@ async function snapshot() {
   cachedConnections = connections;
 
   return {
-    jack:     { running: false, ports: [], connections },
+    engine:   { running: isDspRunning() },
     bridges:  getBridgeStatus(),
     streams:  { ...getGstStatus(), rtpStreams: getRtpStreamStatus() },
     rxStats:  getRxStats(),
-    channels: getChannels(connections),
+    channels:    getChannels(connections),
+    connections,
     usb:      { enabled: getUsbGadgetEnabled(), connected: isUdcConnected() },
     aes67:    cachedAes67Status,
   };
 }
 
-// aes67 상태는 별도 느린 타이머로만 갱신 (execAsync fork가 RT 스레드 방해 방지)
 async function refreshAes67Status() {
   try { cachedAes67Status = await getDaemonStatus(); } catch { /* ignore */ }
 }
@@ -78,8 +75,8 @@ export function setupSocket(httpServer, config) {
     try {
       const s = await snapshot();
       io.emit('status', s);
-      io.emit('rx:stats', s.rxStats);
-    } catch { /* jack not ready */ }
+      // io.emit('rx:stats', s.rxStats);
+    } catch { /* engine not ready */ }
   }
 
   // 레벨 미터 — 빠른 주기로 별도 emit
@@ -98,7 +95,7 @@ export function setupSocket(httpServer, config) {
     });
   }, LEVEL_INTERVAL);
 
-  // 전체 상태 — 느린 주기 (rtpStreams stats 포함)
+  // 전체 상태 — 느린 주기
   setInterval(broadcastStatus, STATUS_INTERVAL);
 
   const ctx = {
@@ -118,7 +115,6 @@ export function setupSocket(httpServer, config) {
       limiterWatchers.delete(socket.id);
     });
 
-    registerJack(socket, ctx);
     registerBridges(socket, ctx);
     registerStreams(socket, ctx);
     registerChannels(socket, ctx);

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import {
-  getDaemonStatus, startDaemon, stopDaemon, restartDaemon,
+  getDaemonStatus,
   getConfig, setConfig,
   getPtpConfig, setPtpConfig, getPtpStatus,
   getSources, addSource, removeSource, getSourceSdp,
@@ -10,29 +10,11 @@ import {
 
 const router = Router();
 
-// ── 데몬 생명주기 ───────────────────────────────────────
+// ── 데몬 상태 ────────────────────────────────────────────
 
 // GET /aes67/status
 router.get('/status', async (_req, res) => {
   try { res.json(await getDaemonStatus()); }
-  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-
-// POST /aes67/start
-router.post('/start', async (_req, res) => {
-  try { await startDaemon(); res.json({ ok: true }); }
-  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-
-// POST /aes67/stop
-router.post('/stop', async (_req, res) => {
-  try { await stopDaemon(); res.json({ ok: true }); }
-  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-
-// POST /aes67/restart
-router.post('/restart', async (_req, res) => {
-  try { await restartDaemon(); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 

@@ -8,7 +8,6 @@ import { dirname, join } from 'path';
 import httpLogger from 'morgan';
 import cookieParser from 'cookie-parser'
 
-import jackRoutes    from './routes/jack.js';
 import bridgesRoutes from './routes/bridges.js';
 import streamsRoutes from './routes/streams.js';
 import dspRoutes     from './routes/dsp.js';
@@ -26,7 +25,7 @@ import { startRxPipeline, startTxClient,
          startRtpStreams, waitForRtpStreamsReady,
          getRtpStreamStatus,
          notifyRtpStartupComplete }                   from './lib/gstreamer.js';
-import { getChannels, startMeters,
+import { getChannels,
          getSavedRoutes,
          getDspChannelCounts }                       from './lib/channels.js';
 import { startDsp, sendGain, sendMute,
@@ -55,7 +54,6 @@ app.use((_req, res, next) => {
 
 app.use(httpLogger('dev'))
 
-app.use('/jack',    jackRoutes);
 app.use('/bridges', bridgesRoutes);
 app.use('/streams', streamsRoutes);
 app.use('/dsp',     dspRoutes);
@@ -153,9 +151,6 @@ async function startup() {
     if (ch.muted) sendMute('out', ch.id, true);
   }
   sendAllDsp({ inputs, outputs });
-
-  logger.info('[startup] Starting channel meters...');
-  try { startMeters(); } catch (e) { logger.warn('[startup] meters:', e.message); }
 
   notifyRtpStartupComplete();
   notifyBridgeStartupComplete();

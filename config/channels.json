@@ -403,7 +403,7 @@
       "sinkPort": "system:playback_1",
       "gain": 100,
       "muted": false,
-      "bypassDsp": false,
+      "bypassDsp": true,
       "dsp": {
         "eq": [
           {
@@ -463,7 +463,7 @@
       "sinkPort": "system:playback_2",
       "gain": 100,
       "muted": false,
-      "bypassDsp": false,
+      "bypassDsp": true,
       "dsp": {
         "eq": [
           {

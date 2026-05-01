@@ -1,31 +1,23 @@
 /*
- * rtp_send.c — GStreamer RTP/UDP sender (shared memory input)
+ * rtp_send.c — Lightweight RTP/UDP sender (shared memory input)
  *
- * GStreamer pipeline:
- *   appsrc(F32LE @ out_rate) → audioconvert → capsfilter
- *     → [rtpL16pay|rtpmpapay|rtpopuspay] → multiudpsink
+ * GStreamer 완전 제거 — libsamplerate + libmp3lame + raw UDP 소켓
  *
- * 샘플레이트 변환은 reader thread에서 libsamplerate로 처리.
- * (GStreamer audioresample 제거 → CPU 대폭 절감)
- *
- * multiudpsink를 사용해 파이프라인 재빌드 없이 동적으로 대상 추가/제거.
- * 코덱 변경 시에만 pipeline_build() 재호출.
- *
- * ShmRing reader thread: aoip_engine의 rtp_out shm을 폴링,
- *   PERIOD_FRAMES 단위로 appsrc에 공급.
+ * 흐름:
+ *   SHM(F32LE@48k) → libsamplerate → lame/L16 → RTP 패킷 → UDP sendto()
  *
  * Usage:  rtp_send <channels> <client> <proto> <outRate> shm <shm_name>
  *
  * Stdin commands:
  *   add <host> <port>
  *   remove <host> <port>
- *   codec <mp3|opus|raw> [br]
+ *   codec <mp3|raw> [bitrate]
  *   quit
  */
 
-#include <gst/gst.h>
-#include <gst/app/gstappsrc.h>
 #include <samplerate.h>
+#include <lame/lame.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,15 +29,26 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <errno.h>
+#include <math.h>
 
-#define MAX_TARGETS  16
-#define PERIOD_FRAMES 512
-#define SAMPLE_RATE   48000
+/* ── 상수 ────────────────────────────────────────────── */
+#define MAX_TARGETS    16
+#define PERIOD_FRAMES  512
+#define SAMPLE_RATE    48000
+#define LAME_GRAN      1152         /* LAME MP3 그래뉼 크기 */
+#define MP3_ACC_MAX    (LAME_GRAN * 4)  /* 누적 버퍼: 4그래뉼 여유 */
+#define MP3_BUF_SIZE   (LAME_GRAN * 5 / 4 + 7200) /* lame 권장 출력 버퍼 */
+#define RTP_HDR_SIZE   12
+#define MPA_HDR_SIZE   4            /* RFC 2250 MPEG audio header */
+#define MAX_PKT_SIZE   1472         /* UDP payload MTU safe */
 
-/* ── ShmRing (aoip_engine.c 동일 레이아웃) ──────────── */
-#define SHM_RING_FRAMES  16384
-#define SHM_MAX_CH       8
+/* ── ShmRing ─────────────────────────────────────────── */
+#define SHM_RING_FRAMES 16384
+#define SHM_MAX_CH      8
 
 typedef struct {
     _Atomic uint32_t wp;
@@ -58,281 +61,311 @@ typedef struct {
 
 #define SHMRING_SIZE ((size_t)sizeof(ShmRing))
 
-/* ── target list ─────────────────────────────────── */
-typedef struct { char host[128]; int port; } Target;
-static Target          targets[MAX_TARGETS];
-static int             n_targets = 0;
-static pthread_mutex_t target_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* ── target ──────────────────────────────────────────── */
+typedef struct {
+    char             host[128];
+    int              port;
+    struct sockaddr_in addr;
+} Target;
 
-/* ── codec config ────────────────────────────────── */
-typedef enum { CODEC_MP3, CODEC_OPUS, CODEC_RAW } Codec;
-static Codec  g_codec   = CODEC_RAW;
+static Target          g_targets[MAX_TARGETS];
+static int             g_n_targets  = 0;
+static int             g_udp_sock   = -1;
+static pthread_mutex_t g_target_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+/* ── codec ───────────────────────────────────────────── */
+typedef enum { CODEC_MP3, CODEC_RAW } Codec;
+static Codec  g_codec   = CODEC_MP3;
 static int    g_bitrate = 320;
 
-/* ── globals ─────────────────────────────────────── */
-static int           g_ch       = 2;
-static int           g_use_rtp  = 0;
-static int           g_out_rate = 0;
-static volatile int  g_quit     = 0;
-static char          g_client_name[64] = "rtp_send";
+/* ── globals ─────────────────────────────────────────── */
+static int          g_ch       = 2;
+static int          g_use_rtp  = 1;
+static int          g_out_rate = 44100;
+static volatile int g_quit     = 0;
+static char         g_client_name[64] = "rtp_send";
 
-/* shm 입력 */
+/* SHM */
 static char     g_shm_name[256] = "";
 static int      g_shm_fd        = -1;
 static ShmRing *g_shm           = NULL;
 
-/* GStreamer */
-static GstElement     *g_pipeline    = NULL;
-static GstAppSrc      *g_appsrc      = NULL;
-static GstElement     *g_multiudpsink = NULL;
-static pthread_mutex_t pipe_mutex     = PTHREAD_MUTEX_INITIALIZER;
+/* libsamplerate */
+static SRC_STATE *g_src = NULL;
 
-/* libsamplerate (SRC): 48kHz → g_out_rate, reader thread에서 사용 */
-static SRC_STATE      *g_src        = NULL;
+/* lame */
+static lame_t g_lame = NULL;
+static pthread_mutex_t g_lame_mtx = PTHREAD_MUTEX_INITIALIZER;
 
-/* shm reader 스레드 */
-static pthread_t       g_reader_tid;
-static volatile int    g_reader_run = 0;
+/* MP3 입력 누적 버퍼 (1152 배수 단위로 인코딩하기 위해) */
+static float   g_mp3_acc[MP3_ACC_MAX * 2];  /* 최대 2ch */
+static int     g_mp3_acc_frames = 0;
+
+/* RTP 상태 */
+static uint16_t g_rtp_seq  = 0;
+static uint32_t g_rtp_ts   = 0;
+static uint32_t g_rtp_ssrc = 0;
 
 /* stats */
-static atomic_ulong    g_bytes_sent = 0;
+static atomic_ulong g_bytes_sent = 0;
 
-/* ── shm attach ──────────────────────────────────── */
-static int shm_attach(void) {
+/* reader thread */
+static pthread_t    g_reader_tid;
+static volatile int g_reader_run = 0;
+
+/* ── codec 변경 플래그 ───────────────────────────────── */
+static volatile int    g_codec_changed = 0;
+static Codec           g_new_codec     = CODEC_MP3;
+static int             g_new_bitrate   = 320;
+static pthread_mutex_t g_codec_mtx     = PTHREAD_MUTEX_INITIALIZER;
+
+/* ── UDP 소켓 초기화 ─────────────────────────────────── */
+static int udp_init(void) {
+    if (g_udp_sock >= 0) { close(g_udp_sock); g_udp_sock = -1; }
+    g_udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (g_udp_sock < 0) {
+        fprintf(stderr, "[rtp_send] socket: %s\n", strerror(errno));
+        return 0;
+    }
+    int ttl = 15;
+    setsockopt(g_udp_sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+    /* 유니캐스트 TTL도 설정 */
+    setsockopt(g_udp_sock, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl));
+    return 1;
+}
+
+/* ── RTP 패킷 전송 ───────────────────────────────────── */
+static void rtp_send_packet(const uint8_t *payload, int payload_len, int marker)
+{
+    if (g_udp_sock < 0 || payload_len <= 0) return;
+
+    /* PT: MPA=14(90kHz), L16-stereo=10, L16-mono=11 */
+    uint8_t pt;
+    if (g_codec == CODEC_MP3) {
+        pt = 14;
+    } else {
+        pt = (g_ch == 1) ? 11 : 10;
+        /* 비표준 레이트면 dynamic PT 사용 */
+        if (g_out_rate != 44100) pt = 96;
+    }
+
+    uint8_t pkt[RTP_HDR_SIZE + MPA_HDR_SIZE + MAX_PKT_SIZE];
+    int hdr_extra = (g_codec == CODEC_MP3) ? MPA_HDR_SIZE : 0;
+    int pkt_len   = RTP_HDR_SIZE + hdr_extra + payload_len;
+
+    /* RTP 헤더 */
+    pkt[0]  = 0x80;                      /* V=2, P=0, X=0, CC=0 */
+    pkt[1]  = (marker ? 0x80 : 0) | (pt & 0x7f);
+    pkt[2]  = g_rtp_seq >> 8;
+    pkt[3]  = g_rtp_seq & 0xff;
+    pkt[4]  = g_rtp_ts >> 24;
+    pkt[5]  = (g_rtp_ts >> 16) & 0xff;
+    pkt[6]  = (g_rtp_ts >> 8)  & 0xff;
+    pkt[7]  = g_rtp_ts & 0xff;
+    pkt[8]  = g_rtp_ssrc >> 24;
+    pkt[9]  = (g_rtp_ssrc >> 16) & 0xff;
+    pkt[10] = (g_rtp_ssrc >> 8)  & 0xff;
+    pkt[11] = g_rtp_ssrc & 0xff;
+    g_rtp_seq++;
+
+    /* RFC 2250 MPEG audio header (4바이트, 모두 0) */
+    if (hdr_extra) memset(pkt + RTP_HDR_SIZE, 0, hdr_extra);
+
+    memcpy(pkt + RTP_HDR_SIZE + hdr_extra, payload, payload_len);
+
+    pthread_mutex_lock(&g_target_mtx);
+    for (int i = 0; i < g_n_targets; i++) {
+        ssize_t sent = sendto(g_udp_sock, pkt, pkt_len, 0,
+                              (struct sockaddr *)&g_targets[i].addr,
+                              sizeof(g_targets[i].addr));
+        if (sent > 0)
+            atomic_fetch_add_explicit(&g_bytes_sent, (unsigned long)sent,
+                                      memory_order_relaxed);
+    }
+    pthread_mutex_unlock(&g_target_mtx);
+}
+
+/* ── lame 초기화 ─────────────────────────────────────── */
+static int lame_reinit(int rate, int ch, int bitrate)
+{
+    if (g_lame) { lame_close(g_lame); g_lame = NULL; }
+    g_lame = lame_init();
+    if (!g_lame) return 0;
+    lame_set_in_samplerate(g_lame, rate);
+    lame_set_num_channels(g_lame, ch);
+    lame_set_out_samplerate(g_lame, rate);
+    lame_set_brate(g_lame, bitrate);
+    lame_set_quality(g_lame, 7);        /* 7=fastest, 2=best */
+    lame_set_VBR(g_lame, vbr_off);     /* CBR */
+    lame_set_bWriteVbrTag(g_lame, 0);
+    if (lame_init_params(g_lame) < 0) {
+        lame_close(g_lame); g_lame = NULL; return 0;
+    }
+    fprintf(stderr, "[rtp_send] lame init: %dHz %dch %dkbps quality=7\n",
+            rate, ch, bitrate);
+    return 1;
+}
+
+/* ── SHM attach ──────────────────────────────────────── */
+static int shm_attach(void)
+{
     for (int i = 0; i < 50; i++) {
         g_shm_fd = shm_open(g_shm_name, O_RDWR, 0);
         if (g_shm_fd >= 0) break;
         usleep(100000);
     }
     if (g_shm_fd < 0) {
-        fprintf(stderr, "[rtp_send] shm_open(%s) failed: %s\n",
-                g_shm_name, strerror(errno));
+        fprintf(stderr, "[rtp_send] shm_open(%s): %s\n", g_shm_name, strerror(errno));
         return 0;
     }
-    g_shm = mmap(NULL, SHMRING_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, g_shm_fd, 0);
+    g_shm = mmap(NULL, SHMRING_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, g_shm_fd, 0);
     if (g_shm == MAP_FAILED) {
-        fprintf(stderr, "[rtp_send] mmap(%s) failed: %s\n", g_shm_name, strerror(errno));
-        close(g_shm_fd); g_shm_fd = -1; g_shm = NULL;
-        return 0;
+        fprintf(stderr, "[rtp_send] mmap: %s\n", strerror(errno));
+        close(g_shm_fd); g_shm_fd = -1; g_shm = NULL; return 0;
     }
     fprintf(stderr, "[rtp_send] attached shm %s\n", g_shm_name);
     return 1;
 }
 
-/* ── udpsink probe: byte count ───────────────────── */
-static GstPadProbeReturn udp_out_probe(GstPad *pad, GstPadProbeInfo *info, gpointer data)
+/* ── float → S16BE 변환 ──────────────────────────────── */
+static void f32_to_s16be(const float *in, uint8_t *out, int samples)
 {
-    (void)pad; (void)data;
-    GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
-    if (buf) atomic_fetch_add_explicit(&g_bytes_sent, gst_buffer_get_size(buf), memory_order_relaxed);
-    return GST_PAD_PROBE_OK;
-}
-
-/* ── bus handler ─────────────────────────────────── */
-static gboolean bus_cb(GstBus *bus, GstMessage *msg, gpointer data)
-{
-    (void)bus; (void)data;
-    if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR) {
-        GError *err = NULL; gchar *dbg = NULL;
-        gst_message_parse_error(msg, &err, &dbg);
-        fprintf(stderr, "[rtp_send] gst error: %s (%s)\n", err->message, dbg ? dbg : "");
-        g_error_free(err); g_free(dbg);
-    }
-    return TRUE;
-}
-
-/* ── pipeline stop ───────────────────────────────── */
-static void pipeline_stop(void)
-{
-    if (g_pipeline) {
-        gst_element_set_state(g_pipeline, GST_STATE_NULL);
-        gst_object_unref(g_pipeline);
-        g_pipeline     = NULL;
-        g_appsrc       = NULL;
-        g_multiudpsink = NULL;
+    for (int i = 0; i < samples; i++) {
+        float v = in[i];
+        if (v >  1.0f) v =  1.0f;
+        if (v < -1.0f) v = -1.0f;
+        int16_t s = (int16_t)(v * 32767.0f);
+        out[i*2]   = (s >> 8) & 0xff;
+        out[i*2+1] = s & 0xff;
     }
 }
 
-/* ── pipeline build ──────────────────────────────── */
-static int pipeline_build(void)
+/* ── 송신: L16 raw ───────────────────────────────────── */
+#define L16_FRAMES_PER_PKT 256   /* 256 frames @ 44100Hz ≈ 5.8ms */
+
+static void send_raw_l16(const float *buf, int frames)
 {
-    pipeline_stop();
+    int frames_sent = 0;
 
-    /* 샘플레이트 변환은 reader thread(libsamplerate)에서 처리.
-     * appsrc에는 이미 out_rate로 변환된 F32LE가 들어옴. */
-    int out_rate = (g_out_rate > 0) ? g_out_rate : SAMPLE_RATE;
+    while (frames_sent < frames) {
+        int chunk = frames - frames_sent;
+        if (chunk > L16_FRAMES_PER_PKT) chunk = L16_FRAMES_PER_PKT;
 
-    GstElement *pipe = gst_pipeline_new("rtp_send");
-    GstElement *src  = gst_element_factory_make("appsrc",       "src");
-    GstElement *cf   = gst_element_factory_make("capsfilter",   "cf_in");
-    GstElement *cvt  = gst_element_factory_make("audioconvert", "cvt");
+        int samples = chunk * g_ch;
+        uint8_t pcm[L16_FRAMES_PER_PKT * 8 * 2]; /* max ch=8, S16=2bytes */
+        f32_to_s16be(buf + frames_sent * g_ch, pcm, samples);
 
-    if (!src || !cf || !cvt) goto fail;
-
-    /* appsrc caps: F32LE interleaved @ out_rate (이미 변환 완료) */
-    GstCaps *in_caps = gst_caps_new_simple("audio/x-raw",
-        "format",   G_TYPE_STRING, "F32LE",
-        "rate",     G_TYPE_INT,    out_rate,
-        "channels", G_TYPE_INT,    g_ch,
-        "layout",   G_TYPE_STRING, "interleaved", NULL);
-    g_object_set(src, "caps",         in_caps,
-                      "format",       GST_FORMAT_TIME,
-                      "is-live",      TRUE,
-                      "do-timestamp", TRUE,
-                      "block",        FALSE,
-                      NULL);
-    gst_caps_unref(in_caps);
-    g_appsrc = GST_APP_SRC(src);
-    gst_app_src_set_stream_type(g_appsrc, GST_APP_STREAM_TYPE_STREAM);
-    gst_app_src_set_max_bytes(g_appsrc, (guint64)(out_rate * g_ch * sizeof(float) / 2));
-
-    gst_bin_add_many(GST_BIN(pipe), src, cf, cvt, NULL);
-    if (!gst_element_link(src, cf))  goto fail;
-    if (!gst_element_link(cf,  cvt)) goto fail;
-    GstElement *last_cvt = cvt;
-
-    GstElement *enc = NULL, *caps_flt = NULL;
-    if (g_codec == CODEC_MP3) {
-        enc = gst_element_factory_make("lamemp3enc", "enc");
-        if (!enc) goto fail;
-        g_object_set(enc, "bitrate", g_bitrate, "cbr", TRUE,
-                          "encoding-engine-quality", 0, NULL);  /* 0=fast */
-        gst_bin_add(GST_BIN(pipe), enc);
-        if (!gst_element_link(last_cvt, enc)) goto fail;
-    } else if (g_codec == CODEC_OPUS) {
-        enc = gst_element_factory_make("opusenc", "enc");
-        if (!enc) goto fail;
-        g_object_set(enc, "bitrate", g_bitrate * 1000, NULL);
-        gst_bin_add(GST_BIN(pipe), enc);
-        if (!gst_element_link(last_cvt, enc)) goto fail;
-    } else {
-        caps_flt = gst_element_factory_make("capsfilter", "cf");
-        if (!caps_flt) goto fail;
-        GstCaps *raw = gst_caps_new_simple("audio/x-raw",
-            "format",   G_TYPE_STRING, g_use_rtp ? "S16BE" : "S16LE",
-            "rate",     G_TYPE_INT,    out_rate,
-            "channels", G_TYPE_INT,    g_ch,
-            "layout",   G_TYPE_STRING, "interleaved", NULL);
-        g_object_set(caps_flt, "caps", raw, NULL);
-        gst_caps_unref(raw);
-        gst_bin_add(GST_BIN(pipe), caps_flt);
-        if (!gst_element_link(last_cvt, caps_flt)) goto fail;
+        /* RTP 타임스탬프: L16은 샘플레이트 기반 */
+        rtp_send_packet(pcm, samples * 2, (frames_sent == 0) ? 1 : 0);
+        g_rtp_ts += (uint32_t)chunk;
+        frames_sent += chunk;
     }
-    GstElement *last = enc ? enc : caps_flt;
+}
 
-    if (g_use_rtp) {
-        GstElement *pay = NULL;
-        if      (g_codec == CODEC_MP3)  pay = gst_element_factory_make("rtpmpapay",  "pay");
-        else if (g_codec == CODEC_OPUS) pay = gst_element_factory_make("rtpopuspay", "pay");
-        else                            pay = gst_element_factory_make("rtpL16pay",  "pay");
-        if (!pay) goto fail;
-        if (g_codec == CODEC_RAW) {
-            int pt = -1;
-            if (out_rate == 44100) { if (g_ch == 2) pt = 10; else if (g_ch == 1) pt = 11; }
-            if (pt >= 0) g_object_set(pay, "pt", pt, NULL);
+/* ── 송신: MP3 (1152 그래뉼 단위 누적 후 인코딩) ────── */
+static void send_mp3(const float *buf, int frames)
+{
+    /* 누적 버퍼에 추가 */
+    int space = MP3_ACC_MAX - g_mp3_acc_frames;
+    if (frames > space) frames = space;
+    memcpy(g_mp3_acc + g_mp3_acc_frames * g_ch, buf,
+           (size_t)(frames * g_ch) * sizeof(float));
+    g_mp3_acc_frames += frames;
+
+    /* 1152 프레임이 쌓일 때마다 인코딩 */
+    int ch2 = (g_ch >= 2);
+    float left[LAME_GRAN], right[LAME_GRAN];
+
+    while (g_mp3_acc_frames >= LAME_GRAN) {
+        const float *src = g_mp3_acc;
+        for (int f = 0; f < LAME_GRAN; f++) {
+            left[f]  = src[f * g_ch];
+            right[f] = ch2 ? src[f * g_ch + 1] : src[f * g_ch];
         }
-        /* 클라이언트 이름에서 결정론적 SSRC 생성 (재시작 후에도 수신측이 동일 스트림 식별) */
-        guint32 ssrc = 0;
-        for (int i = 0; g_client_name[i]; i++)
-            ssrc = ssrc * 31u + (unsigned char)g_client_name[i];
-        ssrc |= 0x80000000u;
-        g_object_set(pay, "ssrc", ssrc, NULL);
-        gst_bin_add(GST_BIN(pipe), pay);
-        if (!gst_element_link(last, pay)) goto fail;
-        last = pay;
+
+        uint8_t mp3buf[MP3_BUF_SIZE];
+        int mp3len = 0;
+        pthread_mutex_lock(&g_lame_mtx);
+        if (g_lame)
+            mp3len = lame_encode_buffer_ieee_float(
+                         g_lame, left, right, LAME_GRAN,
+                         mp3buf, sizeof(mp3buf));
+        pthread_mutex_unlock(&g_lame_mtx);
+
+        /* 사용한 1152 프레임을 버퍼에서 제거 */
+        g_mp3_acc_frames -= LAME_GRAN;
+        if (g_mp3_acc_frames > 0)
+            memmove(g_mp3_acc, g_mp3_acc + LAME_GRAN * g_ch,
+                    (size_t)(g_mp3_acc_frames * g_ch) * sizeof(float));
+
+        if (mp3len <= 0) continue;
+
+        /* MP3 RTP: 90kHz 타임스탬프 */
+        uint32_t ts_inc = (uint32_t)((uint64_t)LAME_GRAN * 90000 / (uint64_t)g_out_rate);
+        rtp_send_packet(mp3buf, mp3len, 1);
+        g_rtp_ts += ts_inc;
     }
-
-    /* ── sink: multiudpsink — 파이프라인 재빌드 없이 동적 대상 추가/제거 ── */
-    GstElement *sink = gst_element_factory_make("multiudpsink", "sink");
-    if (!sink) goto fail;
-    g_object_set(sink, "sync", FALSE, "bind-port", 0, NULL);
-    gst_bin_add(GST_BIN(pipe), sink);
-    if (!gst_element_link(last, sink)) goto fail;
-
-    /* byte count probe */
-    GstPad *sp = gst_element_get_static_pad(sink, "sink");
-    if (sp) {
-        gst_pad_add_probe(sp, GST_PAD_PROBE_TYPE_BUFFER, udp_out_probe, NULL, NULL);
-        gst_object_unref(sp);
-    }
-
-    GstBus *bus = gst_element_get_bus(pipe);
-    if (bus) { gst_bus_add_watch(bus, bus_cb, NULL); gst_object_unref(bus); }
-
-    g_pipeline     = pipe;
-    g_multiudpsink = sink;
-
-    GstStateChangeReturn ret = gst_element_set_state(g_pipeline, GST_STATE_PLAYING);
-    if (ret == GST_STATE_CHANGE_FAILURE) {
-        fprintf(stderr, "[rtp_send] pipeline failed to start PLAYING\n");
-        gst_object_unref(g_pipeline); g_pipeline = NULL; g_appsrc = NULL; g_multiudpsink = NULL;
-        return 0;
-    }
-
-    /* 기존 대상 복원 */
-    pthread_mutex_lock(&target_mutex);
-    for (int i = 0; i < n_targets; i++)
-        g_signal_emit_by_name(g_multiudpsink, "add", targets[i].host, (gint)targets[i].port, NULL);
-    int nt = n_targets;
-    pthread_mutex_unlock(&target_mutex);
-
-    fprintf(stderr, "[rtp_send] pipeline built: %s%s rate=%d→%d targets=%d\n",
-            g_codec == CODEC_MP3 ? "mp3" : g_codec == CODEC_OPUS ? "opus" : "raw",
-            g_use_rtp ? "+rtp" : "", SAMPLE_RATE, out_rate, nt);
-    return 1;
-
-fail:
-    fprintf(stderr, "[rtp_send] pipeline build failed\n");
-    gst_object_unref(pipe); g_appsrc = NULL; g_multiudpsink = NULL;
-    return 0;
 }
 
-/* ── shm reader thread ───────────────────────────── */
+/* ── shm reader thread ───────────────────────────────── */
 static void *shm_reader_thread(void *arg)
 {
     (void)arg;
+    int out_rate  = g_out_rate;
+    int need_src  = (out_rate != SAMPLE_RATE) && (g_src != NULL);
 
-    int out_rate    = (g_out_rate > 0) ? g_out_rate : SAMPLE_RATE;
-    int need_resamp = (out_rate != SAMPLE_RATE) && (g_src != NULL);
-
-    /* 입력 버퍼 (F32LE @ 48kHz, PERIOD_FRAMES) */
-    float *in_buf = calloc(PERIOD_FRAMES * g_ch, sizeof(float));
-
-    /* 출력 버퍼 (F32LE @ out_rate): 최대 프레임 수 여유 있게 할당 */
-    int out_max = need_resamp
+    float *in_buf  = calloc(PERIOD_FRAMES * g_ch, sizeof(float));
+    int out_max    = need_src
         ? (int)((double)PERIOD_FRAMES * out_rate / SAMPLE_RATE * 1.1 + 64)
         : PERIOD_FRAMES;
     float *out_buf = calloc(out_max * g_ch, sizeof(float));
 
-    GstClockTime ts = 0;
-
     while (g_reader_run) {
+        /* 코덱 변경 처리 */
+        if (g_codec_changed) {
+            pthread_mutex_lock(&g_codec_mtx);
+            Codec  nc = g_new_codec;
+            int    nb = g_new_bitrate;
+            g_codec_changed = 0;
+            pthread_mutex_unlock(&g_codec_mtx);
+
+            g_codec   = nc;
+            g_bitrate = nb;
+            g_mp3_acc_frames = 0;   /* 누적 버퍼 초기화 */
+            if (g_codec == CODEC_MP3) {
+                pthread_mutex_lock(&g_lame_mtx);
+                lame_reinit(out_rate, g_ch, g_bitrate);
+                pthread_mutex_unlock(&g_lame_mtx);
+            }
+            fprintf(stderr, "[rtp_send] codec=%s bitrate=%d\n",
+                    g_codec == CODEC_MP3 ? "mp3" : "raw", g_bitrate);
+        }
+
         if (!g_shm) {
             if (!shm_attach()) { usleep(100000); continue; }
         }
 
         ShmRing *ring = g_shm;
-        uint32_t wp = atomic_load_explicit(&ring->wp, memory_order_acquire);
-        uint32_t rp = atomic_load_explicit(&ring->rp, memory_order_relaxed);
+        uint32_t wp   = atomic_load_explicit(&ring->wp, memory_order_acquire);
+        uint32_t rp   = atomic_load_explicit(&ring->rp, memory_order_relaxed);
 
-        int got_data = ((int32_t)(wp - rp) >= PERIOD_FRAMES);
-        if (got_data) {
-            for (int f = 0; f < PERIOD_FRAMES; f++) {
-                uint32_t idx = (rp + (uint32_t)f) % (uint32_t)SHM_RING_FRAMES;
-                for (int c = 0; c < g_ch && c < SHM_MAX_CH; c++)
-                    in_buf[f * g_ch + c] = ring->buf[idx * SHM_MAX_CH + c];
-            }
-            atomic_store_explicit(&ring->rp, rp + (uint32_t)PERIOD_FRAMES,
-                                  memory_order_release);
-        } else {
-            memset(in_buf, 0, (size_t)(PERIOD_FRAMES * g_ch) * sizeof(float));
+        if ((int32_t)(wp - rp) < PERIOD_FRAMES) {
             usleep(1000);
+            continue;
         }
 
-        /* libsamplerate로 변환 (필요한 경우) */
-        float *push_buf;
-        int    push_frames;
-        if (need_resamp) {
+        /* SHM → in_buf */
+        for (int f = 0; f < PERIOD_FRAMES; f++) {
+            uint32_t idx = (rp + (uint32_t)f) % SHM_RING_FRAMES;
+            for (int c = 0; c < g_ch && c < SHM_MAX_CH; c++)
+                in_buf[f * g_ch + c] = ring->buf[idx * SHM_MAX_CH + c];
+        }
+        atomic_store_explicit(&ring->rp, rp + PERIOD_FRAMES, memory_order_release);
+
+        /* libsamplerate */
+        float *send_buf;
+        int    send_frames;
+        if (need_src) {
             SRC_DATA sd = {
                 .data_in       = in_buf,
                 .data_out      = out_buf,
@@ -342,33 +375,19 @@ static void *shm_reader_thread(void *arg)
                 .end_of_input  = 0,
             };
             src_process(g_src, &sd);
-            push_buf    = out_buf;
-            push_frames = (int)sd.output_frames_gen;
+            send_buf    = out_buf;
+            send_frames = (int)sd.output_frames_gen;
         } else {
-            push_buf    = in_buf;
-            push_frames = PERIOD_FRAMES;
+            send_buf    = in_buf;
+            send_frames = PERIOD_FRAMES;
         }
 
-        if (push_frames <= 0) continue;
+        if (send_frames <= 0 || g_n_targets == 0) continue;
 
-        GstClockTime period_ns = (GstClockTime)(
-            (uint64_t)push_frames * 1000000000ULL / (uint64_t)out_rate);
-        size_t push_bytes = (size_t)(push_frames * g_ch) * sizeof(float);
-
-        pthread_mutex_lock(&pipe_mutex);
-        if (g_appsrc) {
-            GstBuffer *gbuf = gst_buffer_new_allocate(NULL, push_bytes, NULL);
-            GstMapInfo map;
-            if (gst_buffer_map(gbuf, &map, GST_MAP_WRITE)) {
-                memcpy(map.data, push_buf, push_bytes);
-                gst_buffer_unmap(gbuf, &map);
-            }
-            GST_BUFFER_PTS(gbuf)      = ts;
-            GST_BUFFER_DURATION(gbuf) = period_ns;
-            ts += period_ns;
-            gst_app_src_push_buffer(g_appsrc, gbuf);
-        }
-        pthread_mutex_unlock(&pipe_mutex);
+        if (g_codec == CODEC_MP3)
+            send_mp3(send_buf, send_frames);
+        else
+            send_raw_l16(send_buf, send_frames);
     }
 
     free(in_buf);
@@ -376,29 +395,27 @@ static void *shm_reader_thread(void *arg)
     return NULL;
 }
 
-/* ── stats thread ────────────────────────────────── */
+/* ── stats thread ────────────────────────────────────── */
 static void *stats_thread(void *arg)
 {
     (void)arg;
-    unsigned long prev_bytes = 0;
+    unsigned long prev = 0;
     while (!g_quit) {
         sleep(2);
         unsigned long cur  = atomic_load(&g_bytes_sent);
-        int           kbps = (int)((cur - prev_bytes) * 8 / 2 / 1000);
-        prev_bytes = cur;
-        const char *cs = g_codec == CODEC_OPUS ? "opus" :
-                         g_codec == CODEC_RAW  ? "raw"  : "mp3";
-        pthread_mutex_lock(&target_mutex);
-        int nt = n_targets;
-        pthread_mutex_unlock(&target_mutex);
+        int           kbps = (int)((cur - prev) * 8 / 2 / 1000);
+        prev = cur;
+        pthread_mutex_lock(&g_target_mtx);
+        int nt = g_n_targets;
+        pthread_mutex_unlock(&g_target_mtx);
         fprintf(stdout, "stats targets=%d codec=%s bitrateKbps=%d bytesSent=%lu\n",
-                nt, cs, kbps, cur);
+                nt, g_codec == CODEC_MP3 ? "mp3" : "raw", kbps, cur);
         fflush(stdout);
     }
     return NULL;
 }
 
-/* ── stdin command thread ────────────────────────── */
+/* ── stdin command thread ────────────────────────────── */
 static void *stdin_thread(void *arg)
 {
     (void)arg;
@@ -407,65 +424,55 @@ static void *stdin_thread(void *arg)
         size_t len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
 
-        char cmd[64], h[128]; int p = 0;
+        char cmd[64]; int p = 0; char h[128];
         if (sscanf(line, "%63s", cmd) < 1) continue;
+
         if (strcmp(cmd, "quit") == 0) { g_quit = 1; break; }
 
         if (strcmp(cmd, "add") == 0 && sscanf(line, "%*s %127s %d", h, &p) == 2) {
+            pthread_mutex_lock(&g_target_mtx);
             int found = 0;
-            pthread_mutex_lock(&target_mutex);
-            for (int i = 0; i < n_targets; i++)
-                if (strcmp(targets[i].host, h) == 0 && targets[i].port == p) { found = 1; break; }
-            if (!found && n_targets < MAX_TARGETS) {
-                snprintf(targets[n_targets].host, sizeof(targets[0].host), "%s", h);
-                targets[n_targets++].port = p;
+            for (int i = 0; i < g_n_targets; i++)
+                if (strcmp(g_targets[i].host, h) == 0 && g_targets[i].port == p)
+                    { found = 1; break; }
+            if (!found && g_n_targets < MAX_TARGETS) {
+                Target *t = &g_targets[g_n_targets++];
+                snprintf(t->host, sizeof(t->host), "%s", h);
+                t->port = p;
+                memset(&t->addr, 0, sizeof(t->addr));
+                t->addr.sin_family = AF_INET;
+                t->addr.sin_port   = htons(p);
+                inet_aton(h, &t->addr.sin_addr);
             }
-            pthread_mutex_unlock(&target_mutex);
-            if (!found) {
-                pthread_mutex_lock(&pipe_mutex);
-                if (g_multiudpsink)
-                    g_signal_emit_by_name(g_multiudpsink, "add", h, (gint)p, NULL);
-                pthread_mutex_unlock(&pipe_mutex);
-            }
-            pthread_mutex_lock(&target_mutex);
-            fprintf(stderr, "[rtp_send] add target %s:%d (total=%d)\n", h, p, n_targets);
-            pthread_mutex_unlock(&target_mutex);
+            int nt = g_n_targets;
+            pthread_mutex_unlock(&g_target_mtx);
+            fprintf(stderr, "[rtp_send] add target %s:%d (total=%d)\n", h, p, nt);
             continue;
         }
 
         if (strcmp(cmd, "remove") == 0 && sscanf(line, "%*s %127s %d", h, &p) == 2) {
-            int was_there = 0;
-            pthread_mutex_lock(&target_mutex);
-            for (int i = 0; i < n_targets; i++) {
-                if (strcmp(targets[i].host, h) == 0 && targets[i].port == p) {
-                    targets[i] = targets[--n_targets]; was_there = 1; break;
+            pthread_mutex_lock(&g_target_mtx);
+            for (int i = 0; i < g_n_targets; i++) {
+                if (strcmp(g_targets[i].host, h) == 0 && g_targets[i].port == p) {
+                    g_targets[i] = g_targets[--g_n_targets];
+                    break;
                 }
             }
-            int nt = n_targets;
-            pthread_mutex_unlock(&target_mutex);
-            if (was_there) {
-                pthread_mutex_lock(&pipe_mutex);
-                if (g_multiudpsink)
-                    g_signal_emit_by_name(g_multiudpsink, "remove", h, (gint)p, NULL);
-                pthread_mutex_unlock(&pipe_mutex);
-            }
+            int nt = g_n_targets;
+            pthread_mutex_unlock(&g_target_mtx);
             fprintf(stderr, "[rtp_send] remove target %s:%d (total=%d)\n", h, p, nt);
             continue;
         }
 
         if (strcmp(cmd, "codec") == 0) {
-            char cs[32] = "raw"; int br = g_bitrate;
+            char cs[32] = "mp3"; int br = g_bitrate;
             sscanf(line, "%*s %31s %d", cs, &br);
-            Codec nc = (strcmp(cs, "mp3") == 0) ? CODEC_MP3 :
-                       (strcmp(cs, "opus") == 0) ? CODEC_OPUS : CODEC_RAW;
-            if (nc == g_codec && br == g_bitrate) {
-                fprintf(stderr, "[rtp_send] codec unchanged (%s %d)\n", cs, br); continue;
-            }
-            g_codec = nc; g_bitrate = br;
-            pthread_mutex_lock(&pipe_mutex);
-            pipeline_build();   /* 코덱 변경 시에만 재빌드 */
-            pthread_mutex_unlock(&pipe_mutex);
-            fprintf(stderr, "[rtp_send] codec=%s bitrate=%d\n", cs, br);
+            Codec nc = (strcmp(cs, "raw") == 0) ? CODEC_RAW : CODEC_MP3;
+            pthread_mutex_lock(&g_codec_mtx);
+            g_new_codec     = nc;
+            g_new_bitrate   = br;
+            g_codec_changed = 1;
+            pthread_mutex_unlock(&g_codec_mtx);
             continue;
         }
 
@@ -474,50 +481,58 @@ static void *stdin_thread(void *arg)
     return NULL;
 }
 
-/* ── signal ──────────────────────────────────────── */
+/* ── signal ──────────────────────────────────────────── */
 static void on_signal(int sig) { (void)sig; g_quit = 1; }
 
-/* ── main ────────────────────────────────────────── */
+/* ── main ────────────────────────────────────────────── */
 int main(int argc, char *argv[])
 {
-    gst_init(&argc, &argv);
     signal(SIGTERM, on_signal);
     signal(SIGINT,  on_signal);
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
+        fprintf(stderr, "[rtp_send] mlockall failed: %s\n", strerror(errno));
 
     g_ch       = argc > 1 ? atoi(argv[1]) : 2;
     if (argc > 2) snprintf(g_client_name, sizeof(g_client_name), "%s", argv[2]);
     g_use_rtp  = (argc > 3 && strcmp(argv[3], "rtp") == 0) ? 1 : 0;
-    g_out_rate = (argc > 4) ? atoi(argv[4]) : 0;
-    if (g_use_rtp) g_codec = CODEC_RAW;
-
+    g_out_rate = (argc > 4 && atoi(argv[4]) > 0) ? atoi(argv[4]) : SAMPLE_RATE;
     if (argc > 5 && strcmp(argv[5], "shm") == 0 && argc > 6)
         snprintf(g_shm_name, sizeof(g_shm_name), "%s", argv[6]);
 
     if (!g_shm_name[0]) {
-        fprintf(stderr, "[rtp_send] shm name required (argv[5]=shm argv[6]=<name>)\n");
+        fprintf(stderr, "[rtp_send] shm name required\n");
         return 1;
     }
 
-    /* libsamplerate 초기화 (out_rate ≠ 48kHz 인 경우에만) */
-    if (g_out_rate > 0 && g_out_rate != SAMPLE_RATE) {
-        int src_err;
-        g_src = src_new(SRC_SINC_FASTEST, g_ch, &src_err);
+    /* SSRC: 클라이언트 이름 해시 (재시작 후에도 동일) */
+    for (int i = 0; g_client_name[i]; i++)
+        g_rtp_ssrc = g_rtp_ssrc * 31u + (unsigned char)g_client_name[i];
+    g_rtp_ssrc |= 0x80000000u;
+
+    /* libsamplerate */
+    if (g_out_rate != SAMPLE_RATE) {
+        int err;
+        g_src = src_new(SRC_SINC_FASTEST, g_ch, &err);
         if (!g_src) {
-            fprintf(stderr, "[rtp_send] src_new failed: %s\n", src_strerror(src_err));
+            fprintf(stderr, "[rtp_send] src_new: %s\n", src_strerror(err));
             return 1;
         }
-        fprintf(stderr, "[rtp_send] resampler: %d→%d (libsamplerate SRC_SINC_FASTEST)\n",
-                SAMPLE_RATE, g_out_rate);
+        fprintf(stderr, "[rtp_send] resampler: %d→%d\n", SAMPLE_RATE, g_out_rate);
     }
+
+    /* lame */
+    if (!lame_reinit(g_out_rate, g_ch, g_bitrate)) {
+        fprintf(stderr, "[rtp_send] lame init failed\n");
+        return 1;
+    }
+
+    /* UDP 소켓 */
+    if (!udp_init()) return 1;
 
     shm_attach();
 
     g_reader_run = 1;
     pthread_create(&g_reader_tid, NULL, shm_reader_thread, NULL);
-
-    pthread_mutex_lock(&pipe_mutex);
-    pipeline_build();
-    pthread_mutex_unlock(&pipe_mutex);
 
     fprintf(stdout, "[rtp_send] ready\n");
     fflush(stdout);
@@ -526,25 +541,21 @@ int main(int argc, char *argv[])
     pthread_create(&stdin_tid, NULL, stdin_thread, NULL);
     pthread_create(&stats_tid, NULL, stats_thread,  NULL);
 
-    GMainLoop *loop = g_main_loop_new(NULL, FALSE);
-    while (!g_quit) {
-        g_main_context_iteration(NULL, FALSE);
-        usleep(1000);
-    }
-    g_main_loop_unref(loop);
+    while (!g_quit) usleep(50000);
 
     g_reader_run = 0;
     pthread_join(g_reader_tid, NULL);
     pthread_join(stdin_tid,    NULL);
     pthread_join(stats_tid,    NULL);
 
-    pthread_mutex_lock(&pipe_mutex);
-    pipeline_stop();
-    pthread_mutex_unlock(&pipe_mutex);
+    pthread_mutex_lock(&g_lame_mtx);
+    if (g_lame) { lame_close(g_lame); g_lame = NULL; }
+    pthread_mutex_unlock(&g_lame_mtx);
 
+    if (g_src)      { src_delete(g_src); g_src = NULL; }
+    if (g_udp_sock >= 0) { close(g_udp_sock); g_udp_sock = -1; }
     if (g_shm)      { munmap(g_shm, SHMRING_SIZE); g_shm = NULL; }
     if (g_shm_fd >= 0) { close(g_shm_fd); g_shm_fd = -1; }
-    if (g_src)      { src_delete(g_src); g_src = NULL; }
 
     fprintf(stderr, "[rtp_send] exiting\n");
     return 0;

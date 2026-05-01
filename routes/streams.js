@@ -135,6 +135,7 @@ router.put('/rtp/:client/codec', (req, res) => {
   const { client } = req.params;
   const { codec, bitrate } = req.body ?? {};
   if (!codec) return res.status(400).json({ error: 'codec required' });
+  if (codec !== 'mp3' && codec !== 'raw') return res.status(400).json({ error: 'codec must be mp3 or raw' });
   try {
     setRtpOutCodec(client, codec, bitrate ? Number(bitrate) : undefined);
     res.json({ ok: true, stream: getRtpStreamDetail(client) });

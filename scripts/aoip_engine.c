@@ -1231,6 +1231,8 @@ static void cmd_loop(void) {
 /* ── main ────────────────────────────────────────────── */
 int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
+        fprintf(stderr, "[aoip_engine] mlockall failed: %s\n", strerror(errno));
 
     if (argc < 3) {
         fprintf(stderr, "Usage: aoip_engine <n_in> <n_out> [--name <name>]\n");

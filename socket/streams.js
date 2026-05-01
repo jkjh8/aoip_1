@@ -196,6 +196,8 @@ export default function register(socket, { broadcastStatus, config }) {
     try {
       if (!client || !codec)
         return cb?.({ ok: false, error: 'client and codec required' });
+      if (codec !== 'mp3' && codec !== 'raw')
+        return cb?.({ ok: false, error: 'codec must be mp3 or raw' });
       setRtpOutCodec(client, codec, bitrate ? Number(bitrate) : undefined);
       broadcastStatus();
       cb?.({ ok: true, stream: getRtpStreamDetail(client) });

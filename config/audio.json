@@ -19,7 +19,7 @@
       "name": "USB Audio IN",
       "device": "hw:UAC2Gadget",
       "rate": 48000,
-      "period": 256,
+      "period": 512,
       "periods": 4,
       "channels": 2,
       "usb_gadget": true,
@@ -30,7 +30,7 @@
       "name": "USB Audio OUT",
       "device": "hw:UAC2Gadget",
       "rate": 48000,
-      "period": 256,
+      "period": 512,
       "periods": 4,
       "channels": 2,
       "usb_gadget": true,
@@ -67,7 +67,7 @@
       "port": 3030,
       "channels": 2,
       "protocol": "rtp",
-      "rtpEncoding": "MPA",
+      "rtpEncoding": "L16",
       "bufferMs": 100,
       "enabled": true,
       "sampleRate": 44100,
@@ -78,8 +78,8 @@
       "name": "Stream OUT",
       "client": "rtp_out_1",
       "channels": 2,
-      "protocol": "rtp",
-      "codec": "mp3",
+      "protocol": "raw",
+      "codec": "raw",
       "sampleRate": 44100,
       "targets": [
         {
@@ -92,7 +92,7 @@
         }
       ],
       "enabled": true,
-      "bitrate": 320
+      "bitrate": 192
     }
   ]
 }

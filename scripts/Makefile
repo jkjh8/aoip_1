@@ -18,7 +18,7 @@ rtp_recv: rtp_recv.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 rtp_send: rtp_send.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -lsamplerate
+	$(CC) $(CFLAGS) -o $@ $< -lsamplerate -lmp3lame -lm -lpthread -lrt
 
 clean:
 	rm -f $(TARGETS)

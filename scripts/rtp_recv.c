@@ -345,6 +345,8 @@ int main(int argc, char *argv[])
     gst_init(&argc, &argv);
     signal(SIGTERM, on_signal);
     signal(SIGINT,  on_signal);
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
+        fprintf(stderr, "[rtp_recv] mlockall failed: %s\n", strerror(errno));
 
     int port = argc > 1 ? atoi(argv[1]) : 5004;
     g_ch     = argc > 2 ? atoi(argv[2]) : 2;

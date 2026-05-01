@@ -420,7 +420,7 @@ static void *stdin_thread(void *arg)
 {
     (void)arg;
     char line[256];
-    while (!g_quit && fgets(line, sizeof(line), stdin)) {
+    while (!g_quit && fgets(line, sizeof(line), stdin) != NULL) {
         size_t len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
 
@@ -428,7 +428,6 @@ static void *stdin_thread(void *arg)
         if (sscanf(line, "%63s", cmd) < 1) continue;
 
         if (strcmp(cmd, "quit") == 0) { g_quit = 1; break; }
-
         if (strcmp(cmd, "add") == 0 && sscanf(line, "%*s %127s %d", h, &p) == 2) {
             pthread_mutex_lock(&g_target_mtx);
             int found = 0;
@@ -478,6 +477,8 @@ static void *stdin_thread(void *arg)
 
         fprintf(stderr, "[rtp_send] unknown command: %s\n", cmd);
     }
+    /* stdin EOF = 부모 프로세스(Node.js)가 종료됨 → 정상 종료 */
+    g_quit = 1;
     return NULL;
 }
 
@@ -489,7 +490,8 @@ int main(int argc, char *argv[])
 {
     signal(SIGTERM, on_signal);
     signal(SIGINT,  on_signal);
-    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
+    signal(SIGPIPE, SIG_IGN);  /* stdout/UDP 파이프 broken 시 크래시 방지 */
+    if (mlockall(MCL_CURRENT) != 0)
         fprintf(stderr, "[rtp_send] mlockall failed: %s\n", strerror(errno));
 
     g_ch       = argc > 1 ? atoi(argv[1]) : 2;
@@ -498,6 +500,8 @@ int main(int argc, char *argv[])
     g_out_rate = (argc > 4 && atoi(argv[4]) > 0) ? atoi(argv[4]) : SAMPLE_RATE;
     if (argc > 5 && strcmp(argv[5], "shm") == 0 && argc > 6)
         snprintf(g_shm_name, sizeof(g_shm_name), "%s", argv[6]);
+    if (argc > 7) g_codec   = (strcmp(argv[7], "raw") == 0) ? CODEC_RAW : CODEC_MP3;
+    if (argc > 8 && atoi(argv[8]) > 0) g_bitrate = atoi(argv[8]);
 
     if (!g_shm_name[0]) {
         fprintf(stderr, "[rtp_send] shm name required\n");
@@ -520,10 +524,12 @@ int main(int argc, char *argv[])
         fprintf(stderr, "[rtp_send] resampler: %d→%d\n", SAMPLE_RATE, g_out_rate);
     }
 
-    /* lame */
-    if (!lame_reinit(g_out_rate, g_ch, g_bitrate)) {
-        fprintf(stderr, "[rtp_send] lame init failed\n");
-        return 1;
+    /* lame: mp3 코덱일 때만 초기화 */
+    if (g_codec == CODEC_MP3) {
+        if (!lame_reinit(g_out_rate, g_ch, g_bitrate)) {
+            fprintf(stderr, "[rtp_send] lame init failed\n");
+            return 1;
+        }
     }
 
     /* UDP 소켓 */

@@ -1,0 +1,59 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Sync → 임베디드",
+      "type": "shell",
+      "command": "bash /mnt/c/Users/kjh/Desktop/DEV/aoip_1/scripts/sync.sh",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Watch & Auto-Sync",
+      "type": "shell",
+      "command": "powershell.exe -ExecutionPolicy Bypass -File C:\\Users\\kjh\\Desktop\\DEV\\aoip_1\\scripts\\watch-sync.ps1",
+      "group": "build",
+      "isBackground": true,
+      "options": {
+        "shell": {
+          "executable": "powershell.exe",
+          "args": []
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Deploy & Restart",
+      "type": "shell",
+      "command": "bash /mnt/c/Users/kjh/Desktop/DEV/aoip_1/scripts/deploy.sh",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "SSH → 임베디드",
+      "type": "shell",
+      "command": "ssh kjh@192.168.10.97",
+      "group": "test",
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

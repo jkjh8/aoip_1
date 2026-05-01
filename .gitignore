@@ -17,3 +17,6 @@ pids/
 # OS
 .DS_Store
 Thumbs.db
+
+# VS Code 로컬 설정 (팀 공유 제외)
+.vscode/settings.json

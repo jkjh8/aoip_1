@@ -30,7 +30,8 @@ import { getChannels,
          getDspChannelCounts }                       from './lib/channels.js';
 import { startDsp, sendGain, sendMute,
          sendBypass, sendAllDsp,
-         sendToEngine, waitForDspReady }             from './lib/dsp.js';
+         sendToEngine, waitForDspReady,
+         addEngineRestartListener }                  from './lib/dsp.js';
 import { getConfig } from './lib/config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -154,6 +155,50 @@ async function startup() {
 
   notifyRtpStartupComplete();
   notifyBridgeStartupComplete();
+
+  /* ── 엔진 비정상 종료 후 재시작 시 설정 재적용 ── */
+  addEngineRestartListener(async () => {
+    logger.info('[startup] aoip_engine restarted — re-applying config...');
+    try { await Promise.all([...dspCounts.keys()].map(name => waitForDspReady(name))); }
+    catch (e) { logger.warn('[startup] restart ready timeout: %s', e.message); return; }
+
+    /* 아날로그 브릿지 재등록 */
+    if (jackCfg?.device) {
+      const ch = jackCfg.channels ?? 2;
+      sendToEngine(`bridge add analog ${jackCfg.device} ${jackCfg.rate ?? 48000} ${jackCfg.period ?? 512} ${jackCfg.periods ?? 3} ${ch} 0`);
+    }
+
+    /* 비-USB ALSA 브릿지 재등록 */
+    try { await startBridges(config.bridges); }
+    catch (e) { logger.warn('[startup] bridges restart: %s', e.message); }
+
+    /* 라우팅 매트릭스 재적용 */
+    const restoredRoutes = getSavedRoutes();
+    if (restoredRoutes.length > 0) {
+      const { inputs: activeIn, outputs: activeOut } = getChannels([]);
+      const validSrcs = new Set(activeIn.map(ch => ch.jackPort));
+      const validDsts = new Set(activeOut.map(ch => ch.jackPort));
+      for (const { src, dst } of restoredRoutes) {
+        if (!validSrcs.has(src) || !validDsts.has(dst)) continue;
+        await connectWithRetry(src, dst);
+      }
+    }
+
+    /* gain/mute/DSP 상태 재적용 */
+    const { inputs: ins, outputs: outs } = getChannels([]);
+    for (const ch of ins) {
+      if (ch.bypassDsp) sendBypass('in', ch.id, true);
+      sendGain('in', ch.id, ch.gain);
+      if (ch.muted) sendMute('in', ch.id, true);
+    }
+    for (const ch of outs) {
+      if (ch.bypassDsp) sendBypass('out', ch.id, true);
+      sendGain('out', ch.id, ch.gain);
+      if (ch.muted) sendMute('out', ch.id, true);
+    }
+    sendAllDsp({ inputs: ins, outputs: outs });
+    logger.info('[startup] config re-applied after engine restart');
+  });
 
   httpServer.listen(PORT, () => logger.info(`[server] http://localhost:${PORT}`));
 }

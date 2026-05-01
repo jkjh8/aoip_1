@@ -72,7 +72,7 @@
 #define PERIOD_FRAMES   512
 #define RING_FRAMES     16384       /* 2의 거듭제곱, ~341 ms */
 #define MAX_CH          8
-#define MAX_DEVICES     4
+#define MAX_DEVICES     8
 #define MAX_RTP         4
 #define MAX_EQ_BANDS    4
 #define CMD_RING_SIZE   128
@@ -363,7 +363,13 @@ typedef struct {
     volatile int quit_cap;
     volatile int quit_play;
     int          thread_priority;  /* SCHED_FIFO priority for ALSA threads */
+
+    /* 언더런 시 클릭 방지용 페이드 버퍼 (캡처 방향, DSP 스레드 전용) */
+    float       *cap_fade_buf;     /* 마지막 정상 캡처 데이터 (interleaved) */
+    int          cap_fade_cnt;     /* 현재 페이드아웃 진행 횟수 */
 } Device;
+
+#define UNDERRUN_FADE_PERIODS 4    /* 언더런 페이드아웃 기간 수 (~42ms) */
 
 /* ── RTP 공유 메모리 연결 구조체 ─────────────────────── */
 typedef struct {
@@ -483,38 +489,37 @@ static void *alsa_capture_thread(void *arg) {
 
     while (!d->quit_cap && !g_quit) {
         snd_pcm_sframes_t n = snd_pcm_readi(pcm, ibuf, (snd_pcm_uframes_t)d->period);
-        if (n == -EPIPE) { snd_pcm_prepare(pcm); continue; }
+        if (n == -EPIPE) {
+            fprintf(stderr, "[aoip_engine] cap %s: xrun (overrun)\n", d->name);
+            snd_pcm_prepare(pcm); continue;
+        }
         if (n == -ESTRPIPE) {
             while (!g_quit && snd_pcm_resume(pcm) == -EAGAIN) usleep(10000);
             snd_pcm_prepare(pcm); continue;
         }
         if (n == -EIO) {
-            /* UAC2 가젯: 호스트가 스트림을 열지 않은 경우. prepare 후 재시도. */
-            cap_err_count++;
-            // if (cap_err_count == 1)
-            //     fprintf(stderr, "[aoip_engine] cap %s: host not ready (EIO), waiting\n",
-            //             d->name);
-            // snd_pcm_prepare(pcm);
-            // usleep(100000);
+            /* UAC2 가젯: 호스트가 스트림을 열지 않은 경우 — prepare 후 100ms 대기 */
+            if (cap_err_count++ == 0)
+                fprintf(stderr, "[aoip_engine] cap %s: EIO, host stream not active\n", d->name);
+            snd_pcm_prepare(pcm);
+            usleep(100000);
             continue;
         }
         if (n < 0) {
-            // cap_err_count++;
-            // if (cap_err_count == 1)
-            //     fprintf(stderr, "[aoip_engine] cap %s: %s (will suppress repeats)\n",
-            //             d->name, snd_strerror((int)n));
-            // snd_pcm_close(pcm); pcm = NULL;
-            // rb_reset(&d->in_ring);
-            // while (!d->quit_cap && !g_quit) {
-            //     usleep(500000);
-            //     pcm = alsa_open(d->dev, SND_PCM_STREAM_CAPTURE,
-            //                     d->rate, d->period, d->nperiods, d->channels);
-            //     if (pcm) {
-            //         fprintf(stderr, "[aoip_engine] cap %s reopened\n", d->name);
-            //         cap_err_count = 0;
-            //         break;
-            //     }
-            // }
+            if (cap_err_count++ == 0)
+                fprintf(stderr, "[aoip_engine] cap %s: %s\n", d->name, snd_strerror((int)n));
+            snd_pcm_close(pcm); pcm = NULL;
+            rb_reset(&d->in_ring);
+            while (!d->quit_cap && !g_quit) {
+                usleep(500000);
+                pcm = alsa_open(d->dev, SND_PCM_STREAM_CAPTURE,
+                                d->rate, d->period, d->nperiods, d->channels);
+                if (pcm) {
+                    fprintf(stderr, "[aoip_engine] cap %s reopened\n", d->name);
+                    cap_err_count = 0;
+                    break;
+                }
+            }
             continue;
         }
         cap_err_count = 0;
@@ -546,8 +551,10 @@ static void *alsa_playback_thread(void *arg) {
     }
     if (!pcm) return NULL;
 
-    float   *fbuf = malloc((size_t)(d->period * d->channels) * sizeof(float));
-    int32_t *ibuf = malloc((size_t)(d->period * d->channels) * sizeof(int32_t));
+    float   *fbuf      = malloc((size_t)(d->period * d->channels) * sizeof(float));
+    float   *fade_buf  = calloc((size_t)(d->period * d->channels), sizeof(float));
+    int32_t *ibuf      = malloc((size_t)(d->period * d->channels) * sizeof(int32_t));
+    int      fade_cnt  = 0;
 
     int play_err_count = 0;
 
@@ -556,18 +563,27 @@ static void *alsa_playback_thread(void *arg) {
 
     while (!d->quit_play && !g_quit) {
         if (!rb_read(&d->out_ring, fbuf, d->period)) {
-            memset(ibuf, 0, (size_t)(d->period * d->channels) * sizeof(int32_t));
+            /* 언더런: 급격한 무음 대신 페이드아웃으로 클릭 방지 */
+            float scale = (fade_cnt < UNDERRUN_FADE_PERIODS)
+                          ? 1.0f - (float)(fade_cnt + 1) / (float)UNDERRUN_FADE_PERIODS
+                          : 0.0f;
+            int n = d->period * d->channels;
+            for (int i = 0; i < n; i++) fbuf[i] = fade_buf[i] * scale;
+            if (fade_cnt < UNDERRUN_FADE_PERIODS) fade_cnt++;
         } else {
-            for (int i = 0; i < d->period * d->channels; i++) {
-                float v = fbuf[i];
-                if (v >  1.0f) v =  1.0f;
-                if (v < -1.0f) v = -1.0f;
-                ibuf[i] = (int32_t)(v * 2147483647.0f);
-            }
+            memcpy(fade_buf, fbuf, (size_t)(d->period * d->channels) * sizeof(float));
+            fade_cnt = 0;
+        }
+        for (int i = 0; i < d->period * d->channels; i++) {
+            float v = fbuf[i];
+            if (v >  1.0f) v =  1.0f;
+            if (v < -1.0f) v = -1.0f;
+            ibuf[i] = (int32_t)(v * 2147483647.0f);
         }
 
         snd_pcm_sframes_t n = snd_pcm_writei(pcm, ibuf, (snd_pcm_uframes_t)d->period);
         if (n == -EPIPE) {
+            fprintf(stderr, "[aoip_engine] play %s: xrun (underrun)\n", d->name);
             rb_reset(&d->out_ring); snd_pcm_prepare(pcm);
             while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < PREBUF_FRAMES)
                 usleep(1000);
@@ -579,11 +595,11 @@ static void *alsa_playback_thread(void *arg) {
                 usleep(1000);
         } else if (n == -EIO) {
             /* UAC2 가젯: 호스트가 스트림을 열지 않은 경우 EIO 반환.
-             * close/reopen 하지 않고 prepare 후 재시도 (100ms 대기). */
-            play_err_count++;
-            if (play_err_count == 1)
-                fprintf(stderr, "[aoip_engine] play %s: host not ready (EIO), waiting\n",
+             * ring을 리셋해 stale 데이터 누적 방지 후 100ms 대기. */
+            if (play_err_count++ == 0)
+                fprintf(stderr, "[aoip_engine] play %s: EIO, host stream not active\n",
                         d->name);
+            rb_reset(&d->out_ring);
             snd_pcm_prepare(pcm);
             usleep(100000);
         } else if (n < 0) {
@@ -610,7 +626,7 @@ static void *alsa_playback_thread(void *arg) {
         }
     }
 
-    free(fbuf); free(ibuf);
+    free(fbuf); free(fade_buf); free(ibuf);
     if (pcm) snd_pcm_close(pcm);
     return NULL;
 }
@@ -699,8 +715,21 @@ static void *dsp_thread(void *arg) {
 
             int input_need = (int)ceil((double)PERIOD_FRAMES / d->cap_pi.ratio) + 2;
             if (input_need > avail) {
-                for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
-                    memset(g_in_buf[d->ch_start+c], 0, PERIOD_FRAMES*sizeof(float));
+                /* 언더런: 급격한 무음 대신 페이드아웃으로 클릭 방지 */
+                if (d->cap_fade_buf) {
+                    float scale = (d->cap_fade_cnt < UNDERRUN_FADE_PERIODS)
+                                  ? 1.0f - (float)(d->cap_fade_cnt + 1) / (float)UNDERRUN_FADE_PERIODS
+                                  : 0.0f;
+                    for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++) {
+                        float *dst = g_in_buf[d->ch_start+c];
+                        for (int f = 0; f < PERIOD_FRAMES; f++)
+                            dst[f] = d->cap_fade_buf[f * d->channels + c] * scale;
+                    }
+                    if (d->cap_fade_cnt < UNDERRUN_FADE_PERIODS) d->cap_fade_cnt++;
+                } else {
+                    for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
+                        memset(g_in_buf[d->ch_start+c], 0, PERIOD_FRAMES*sizeof(float));
+                }
                 continue;
             }
             if (input_need > DEV_TMP_FRAMES) input_need = DEV_TMP_FRAMES;
@@ -731,6 +760,13 @@ static void *dsp_thread(void *arg) {
                 float *dst = g_in_buf[d->ch_start+c];
                 for (long f = 0; f < gen; f++) dst[f] = d->tmp_cap_out[f*d->channels+c];
                 for (long f = gen; f < PERIOD_FRAMES; f++) dst[f] = 0.0f;
+            }
+            /* 마지막 정상 프레임 저장 — 다음 언더런 시 페이드 소스로 사용 */
+            if (d->cap_fade_buf) {
+                d->cap_fade_cnt = 0;
+                for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
+                    for (int f = 0; f < PERIOD_FRAMES; f++)
+                        d->cap_fade_buf[f * d->channels + c] = g_in_buf[d->ch_start+c][f];
             }
         }
 
@@ -929,13 +965,15 @@ static void *reporter_thread(void *arg) {
 
 /* ── 장치 시작/중지 헬퍼 ─────────────────────────────── */
 static void device_start(Device *d) {
-    if (!d->enabled) return;
+    d->enabled = 1;  /* stop→start 재사용 시 enabled 복원 */
     int err;
     d->quit_cap = d->quit_play = 0;
     if (d->mode != 2) {
         d->cap_src = src_new(SRC_SINC_FASTEST, d->channels, &err);
         pi_reset(&d->cap_pi);
         rb_init(&d->in_ring,  RING_FRAMES, d->channels);
+        d->cap_fade_buf = calloc((size_t)(PERIOD_FRAMES * d->channels), sizeof(float));
+        d->cap_fade_cnt = 0;
         pthread_create(&d->cap_tid,  NULL, alsa_capture_thread,  d);
     }
     if (d->mode != 1) {
@@ -949,11 +987,19 @@ static void device_start(Device *d) {
 }
 
 static void device_stop(Device *d) {
+    /* DSP 스레드가 이 장치의 링버퍼를 건너뛰도록 먼저 비활성화.
+     * DSP 루프 최대 1주기(~11ms)가 끝날 때까지 대기한 뒤 메모리를 해제한다.
+     * 이렇게 하지 않으면 DSP 스레드가 해제된 메모리에 접근해 SIGSEGV가 발생한다. */
+    d->enabled = 0;
+    __sync_synchronize();
+    usleep(25000);  /* ≥2 DSP 주기 대기 (~21ms) */
+
     if (d->mode != 2) {
         d->quit_cap = 1;
         pthread_join(d->cap_tid, NULL);
-        if (d->cap_src) { src_delete(d->cap_src); d->cap_src = NULL; }
-        if (d->in_ring.buf) { free(d->in_ring.buf); d->in_ring.buf = NULL; }
+        if (d->cap_src)      { src_delete(d->cap_src); d->cap_src = NULL; }
+        if (d->in_ring.buf)  { free(d->in_ring.buf);   d->in_ring.buf = NULL; }
+        if (d->cap_fade_buf) { free(d->cap_fade_buf);  d->cap_fade_buf = NULL; }
     }
     if (d->mode != 1) {
         d->quit_play = 1;
@@ -1036,22 +1082,29 @@ static void cmd_loop(void) {
             const char *name = tok[2];
 
             if ((!strcmp(sub, "add") || !strcmp(sub, "add_in") || !strcmp(sub, "add_out")) && n >= 8) {
-                if (g_n_dev >= MAX_DEVICES) continue;
-                Device *d = &g_dev[g_n_dev];
+                /* 동일 이름 장치가 이미 있으면 재사용 (stop 후 재설정) */
+                Device *d = NULL;
+                for (int i = 0; i < g_n_dev; i++)
+                    if (!strcmp(g_dev[i].name, name)) { d = &g_dev[i]; break; }
+                if (d) {
+                    device_stop(d);
+                } else {
+                    if (g_n_dev >= MAX_DEVICES) continue;
+                    d = &g_dev[g_n_dev++];
+                }
                 snprintf(d->name, sizeof(d->name), "%s", name);
                 snprintf(d->dev,  sizeof(d->dev),  "%s", tok[3]);
                 d->rate     = atoi(tok[4]);
                 d->period   = atoi(tok[5]);
                 d->nperiods = atoi(tok[6]);
                 d->channels = atoi(tok[7]);
-                d->ch_start = n >= 9 ? atoi(tok[8]) : g_n_dev * 2;
+                d->ch_start = n >= 9 ? atoi(tok[8]) : (d - g_dev) * 2;
                 d->mode     = !strcmp(sub, "add_in")  ? 1 :
                               !strcmp(sub, "add_out") ? 2 : 0;
                 d->enabled  = 1;
                 /* AES67/RAVENNA 디바이스는 데몬 수신 스레드 간섭 방지를 위해
                    낮은 우선순위 사용 (기타 브릿지는 FIFO 80 유지) */
                 d->thread_priority = strstr(d->dev, "RAVENNA") ? g_prio_ravenna : g_prio_alsa;
-                g_n_dev++;
                 device_start(d);
             } else if (!strcmp(sub, "start")) {
                 for (int i = 0; i < g_n_dev; i++)

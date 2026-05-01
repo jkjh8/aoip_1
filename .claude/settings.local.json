@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wsl --list --quiet)",
+      "Bash(wsl -e rsync --version)",
+      "Bash(git clone *)",
+      "Bash(git init *)",
+      "Bash(git remote *)",
+      "Bash(git fetch *)",
+      "Bash(git checkout *)",
+      "Bash(wsl -e which inotifywait)",
+      "Bash(wsl -e bash -c \"sudo apt-get install -y inotify-tools 2>&1 | tail -3\")",
+      "Bash(wsl -e bash -c \"ssh-keyscan -H 192.168.10.97 2>/dev/null | head -3\")"
+    ]
+  }
+}

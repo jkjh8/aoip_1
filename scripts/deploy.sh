@@ -18,10 +18,16 @@ EXCLUDES=(
 echo "[deploy] 파일 동기화..."
 rsync -avz --delete "${EXCLUDES[@]}" "$LOCAL_DIR" "${REMOTE_HOST}:${REMOTE_DIR}"
 
+echo "[deploy] ravenna_ctl 빌드..."
+ssh "$REMOTE_HOST" "cd ${REMOTE_DIR}scripts && \
+  gcc -O2 -o ravenna_ctl ravenna_ctl.c && \
+  echo 'ravenna_ctl built OK'" || echo "[deploy] ravenna_ctl 빌드 실패 (RAVENNA 모듈 없으면 무시)"
+
 echo "[deploy] 앱 재시작..."
-# pm2 사용 시: pm2 restart aoip_1
-# systemd 사용 시: sudo systemctl restart aoip_1
-# 직접 실행 시: 아래 주석 해제
 ssh "$REMOTE_HOST" "cd ${REMOTE_DIR} && pm2 restart aoip_1 2>/dev/null || \
   (pkill -f 'node index.js' 2>/dev/null; nohup node index.js > /tmp/aoip.log 2>&1 &) && \
   echo '앱 재시작 완료'"
+
+echo "[deploy] CPU 배치 적용 (3초 대기)..."
+ssh "$REMOTE_HOST" "sleep 3 && sudo ${REMOTE_DIR}scripts/cpu_affinity.sh apply" || \
+  echo "[deploy] CPU 배치 실패 — sudo 권한 또는 NOPASSWD 설정 확인"

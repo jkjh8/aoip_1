@@ -1037,12 +1037,12 @@ static int shmbuf_open(ShmBuf *r, int is_out) {
         r->shm = NULL;
         return 0;
     }
-    /* 초기화: rtp_out은 wp=0/rp=0, rtp_in도 동일 */
+    /* 초기화: ftruncate 후 OS가 페이지를 0으로 보장하므로 buf memset 불필요.
+     * ring_frames를 마지막에 써서 rtp_send의 준비 완료 감지에 사용. */
     atomic_init(&r->shm->wp, 0u);
     atomic_init(&r->shm->rp, 0u);
-    r->shm->channels    = r->channels;
-    r->shm->ring_frames = SHM_RING_FRAMES;
-    memset(r->shm->buf, 0, sizeof(r->shm->buf));
+    r->shm->channels = r->channels;
+    __atomic_store_n(&r->shm->ring_frames, SHM_RING_FRAMES, __ATOMIC_RELEASE);
 
     fprintf(stderr, "[aoip_engine] rtp_%s '%s' shm=%s ch=%d ch_start=%d\n",
             is_out ? "out" : "in", r->name, r->shm_name, r->channels, r->ch_start);

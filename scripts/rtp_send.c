@@ -211,20 +211,45 @@ static int shm_attach(void)
 {
     for (int i = 0; i < 50; i++) {
         g_shm_fd = shm_open(g_shm_name, O_RDWR, 0);
-        if (g_shm_fd >= 0) break;
-        usleep(100000);
+        if (g_shm_fd < 0) { usleep(100000); continue; }
+
+        /* aoip_engine이 ftruncate를 완료하지 않은 0바이트 SHM → SIGBUS 방지 */
+        struct stat st;
+        if (fstat(g_shm_fd, &st) < 0 || (size_t)st.st_size < SHMRING_SIZE) {
+            close(g_shm_fd); g_shm_fd = -1;
+            usleep(10000);
+            continue;
+        }
+
+        g_shm = mmap(NULL, SHMRING_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, g_shm_fd, 0);
+        if (g_shm == MAP_FAILED) {
+            fprintf(stderr, "[rtp_send] mmap: %s\n", strerror(errno));
+            close(g_shm_fd); g_shm_fd = -1; g_shm = NULL; return 0;
+        }
+
+        /* aoip_engine 초기화 완료 대기 (ring_frames 설정 확인) */
+        for (int w = 0; w < 200; w++) {
+            if (__atomic_load_n(&g_shm->ring_frames, __ATOMIC_ACQUIRE) != 0) break;
+            usleep(5000);
+        }
+        if (g_shm->ring_frames == 0) {
+            munmap(g_shm, SHMRING_SIZE); close(g_shm_fd);
+            g_shm = NULL; g_shm_fd = -1;
+            usleep(100000);
+            continue;
+        }
+
+        /* 재시작 시 stale rp 제거: 현재 wp 위치에서 시작 */
+        {
+            uint32_t cur_wp = __atomic_load_n(&g_shm->wp, __ATOMIC_ACQUIRE);
+            __atomic_store_n(&g_shm->rp, cur_wp, __ATOMIC_RELEASE);
+        }
+
+        fprintf(stderr, "[rtp_send] attached shm %s\n", g_shm_name);
+        return 1;
     }
-    if (g_shm_fd < 0) {
-        fprintf(stderr, "[rtp_send] shm_open(%s): %s\n", g_shm_name, strerror(errno));
-        return 0;
-    }
-    g_shm = mmap(NULL, SHMRING_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, g_shm_fd, 0);
-    if (g_shm == MAP_FAILED) {
-        fprintf(stderr, "[rtp_send] mmap: %s\n", strerror(errno));
-        close(g_shm_fd); g_shm_fd = -1; g_shm = NULL; return 0;
-    }
-    fprintf(stderr, "[rtp_send] attached shm %s\n", g_shm_name);
-    return 1;
+    fprintf(stderr, "[rtp_send] shm_open(%s): %s\n", g_shm_name, strerror(errno));
+    return 0;
 }
 
 /* ── float → S16BE 변환 ──────────────────────────────── */

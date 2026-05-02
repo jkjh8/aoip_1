@@ -33,6 +33,7 @@ import { startDsp, sendGain, sendMute,
          sendToEngine, waitForDspReady,
          addEngineRestartListener }                  from './lib/dsp.js';
 import { getConfig } from './lib/config.js';
+import { getDaemonStatus } from './lib/aes67daemon.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const config    = getConfig();
@@ -152,6 +153,9 @@ async function startup() {
     if (ch.muted) sendMute('out', ch.id, true);
   }
   sendAllDsp({ inputs, outputs });
+
+  /* ── AES67 서비스 초기화 (SAP + RTSP + mDNS + PTP) ── */
+  getDaemonStatus();   // lazy init 트리거
 
   notifyRtpStartupComplete();
   notifyBridgeStartupComplete();

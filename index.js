@@ -18,13 +18,11 @@ import { setupSocket } from './socket/index.js';
 import logger from './lib/logger.js';
 
 import { connect }                                                                from './lib/jack.js';
-import { startBridges, stopBridges, startUsbGadgetWatcher, killOrphanBridges,
-         notifyBridgeStartupComplete }                                            from './lib/bridges.js';
+import { startBridges, stopBridges, startUsbGadgetWatcher, killOrphanBridges } from './lib/bridges.js';
 import { startRxPipeline, startTxClient,
          waitForRxReady, waitForTxReady,
          startRtpStreams, waitForRtpStreamsReady,
-         getRtpStreamStatus,
-         notifyRtpStartupComplete }                   from './lib/gstreamer.js';
+         getRtpStreamStatus }                         from './lib/gstreamer.js';
 import { getChannels,
          getSavedRoutes,
          getDspChannelCounts }                       from './lib/channels.js';
@@ -156,9 +154,6 @@ async function startup() {
 
   /* ── AES67 서비스 초기화 (SAP + RTSP + mDNS + PTP) ── */
   getDaemonStatus();   // lazy init 트리거
-
-  notifyRtpStartupComplete();
-  notifyBridgeStartupComplete();
 
   /* ── 엔진 비정상 종료 후 재시작 시 설정 재적용 ── */
   addEngineRestartListener(async () => {

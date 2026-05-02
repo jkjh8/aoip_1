@@ -18,10 +18,9 @@ EXCLUDES=(
 echo "[deploy] 파일 동기화..."
 rsync -avz --delete "${EXCLUDES[@]}" "$LOCAL_DIR" "${REMOTE_HOST}:${REMOTE_DIR}"
 
-echo "[deploy] ravenna_ctl 빌드..."
-ssh "$REMOTE_HOST" "cd ${REMOTE_DIR}scripts && \
-  gcc -O2 -o ravenna_ctl ravenna_ctl.c && \
-  echo 'ravenna_ctl built OK'" || echo "[deploy] ravenna_ctl 빌드 실패 (RAVENNA 모듈 없으면 무시)"
+echo "[deploy] 빌드..."
+ssh "$REMOTE_HOST" "cd ${REMOTE_DIR}scripts && make -j\$(nproc) 2>&1" || \
+  echo "[deploy] 빌드 실패"
 
 echo "[deploy] 앱 재시작..."
 ssh "$REMOTE_HOST" "cd ${REMOTE_DIR} && pm2 restart aoip_1 2>/dev/null || \

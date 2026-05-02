@@ -1,8 +1,6 @@
 CC      = gcc
-CFLAGS  = -O2 -Wall -Wextra -ffast-math -march=native -I. \
-          $(shell pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 gstreamer-net-1.0 gio-2.0)
-LDFLAGS = -lm -lpthread \
-          $(shell pkg-config --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-net-1.0 gio-2.0)
+CFLAGS  = -O2 -Wall -Wextra -ffast-math -march=native -I.
+LDFLAGS = -lm -lpthread -lrt
 
 AOIP_CFLAGS  = -O3 -Wall -Wextra -ffast-math -march=native -funroll-loops -I.
 AOIP_LDFLAGS = -lrt -lasound -lsamplerate -lm -lpthread
@@ -15,11 +13,12 @@ all: $(TARGETS)
 aoip_engine: aoip_engine.c alsa_device.c dsp_math.c
 	$(CC) $(AOIP_CFLAGS) -o $@ $^ $(AOIP_LDFLAGS)
 
-rtp_recv: rtp_recv.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+# GStreamer-free: libsamplerate + minimp3 (header-only)
+rtp_recv: rtp_recv.c include/minimp3.h include/shm_ring.h
+	$(CC) $(CFLAGS) -o $@ $< -lsamplerate $(LDFLAGS)
 
 rtp_send: rtp_send.c
-	$(CC) $(CFLAGS) -o $@ $< -lsamplerate -lmp3lame -lm -lpthread -lrt
+	$(CC) $(CFLAGS) -o $@ $< -lsamplerate -lmp3lame $(LDFLAGS)
 
 clean:
 	rm -f $(TARGETS)

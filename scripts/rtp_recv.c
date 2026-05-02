@@ -1,30 +1,32 @@
 /*
- * rtp_recv.c — UDP stream receiver → POSIX shared memory ring (ShmRing)
+ * rtp_recv.c — Lightweight UDP/RTP receiver (GStreamer-free)
  *
- * GStreamer:  udpsrc → [depay] → audioconvert → audioresample → appsink
- * Bridge:     appsink → ShmRing(F32LE interleaved) → aoip_engine
+ * Dependencies: libsamplerate, minimp3.h (header-only)
  *
- * Usage:  rtp_recv <port> <channels> <proto> <name> <bufMs> <rate> <enc> <addr> shm <shm_name>
+ * Flow:
+ *   UDP socket → packet queue → decode thread → ShmRing(F32LE@48kHz)
+ *
+ * Usage:
+ *   rtp_recv <port> <channels> <proto> <name> <bufMs> <rate> <enc> <addr> shm <shm_name>
+ *
+ * Proto: rtp | raw
+ * Auto-detect: RTP PT field / raw UDP payload sniff (MP3 sync word)
  *
  * Stderr:
  *   [rtp_recv] ready
- *   stats codec=... bufMs=N packets=N drops=N ...
- *
- * ShmRing 레이아웃 (aoip_engine.c 와 동일):
- *   wp, rp  : _Atomic uint32_t  — 단조 증가 frame 카운터
- *   channels: int32_t
- *   ring_frames: int32_t
- *   _pad    : 48 bytes
- *   buf[]   : float[SHM_RING_FRAMES * SHM_MAX_CH]
+ *   stats codec=... bufMs=N packets=N drops=N srcIp=... srcPort=N bitrateKbps=N
  */
 
-#include <gst/gst.h>
-#include <gst/net/net.h>
-#include <gst/app/gstappsink.h>
-#include <gio/gio.h>
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_FLOAT_OUTPUT
+#include "include/minimp3.h"
+
+#include <samplerate.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <stdatomic.h>
 #include <pthread.h>
 #include <signal.h>
@@ -35,54 +37,115 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <errno.h>
 
-/* ShmRing 레이아웃은 aoip_engine.c 와 공유 */
 #include "include/shm_ring.h"
 
-/* ── globals ─────────────────────────────────────── */
-static int             g_ch      = 2;
-static int             g_rate    = 48000;
-static int             g_buf_ms  = 100;
+/* ── constants ───────────────────────────────────────── */
+#define RTP_HDR_MIN      12
+#define MAX_PKT_LEN      8192
+#define PKT_QUEUE        512     /* power of 2 */
+#define PKT_QUEUE_MASK   (PKT_QUEUE - 1)
+#define OUT_RATE         48000
+#define RESAMPLE_OUT_MAX 8192
 
-static volatile int    g_quit      = 0;
-static volatile int    g_exit_code = 0;
-static int             g_auto_detect = 0;
-static GstElement     *g_pipeline;
+/* ── packet queue ────────────────────────────────────── */
+typedef struct {
+    uint8_t data[MAX_PKT_LEN];
+    int     len;
+} Pkt;
 
-typedef enum { PROTO_RAW = 0, PROTO_PCM, PROTO_RTP } ProtoMode;
-static ProtoMode g_proto = PROTO_RAW;
-static int       g_sample_rate_in = 48000;
-static char      g_encoding_name[32] = "L16";
-static char      g_bind_address[64]  = "0.0.0.0";
+static Pkt             g_pkts[PKT_QUEUE];
+static int             g_pkt_wp = 0;
+static int             g_pkt_rp = 0;
+static pthread_mutex_t g_pkt_mtx  = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_pkt_cond = PTHREAD_COND_INITIALIZER;
 
-static char g_codec[64]  = "unknown";
-static atomic_ulong g_packets   = 0;
-static atomic_ulong g_drops     = 0;
-static atomic_ulong g_udp_bytes = 0;
-static char g_src_ip[64] = "";
-static int  g_src_port   = 0;
-static pthread_mutex_t g_addr_mtx = PTHREAD_MUTEX_INITIALIZER;
+/* ── mode/encoding ───────────────────────────────────── */
+typedef enum { PROTO_RTP = 0, PROTO_RAW } ProtoMode;
+typedef enum {
+    ENC_UNKNOWN = 0,
+    ENC_L16,
+    ENC_L24,
+    ENC_MPA,   /* MPEG Audio (MP3) */
+    ENC_PCMU,  /* G.711 μ-law */
+    ENC_PCMA   /* G.711 A-law */
+} EncMode;
 
-/* ── 공유 메모리 출력 ─────────────────────────────── */
+static ProtoMode g_proto    = PROTO_RTP;
+static EncMode   g_enc      = ENC_UNKNOWN;
+static int       g_in_rate  = 48000;
+static int       g_ch       = 2;
+static int       g_buf_ms   = 100;
+static char      g_bind_addr[64] = "0.0.0.0";
+
+/* ── globals ─────────────────────────────────────────── */
+static volatile int g_quit      = 0;
+static volatile int g_exit_code = 0;
+static volatile int g_detected  = 0;
+
+/* stats */
+static char            g_codec[32]   = "unknown";
+static atomic_ulong    g_packets     = 0;
+static atomic_ulong    g_drops       = 0;
+static atomic_ulong    g_udp_bytes   = 0;
+static char            g_src_ip[64]  = "";
+static int             g_src_port    = 0;
+static pthread_mutex_t g_addr_mtx    = PTHREAD_MUTEX_INITIALIZER;
+
+/* ── SHM ─────────────────────────────────────────────── */
 static char     g_shm_name[256] = "";
 static int      g_shm_fd        = -1;
 static ShmRing *g_shm           = NULL;
 
-static int shm_attach(void) {
-    /* aoip_engine이 이미 shm_open+ftruncate 완료했을 때까지 재시도 (최대 5초) */
+/* ── decoders ────────────────────────────────────────── */
+static mp3dec_t   g_mp3dec;
+static SRC_STATE *g_src_state = NULL;
+
+/* G.711 decode tables */
+static int16_t g_ulaw_table[256];
+static int16_t g_alaw_table[256];
+
+/* ── G.711 table init ────────────────────────────────── */
+static void build_g711_tables(void)
+{
+    /* μ-law (ITU-T G.711) */
+    for (int i = 0; i < 256; i++) {
+        int u        = ~i & 0xFF;
+        int sign     = (u & 0x80) ? -1 : 1;
+        int exponent = (u >> 4) & 0x07;
+        int mantissa = u & 0x0F;
+        int sample   = ((mantissa << 1) | 1) << (exponent + 2);
+        g_ulaw_table[i] = (int16_t)(sign * (sample - 33));
+    }
+    /* A-law (ITU-T G.711) */
+    for (int i = 0; i < 256; i++) {
+        int a        = i ^ 0x55;
+        int sign     = (a & 0x80) ? 1 : -1;
+        int exponent = (a >> 4) & 0x07;
+        int mantissa = a & 0x0F;
+        int sample   = (exponent == 0)
+                       ? ((mantissa << 1) | 1)
+                       : ((mantissa | 0x10) << exponent);
+        g_alaw_table[i] = (int16_t)(sign * sample * 8);
+    }
+}
+
+/* ── SHM attach ──────────────────────────────────────── */
+static int shm_attach(void)
+{
     for (int i = 0; i < 50; i++) {
         g_shm_fd = shm_open(g_shm_name, O_RDWR, 0);
         if (g_shm_fd >= 0) break;
         usleep(100000);
     }
     if (g_shm_fd < 0) {
-        fprintf(stderr, "[rtp_recv] shm_open(%s) failed: %s\n",
-                g_shm_name, strerror(errno));
+        fprintf(stderr, "[rtp_recv] shm_open(%s): %s\n", g_shm_name, strerror(errno));
         return 0;
     }
     g_shm = mmap(NULL, SHMRING_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, g_shm_fd, 0);
     if (g_shm == MAP_FAILED) {
-        fprintf(stderr, "[rtp_recv] mmap(%s) failed: %s\n", g_shm_name, strerror(errno));
+        fprintf(stderr, "[rtp_recv] mmap: %s\n", strerror(errno));
         close(g_shm_fd); g_shm_fd = -1; g_shm = NULL;
         return 0;
     }
@@ -90,286 +153,377 @@ static int shm_attach(void) {
     return 1;
 }
 
-/* ── appsink callback: F32LE interleaved → ShmRing ── */
-static GstFlowReturn on_new_sample(GstAppSink *sink, gpointer data)
+/* ── write F32 frames to ShmRing ─────────────────────── */
+static void shm_write(const float *buf, int frames)
 {
-    (void)data;
-    GstSample *sample = gst_app_sink_pull_sample(sink);
-    if (!sample) return GST_FLOW_ERROR;
-
-    GstBuffer *buffer = gst_sample_get_buffer(sample);
-    GstMapInfo map;
-    if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-        if (g_shm) {
-            int frames = (int)(map.size / (size_t)(g_ch * sizeof(float)));
-            const float *src = (const float *)map.data;
-
-            for (int f = 0; f < frames; f++) {
-                uint32_t wp  = atomic_load_explicit(&g_shm->wp, memory_order_relaxed);
-                uint32_t idx = wp % (uint32_t)SHM_RING_FRAMES;
-                for (int c = 0; c < g_ch && c < SHM_MAX_CH; c++)
-                    g_shm->buf[idx * SHM_MAX_CH + c] = src[f * g_ch + c];
-                atomic_store_explicit(&g_shm->wp, wp + 1u, memory_order_release);
-            }
-        }
-        atomic_fetch_add_explicit(&g_packets, 1, memory_order_relaxed);
-        gst_buffer_unmap(buffer, &map);
-    }
-    gst_sample_unref(sample);
-    return GST_FLOW_OK;
-}
-
-/* ── decodebin pad-added ─────────────────────────── */
-static void on_pad_added(GstElement *el, GstPad *pad, gpointer data)
-{
-    (void)el;
-    GstElement *convert = (GstElement *)data;
-    GstCaps *caps = gst_pad_get_current_caps(pad);
-    if (!caps) caps = gst_pad_query_caps(pad, NULL);
-    if (caps) {
-        const char *mime = gst_structure_get_name(gst_caps_get_structure(caps, 0));
-        if (mime && strstr(mime, "audio")) {
-            if (strstr(mime, "mpeg"))         snprintf(g_codec, sizeof(g_codec), "mp3");
-            else if (strstr(mime, "opus"))    snprintf(g_codec, sizeof(g_codec), "opus");
-            else if (strstr(mime, "vorbis"))  snprintf(g_codec, sizeof(g_codec), "vorbis");
-            else if (strstr(mime, "aac"))     snprintf(g_codec, sizeof(g_codec), "aac");
-            else if (strstr(mime, "raw"))     snprintf(g_codec, sizeof(g_codec), "raw");
-            else snprintf(g_codec, sizeof(g_codec), "%s", mime);
-
-            GstPad *sinkpad = gst_element_get_static_pad(convert, "sink");
-            if (sinkpad && !gst_pad_is_linked(sinkpad))
-                gst_pad_link(pad, sinkpad);
-            if (sinkpad) gst_object_unref(sinkpad);
-        }
-        gst_caps_unref(caps);
+    if (!g_shm || frames <= 0) return;
+    for (int f = 0; f < frames; f++) {
+        uint32_t wp  = atomic_load_explicit(&g_shm->wp, memory_order_relaxed);
+        uint32_t idx = wp % (uint32_t)SHM_RING_FRAMES;
+        for (int c = 0; c < g_ch && c < SHM_MAX_CH; c++)
+            g_shm->buf[idx * SHM_MAX_CH + c] = buf[f * g_ch + c];
+        atomic_store_explicit(&g_shm->wp, wp + 1u, memory_order_release);
     }
 }
 
-static gboolean bus_msg(GstBus *bus, GstMessage *msg, gpointer data)
+/* ── resample + write ────────────────────────────────── */
+static float g_rs_out[RESAMPLE_OUT_MAX * SHM_MAX_CH];
+
+static void resample_and_write(const float *in, int in_frames)
 {
-    (void)bus; (void)data;
-    switch (GST_MESSAGE_TYPE(msg)) {
-    case GST_MESSAGE_ERROR: {
-        GError *err = NULL; gchar *dbg = NULL;
-        gst_message_parse_error(msg, &err, &dbg);
-        fprintf(stderr, "[rtp_recv] gst error: %s (%s)\n",
-                err->message, dbg ? dbg : "");
-        g_error_free(err); g_free(dbg);
-        g_exit_code = 1; g_quit = 1;
-        break;
+    if (!g_src_state) {
+        shm_write(in, in_frames);
+        return;
     }
-    case GST_MESSAGE_TAG: {
-        GstTagList *tags = NULL;
-        gst_message_parse_tag(msg, &tags);
-        if (tags) {
-            gchar *codec_str = NULL;
-            if (gst_tag_list_get_string(tags, GST_TAG_AUDIO_CODEC, &codec_str) && codec_str) {
-                snprintf(g_codec, sizeof(g_codec), "%s", codec_str);
-                g_free(codec_str);
+    SRC_DATA sd = {
+        .data_in       = in,
+        .data_out      = g_rs_out,
+        .input_frames  = in_frames,
+        .output_frames = RESAMPLE_OUT_MAX,
+        .src_ratio     = (double)OUT_RATE / g_in_rate,
+        .end_of_input  = 0,
+    };
+    src_process(g_src_state, &sd);
+    shm_write(g_rs_out, (int)sd.output_frames_gen);
+}
+
+/* ── setup resampler (if rate != OUT_RATE) ───────────── */
+static void setup_resampler(void)
+{
+    if (g_src_state) { src_delete(g_src_state); g_src_state = NULL; }
+    if (g_in_rate == OUT_RATE) return;
+    int err;
+    g_src_state = src_new(SRC_SINC_FASTEST, g_ch, &err);
+    if (!g_src_state)
+        fprintf(stderr, "[rtp_recv] src_new: %s\n", src_strerror(err));
+    else
+        fprintf(stderr, "[rtp_recv] resampler: %d→%d\n", g_in_rate, OUT_RATE);
+}
+
+/* ── detect encoding from RTP PT ─────────────────────── */
+static void detect_rtp_pt(uint8_t pt, const uint8_t *payload, int plen)
+{
+    switch (pt) {
+    case 0:  g_enc = ENC_PCMU; g_in_rate = 8000;
+             snprintf(g_codec, sizeof(g_codec), "PCMU"); break;
+    case 8:  g_enc = ENC_PCMA; g_in_rate = 8000;
+             snprintf(g_codec, sizeof(g_codec), "PCMA"); break;
+    case 10: g_enc = ENC_L16;  g_in_rate = 44100;
+             snprintf(g_codec, sizeof(g_codec), "L16");  break;
+    case 11: g_enc = ENC_L16;  g_in_rate = 44100;
+             snprintf(g_codec, sizeof(g_codec), "L16");  break;
+    case 14: g_enc = ENC_MPA;  g_in_rate = 48000;
+             snprintf(g_codec, sizeof(g_codec), "MPA");  break;
+    default:
+        /* dynamic PT: sniff payload for MP3 sync word (skip 4-byte MPA header) */
+        if (plen >= 6) {
+            const uint8_t *p = payload;
+            int off = 0;
+            /* skip RFC 2250 4-byte MPA header if present */
+            if (plen >= 4) off = 4;
+            if ((p[off] & 0xFF) == 0xFF && (p[off+1] & 0xE0) == 0xE0) {
+                g_enc = ENC_MPA; g_in_rate = 48000;
+                snprintf(g_codec, sizeof(g_codec), "MPA");
+                break;
             }
-            gst_tag_list_unref(tags);
+        }
+        /* fallback: guess L16 or L24 by payload size */
+        if (plen > 4000) {
+            g_enc = ENC_L24;
+            snprintf(g_codec, sizeof(g_codec), "L24");
+        } else {
+            g_enc = ENC_L16;
+            snprintf(g_codec, sizeof(g_codec), "L16");
         }
         break;
     }
+    fprintf(stderr, "[rtp_recv] RTP PT=%d → enc=%s rate=%d\n", pt, g_codec, g_in_rate);
+    setup_resampler();
+    g_detected = 1;
+}
+
+/* ── detect encoding from raw UDP payload ────────────── */
+static void detect_raw(const uint8_t *payload, int len)
+{
+    /* MP3 sync word */
+    if (len >= 4 && payload[0] == 0xFF && (payload[1] & 0xE0) == 0xE0) {
+        g_enc = ENC_MPA;
+        snprintf(g_codec, sizeof(g_codec), "mp3");
+        fprintf(stderr, "[rtp_recv] raw: detected MP3\n");
+    } else if (len > 0 && (len % (g_ch * 3)) == 0 && len > 4000) {
+        g_enc = ENC_L24;
+        snprintf(g_codec, sizeof(g_codec), "L24");
+        fprintf(stderr, "[rtp_recv] raw: detected L24 (payload=%d)\n", len);
+    } else {
+        g_enc = ENC_L16;
+        snprintf(g_codec, sizeof(g_codec), "L16");
+        fprintf(stderr, "[rtp_recv] raw: detected L16 (payload=%d)\n", len);
+    }
+    setup_resampler();
+    g_detected = 1;
+}
+
+/* ── decode one payload buffer ───────────────────────── */
+#define DECODE_BUF_MAX (MINIMP3_MAX_SAMPLES_PER_FRAME > 8192 \
+                        ? MINIMP3_MAX_SAMPLES_PER_FRAME : 8192)
+static float g_dec_buf[DECODE_BUF_MAX * SHM_MAX_CH];
+
+static void decode_payload(const uint8_t *payload, int len)
+{
+    switch (g_enc) {
+
+    case ENC_L16: {
+        int frames = (len / 2) / g_ch;
+        if (frames * g_ch * 2 > (int)sizeof(g_dec_buf) / (int)sizeof(float))
+            frames = (int)(sizeof(g_dec_buf) / sizeof(float)) / g_ch;
+        for (int i = 0; i < frames * g_ch; i++) {
+            int16_t s = (int16_t)((payload[i*2] << 8) | payload[i*2+1]);
+            g_dec_buf[i] = s / 32768.0f;
+        }
+        resample_and_write(g_dec_buf, frames);
+        break;
+    }
+
+    case ENC_L24: {
+        int frames = (len / 3) / g_ch;
+        if (frames * g_ch > (int)(sizeof(g_dec_buf) / sizeof(float)))
+            frames = (int)(sizeof(g_dec_buf) / sizeof(float)) / g_ch;
+        for (int i = 0; i < frames * g_ch; i++) {
+            int32_t s = ((int32_t)(int8_t)payload[i*3]     << 16)
+                      | ((int32_t)payload[i*3+1]            <<  8)
+                      |  (int32_t)payload[i*3+2];
+            g_dec_buf[i] = s / 8388608.0f;
+        }
+        resample_and_write(g_dec_buf, frames);
+        break;
+    }
+
+    case ENC_PCMU:
+    case ENC_PCMA: {
+        /* G.711: 1 byte per sample, mono usually but respect g_ch */
+        const int16_t *tbl = (g_enc == ENC_PCMU) ? g_ulaw_table : g_alaw_table;
+        int frames = len / g_ch;
+        if (frames * g_ch > (int)(sizeof(g_dec_buf) / sizeof(float)))
+            frames = (int)(sizeof(g_dec_buf) / sizeof(float)) / g_ch;
+        for (int f = 0; f < frames; f++)
+            for (int c = 0; c < g_ch; c++)
+                g_dec_buf[f * g_ch + c] = tbl[payload[f * g_ch + c]] / 32768.0f;
+        resample_and_write(g_dec_buf, frames);
+        break;
+    }
+
+    case ENC_MPA: {
+        /* MP3: skip RFC 2250 4-byte header in RTP mode */
+        const uint8_t *mp3data = payload;
+        int mp3len = len;
+        if (g_proto == PROTO_RTP && len >= 4) {
+            mp3data += 4;
+            mp3len  -= 4;
+        }
+        /* decode all frames in this packet */
+        while (mp3len > 0) {
+            float pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+            mp3dec_frame_info_t info;
+            int samples = mp3dec_decode_frame(&g_mp3dec, mp3data, mp3len, pcm, &info);
+            if (info.frame_bytes <= 0) break;
+            mp3data += info.frame_bytes;
+            mp3len  -= info.frame_bytes;
+            if (samples <= 0) continue;
+
+            int ch  = info.channels > 0 ? info.channels : g_ch;
+            int hz  = info.hz > 0       ? info.hz       : g_in_rate;
+            int frames = samples / ch;
+
+            /* update rate/resampler if MP3 header says different rate */
+            if (hz != g_in_rate) {
+                fprintf(stderr, "[rtp_recv] MP3 rate update: %d→%d\n", g_in_rate, hz);
+                g_in_rate = hz;
+                setup_resampler();
+            }
+            /* mono MP3 to stereo output: duplicate channel */
+            if (ch == 1 && g_ch == 2) {
+                for (int f = frames - 1; f >= 0; f--) {
+                    pcm[f*2+1] = pcm[f];
+                    pcm[f*2]   = pcm[f];
+                }
+            }
+            resample_and_write(pcm, frames);
+        }
+        break;
+    }
+
     default: break;
     }
-    return TRUE;
 }
 
-/* ── UDP pad probe ───────────────────────────────── */
-static GstPadProbeReturn udp_probe(GstPad *pad, GstPadProbeInfo *info, gpointer data)
+/* ── decode thread ───────────────────────────────────── */
+static void *decode_thread(void *arg)
 {
-    (void)pad; (void)data;
-    GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
-    if (!buf) return GST_PAD_PROBE_OK;
+    (void)arg;
 
-    atomic_fetch_add_explicit(&g_udp_bytes, gst_buffer_get_size(buf), memory_order_relaxed);
+    while (!g_quit) {
+        pthread_mutex_lock(&g_pkt_mtx);
+        while (g_pkt_wp == g_pkt_rp && !g_quit)
+            pthread_cond_wait(&g_pkt_cond, &g_pkt_mtx);
+        if (g_quit) { pthread_mutex_unlock(&g_pkt_mtx); break; }
 
-    GstNetAddressMeta *meta = gst_buffer_get_net_address_meta(buf);
-    if (meta && meta->addr && G_IS_INET_SOCKET_ADDRESS(meta->addr)) {
-        GInetAddress *inet = g_inet_socket_address_get_address(G_INET_SOCKET_ADDRESS(meta->addr));
-        gchar *ip  = g_inet_address_to_string(inet);
-        int    prt = (int)g_inet_socket_address_get_port(G_INET_SOCKET_ADDRESS(meta->addr));
-        pthread_mutex_lock(&g_addr_mtx);
-        snprintf(g_src_ip, sizeof(g_src_ip), "%s", ip);
-        g_src_port = prt;
-        pthread_mutex_unlock(&g_addr_mtx);
-        g_free(ip);
+        Pkt tmp; /* copy out to minimize lock time */
+        tmp = g_pkts[g_pkt_rp & PKT_QUEUE_MASK];
+        g_pkt_rp++;
+        pthread_mutex_unlock(&g_pkt_mtx);
+
+        const uint8_t *data = tmp.data;
+        int            dlen = tmp.len;
+
+        /* ── extract payload ──────────────────────────── */
+        const uint8_t *payload = data;
+        int            plen    = dlen;
+
+        if (g_proto == PROTO_RTP) {
+            if (dlen < RTP_HDR_MIN) continue;
+            uint8_t pt      = data[1] & 0x7F;
+            int     cc      = data[0] & 0x0F;
+            int     has_ext = (data[0] >> 4) & 0x1;
+            int     hdr     = RTP_HDR_MIN + cc * 4;
+            if (has_ext && dlen >= hdr + 4) {
+                int ew = ((int)data[hdr+2] << 8) | data[hdr+3];
+                hdr += 4 + ew * 4;
+            }
+            if (hdr >= dlen) continue;
+            payload = data + hdr;
+            plen    = dlen - hdr;
+
+            /* auto-detect on first RTP packet */
+            if (!g_detected)
+                detect_rtp_pt(pt, payload, plen);
+
+            /* re-detect if PT changed (codec switch) */
+            static uint8_t last_pt = 0xFF;
+            if (g_detected && pt != last_pt && last_pt != 0xFF) {
+                fprintf(stderr, "[rtp_recv] PT changed %d→%d, re-detecting\n", last_pt, pt);
+                g_detected = 0;
+                detect_rtp_pt(pt, payload, plen);
+            }
+            last_pt = pt;
+        } else {
+            /* raw UDP: detect on first packet */
+            if (!g_detected)
+                detect_raw(payload, plen);
+        }
+
+        if (!g_detected) continue;
+
+        decode_payload(payload, plen);
+        atomic_fetch_add_explicit(&g_packets, 1, memory_order_relaxed);
     }
-    return GST_PAD_PROBE_OK;
+    return NULL;
 }
 
-/* ── stats thread ────────────────────────────────── */
+/* ── receive thread ──────────────────────────────────── */
+static void *recv_thread(void *arg)
+{
+    int sock = *(int *)arg;
+    uint8_t buf[MAX_PKT_LEN];
+    struct sockaddr_in from;
+    socklen_t fromlen = sizeof(from);
+
+    while (!g_quit) {
+        ssize_t n = recvfrom(sock, buf, sizeof(buf), 0,
+                             (struct sockaddr *)&from, &fromlen);
+        if (n <= 0) {
+            if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK) continue;
+            if (!g_quit) perror("[rtp_recv] recvfrom");
+            break;
+        }
+
+        pthread_mutex_lock(&g_addr_mtx);
+        inet_ntop(AF_INET, &from.sin_addr, g_src_ip, sizeof(g_src_ip));
+        g_src_port = ntohs(from.sin_port);
+        pthread_mutex_unlock(&g_addr_mtx);
+
+        atomic_fetch_add_explicit(&g_udp_bytes, (unsigned long)n, memory_order_relaxed);
+
+        pthread_mutex_lock(&g_pkt_mtx);
+        if ((g_pkt_wp - g_pkt_rp) >= PKT_QUEUE) {
+            atomic_fetch_add_explicit(&g_drops, 1, memory_order_relaxed);
+            pthread_mutex_unlock(&g_pkt_mtx);
+        } else {
+            Pkt *pkt = &g_pkts[g_pkt_wp & PKT_QUEUE_MASK];
+            memcpy(pkt->data, buf, (size_t)n);
+            pkt->len = (int)n;
+            g_pkt_wp++;
+            pthread_cond_signal(&g_pkt_cond);
+            pthread_mutex_unlock(&g_pkt_mtx);
+        }
+    }
+    return NULL;
+}
+
+/* ── stats thread ────────────────────────────────────── */
 static void *stats_thread(void *arg)
 {
     (void)arg;
-    unsigned long prev_udp = 0;
+    unsigned long prev_bytes = 0;
     while (!g_quit) {
         sleep(2);
-        unsigned long cur_udp = atomic_load(&g_udp_bytes);
-        int bitrate_kbps = (int)((cur_udp - prev_udp) * 8 / 2 / 1000);
-        int has_data = (cur_udp != prev_udp);
-        prev_udp = cur_udp;
+        unsigned long cur  = atomic_load(&g_udp_bytes);
+        int kbps = (int)((cur - prev_bytes) * 8 / 2 / 1000);
+        int has_data = (cur != prev_bytes);
         if (!has_data) {
             pthread_mutex_lock(&g_addr_mtx);
             g_src_ip[0] = '\0'; g_src_port = 0;
             pthread_mutex_unlock(&g_addr_mtx);
-            snprintf(g_codec, sizeof(g_codec), "unknown");
         }
+        prev_bytes = cur;
+
         char src_ip[64]; int src_port;
         pthread_mutex_lock(&g_addr_mtx);
         snprintf(src_ip, sizeof(src_ip), "%s", g_src_ip[0] ? g_src_ip : "none");
         src_port = g_src_port;
         pthread_mutex_unlock(&g_addr_mtx);
-        unsigned long pkts  = atomic_load(&g_packets);
-        unsigned long drops = atomic_load(&g_drops);
+
         fprintf(stderr,
-            "stats codec=%s bufMs=0 packets=%lu drops=%lu srcIp=%s srcPort=%d bitrateKbps=%d\n",
-            g_codec, pkts, drops, src_ip, src_port, bitrate_kbps);
+            "stats codec=%s bufMs=%d packets=%lu drops=%lu srcIp=%s srcPort=%d bitrateKbps=%d\n",
+            g_codec, g_buf_ms,
+            atomic_load(&g_packets), atomic_load(&g_drops),
+            src_ip, src_port, kbps);
         fflush(stderr);
     }
     return NULL;
 }
 
-/* ── signal handler ──────────────────────────────── */
+/* ── signal ──────────────────────────────────────────── */
 static void on_signal(int sig) { (void)sig; g_quit = 1; }
 
-/* ── AUTO 모드: 실시간 PT 변경 감지 프로브 ─────────── */
-static GstPadProbeReturn auto_pt_probe(GstPad *pad, GstPadProbeInfo *info, gpointer data)
-{
-    (void)pad; (void)data;
-    GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
-    if (!buf) return GST_PAD_PROBE_PASS;
-    GstMapInfo map;
-    if (!gst_buffer_map(buf, &map, GST_MAP_READ)) return GST_PAD_PROBE_PASS;
-    static uint8_t last_pt = 0xFF;
-    if (map.size < 12) { gst_buffer_unmap(buf, &map); return GST_PAD_PROBE_PASS; }
-    uint8_t pt = map.data[1] & 0x7F;
-    if (pt == last_pt) { gst_buffer_unmap(buf, &map); return GST_PAD_PROBE_PASS; }
-    last_pt = pt;
-    char new_enc[32] = ""; int new_rate = g_sample_rate_in;
-    switch (pt) {
-        case 0:  snprintf(new_enc, sizeof(new_enc), "PCMU"); new_rate = 8000;  break;
-        case 8:  snprintf(new_enc, sizeof(new_enc), "PCMA"); new_rate = 8000;  break;
-        case 10: snprintf(new_enc, sizeof(new_enc), "L16");  new_rate = 44100; break;
-        case 11: snprintf(new_enc, sizeof(new_enc), "L16");  new_rate = 44100; break;
-        case 14: snprintf(new_enc, sizeof(new_enc), "MPA");                    break;
-        default: {
-            int cc = map.data[0] & 0x0F, has_ext = (map.data[0] >> 4) & 0x1;
-            int hdr = 12 + cc * 4;
-            if (has_ext && map.size >= (size_t)(hdr + 4)) {
-                int ew = (map.data[hdr+2] << 8) | map.data[hdr+3]; hdr += 4 + ew * 4;
-            }
-            if (hdr < (int)map.size) {
-                const uint8_t *pl = map.data + hdr; int plen = (int)map.size - hdr;
-                if (plen >= 6 && pl[4] == 0xFF && (pl[5] & 0xE0) == 0xE0)
-                    snprintf(new_enc, sizeof(new_enc), "MPA");
-                else
-                    snprintf(new_enc, sizeof(new_enc), plen > 4000 ? "L24" : "L16");
-            }
-            break;
-        }
-    }
-    gst_buffer_unmap(buf, &map);
-    if (!new_enc[0]) return GST_PAD_PROBE_PASS;
-    if (strcmp(new_enc, g_encoding_name) != 0 || new_rate != g_sample_rate_in) {
-        fprintf(stderr, "[rtp_recv] auto-codec: %s %d\n", new_enc, new_rate);
-        fflush(stderr);
-        g_exit_code = 2; g_quit = 1;
-    }
-    return GST_PAD_PROBE_PASS;
-}
-
-/* ── RTP codec auto-detection ────────────────────── */
-static void detect_rtp_codec(int port)
-{
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) return;
-    int reuse = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
-    struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET; addr.sin_port = htons((uint16_t)port);
-    addr.sin_addr.s_addr = INADDR_ANY;
-    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(sock); return; }
-    uint8_t buf[4096];
-    ssize_t len = recv(sock, buf, sizeof(buf), 0);
-    close(sock);
-    if (len < 12) return;
-    uint8_t pt = buf[1] & 0x7F, cc = buf[0] & 0x0F;
-    int has_ext = (buf[0] >> 4) & 0x1;
-    fprintf(stderr, "[rtp_recv] auto-detect: PT=%d\n", pt);
-    switch (pt) {
-        case 0:  snprintf(g_encoding_name, sizeof(g_encoding_name), "PCMU"); return;
-        case 8:  snprintf(g_encoding_name, sizeof(g_encoding_name), "PCMA"); return;
-        case 10: snprintf(g_encoding_name, sizeof(g_encoding_name), "L16"); g_sample_rate_in = 44100; return;
-        case 11: snprintf(g_encoding_name, sizeof(g_encoding_name), "L16"); g_sample_rate_in = 44100; return;
-        case 14: snprintf(g_encoding_name, sizeof(g_encoding_name), "MPA"); return;
-        default: break;
-    }
-    int hdr = 12 + cc * 4;
-    if (has_ext && len > hdr + 4) { int ew = (buf[hdr+2]<<8)|buf[hdr+3]; hdr += 4 + ew*4; }
-    if (hdr >= (int)len) return;
-    const uint8_t *payload = buf + hdr; int payload_len = (int)len - hdr;
-    if (payload_len >= 6 && payload[4] == 0xFF && (payload[5] & 0xE0) == 0xE0) {
-        snprintf(g_encoding_name, sizeof(g_encoding_name), "MPA");
-        fprintf(stderr, "[rtp_recv] auto-detect: MPA(MP3) from payload\n"); return;
-    }
-    if (payload_len > 4000) {
-        snprintf(g_encoding_name, sizeof(g_encoding_name), "L24");
-        g_sample_rate_in = 48000;
-        fprintf(stderr, "[rtp_recv] auto-detect: L24 (payload=%d)\n", payload_len);
-    } else {
-        snprintf(g_encoding_name, sizeof(g_encoding_name), "L16");
-        fprintf(stderr, "[rtp_recv] auto-detect: L16 (payload=%d)\n", payload_len);
-    }
-}
-
-/* ── main ─────────────────────────────────────────── */
+/* ── main ────────────────────────────────────────────── */
 int main(int argc, char *argv[])
 {
-    gst_init(&argc, &argv);
     signal(SIGTERM, on_signal);
     signal(SIGINT,  on_signal);
+    signal(SIGPIPE, SIG_IGN);
+
     if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
-        fprintf(stderr, "[rtp_recv] mlockall failed: %s\n", strerror(errno));
+        fprintf(stderr, "[rtp_recv] mlockall: %s\n", strerror(errno));
 
-    int port = argc > 1 ? atoi(argv[1]) : 5004;
-    g_ch     = argc > 2 ? atoi(argv[2]) : 2;
+    int port  = argc > 1 ? atoi(argv[1]) : 5004;
+    g_ch      = argc > 2 ? atoi(argv[2]) : 2;
+    if (g_ch < 1) g_ch = 1;
+    if (g_ch > SHM_MAX_CH) g_ch = SHM_MAX_CH;
 
-    const char *proto_arg = argc > 3 ? argv[3] : "raw";
-    if      (strcmp(proto_arg, "pcm") == 0) g_proto = PROTO_PCM;
-    else if (strcmp(proto_arg, "rtp") == 0) g_proto = PROTO_RTP;
-    else                                    g_proto = PROTO_RAW;
+    const char *proto_arg = argc > 3 ? argv[3] : "rtp";
+    g_proto = (strcmp(proto_arg, "raw") == 0) ? PROTO_RAW : PROTO_RTP;
 
-    g_sample_rate_in = argc > 6 ? atoi(argv[6]) : 48000;
-    if (g_sample_rate_in <= 0) g_sample_rate_in = 48000;
-
-    if (g_proto == PROTO_RTP && argc > 7)
-        snprintf(g_encoding_name, sizeof(g_encoding_name), "%s", argv[7]);
-
-    if (g_proto == PROTO_RTP) {
-        g_auto_detect = 1;
-        if (strcmp(g_encoding_name, "AUTO") == 0) {
-            snprintf(g_encoding_name, sizeof(g_encoding_name), "L16");
-            detect_rtp_codec(port);
-            fprintf(stderr, "[rtp_recv] AUTO mode: using encoding=%s rate=%d\n",
-                    g_encoding_name, g_sample_rate_in);
-        }
-    }
-
-    char client_name[64];
-    snprintf(client_name, sizeof(client_name), "%s", argc > 4 ? argv[4] : "rtp_in");
-    g_buf_ms = argc > 5 ? atoi(argv[5]) : 100;
+    /* argv[4] = client name (unused, for compatibility) */
+    g_buf_ms  = argc > 5 ? atoi(argv[5]) : 100;
     if (g_buf_ms < 10)  g_buf_ms = 10;
     if (g_buf_ms > 500) g_buf_ms = 500;
 
-    if (argc > 8 && argv[8][0] != '\0')
-        snprintf(g_bind_address, sizeof(g_bind_address), "%s", argv[8]);
+    g_in_rate = argc > 6 && atoi(argv[6]) > 0 ? atoi(argv[6]) : 48000;
+    /* argv[7] = encoding hint (ignored: always auto-detect) */
 
-    /* argv[9]="shm"  argv[10]=shm_name */
+    if (argc > 8 && argv[8][0] != '\0')
+        snprintf(g_bind_addr, sizeof(g_bind_addr), "%s", argv[8]);
+
     if (argc > 9 && strcmp(argv[9], "shm") == 0 && argc > 10)
         snprintf(g_shm_name, sizeof(g_shm_name), "%s", argv[10]);
 
@@ -377,150 +531,83 @@ int main(int argc, char *argv[])
         fprintf(stderr, "[rtp_recv] shm name required (argv[9]=shm argv[10]=<name>)\n");
         return 1;
     }
-
     if (!shm_attach()) return 1;
 
-    g_rate = g_sample_rate_in > 0 ? g_sample_rate_in : 48000;
-    fprintf(stderr, "[rtp_recv] shm mode → %s\n", g_shm_name);
+    /* init decoders */
+    mp3dec_init(&g_mp3dec);
+    build_g711_tables();
 
-    const char *mode_str = g_proto == PROTO_PCM ? "pcm" :
-                           g_proto == PROTO_RTP  ? "rtp" : "raw";
-    fprintf(stderr, "[rtp_recv] mode=%s\n", mode_str);
-    if (g_proto == PROTO_PCM) fprintf(stderr, "[rtp_recv] input rate=%d\n", g_sample_rate_in);
-    if (g_proto == PROTO_RTP) fprintf(stderr, "[rtp_recv] rtp encoding=%s clock-rate=%d\n",
-            g_encoding_name, g_sample_rate_in);
+    /* ── UDP socket ──────────────────────────────────── */
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) { perror("[rtp_recv] socket"); return 1; }
 
-    GstElement *src      = gst_element_factory_make("udpsrc",        "src");
-    GstElement *convert  = gst_element_factory_make("audioconvert",  "convert");
-    GstElement *resample = gst_element_factory_make("audioresample", "resample");
-    GstElement *caps_flt = gst_element_factory_make("capsfilter",    "caps");
-    GstElement *appsink  = gst_element_factory_make("appsink",       "sink");
-    GstElement *decode   = (g_proto == PROTO_RAW) ?
-                           gst_element_factory_make("decodebin", "decode") : NULL;
+    int reuse = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
 
-    if (g_proto == PROTO_PCM) snprintf(g_codec, sizeof(g_codec), "pcm-s16le");
-    if (g_proto == PROTO_RTP) snprintf(g_codec, sizeof(g_codec), "%s", g_encoding_name);
+    /* 1-second receive timeout so recv_thread can check g_quit */
+    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    int ok = src && convert && resample && caps_flt && appsink;
-    if (g_proto == PROTO_RAW) ok = ok && decode;
-    if (!ok) { fprintf(stderr, "[rtp_recv] failed to create GStreamer elements\n"); return 1; }
+    /* increase OS receive buffer */
+    int rcvbuf = 2 * 1024 * 1024;
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
-    g_pipeline = gst_pipeline_new("rtp_recv");
-
-    g_object_set(src, "port", port, "address", g_bind_address,
-                 "retrieve-sender-address", TRUE, NULL);
-    fprintf(stderr, "[rtp_recv] udpsrc port=%d address=%s\n", port, g_bind_address);
-
-    /* capsfilter: F32LE interleaved @ 48kHz */
-    GstCaps *caps = gst_caps_new_simple("audio/x-raw",
-        "format",   G_TYPE_STRING, "F32LE",
-        "rate",     G_TYPE_INT,    48000,   /* aoip_engine は常に 48kHz */
-        "channels", G_TYPE_INT,    g_ch,
-        "layout",   G_TYPE_STRING, "interleaved", NULL);
-    g_object_set(caps_flt, "caps", caps, NULL);
-    gst_caps_unref(caps);
-
-    g_object_set(appsink, "emit-signals", TRUE, "sync", FALSE,
-                 "max-buffers", 8, "drop", TRUE, NULL);
-    g_signal_connect(appsink, "new-sample", G_CALLBACK(on_new_sample), NULL);
-
-    int link_ok = 1;
-    if (g_proto == PROTO_RTP) {
-        GstElement *jitter = gst_element_factory_make("rtpjitterbuffer", "jitter");
-        if (!jitter) { fprintf(stderr, "[rtp_recv] failed to create rtpjitterbuffer\n"); gst_object_unref(g_pipeline); return 1; }
-        g_object_set(jitter, "latency", (guint)g_buf_ms, NULL);
-        int rtp_needs_decode = (strcmp(g_encoding_name, "MPA")  == 0 ||
-                                strcmp(g_encoding_name, "OPUS") == 0);
-        const char *depay_name =
-            (strcmp(g_encoding_name, "L16")  == 0) ? "rtpL16depay"  :
-            (strcmp(g_encoding_name, "MPA")  == 0) ? "rtpmpadepay"  :
-            (strcmp(g_encoding_name, "OPUS") == 0) ? "rtpopusdepay" :
-            (strcmp(g_encoding_name, "PCMA") == 0) ? "rtppcmadepay" :
-            (strcmp(g_encoding_name, "PCMU") == 0) ? "rtppcmudepay" :
-                                                      "rtpL24depay";
-        GstElement *depay = gst_element_factory_make(depay_name, "depay");
-        GstElement *rtp_decode = rtp_needs_decode ?
-                                 gst_element_factory_make("decodebin", "rtp_decode") : NULL;
-        if (!depay || (rtp_needs_decode && !rtp_decode)) {
-            fprintf(stderr, "[rtp_recv] failed to create depay (%s)\n", depay_name);
-            gst_object_unref(g_pipeline); return 1;
-        }
-        char ch_str[8]; snprintf(ch_str, sizeof(ch_str), "%d", g_ch);
-        GstCaps *rtp_caps = gst_caps_new_simple("application/x-rtp",
-            "media", G_TYPE_STRING, "audio",
-            "clock-rate", G_TYPE_INT, g_sample_rate_in,
-            "encoding-name", G_TYPE_STRING, g_encoding_name,
-            "encoding-params", G_TYPE_STRING, ch_str,
-            "channels", G_TYPE_INT, g_ch, NULL);
-        g_object_set(src, "caps", rtp_caps, NULL);
-        gst_caps_unref(rtp_caps);
-        if (rtp_needs_decode) {
-            g_signal_connect(rtp_decode, "pad-added", G_CALLBACK(on_pad_added), convert);
-            gst_bin_add_many(GST_BIN(g_pipeline), src, jitter, depay, rtp_decode, convert, resample, caps_flt, appsink, NULL);
-            link_ok = gst_element_link_many(src, jitter, depay, rtp_decode, NULL) &&
-                      gst_element_link_many(convert, resample, caps_flt, appsink, NULL);
-        } else {
-            gst_bin_add_many(GST_BIN(g_pipeline), src, jitter, depay, convert, resample, caps_flt, appsink, NULL);
-            link_ok = gst_element_link_many(src, jitter, depay, convert, resample, caps_flt, appsink, NULL);
-        }
-    } else if (g_proto == PROTO_PCM) {
-        GstCaps *c = gst_caps_new_simple("audio/x-raw",
-            "format", G_TYPE_STRING, "S16LE",
-            "rate", G_TYPE_INT, g_sample_rate_in,
-            "channels", G_TYPE_INT, g_ch,
-            "layout", G_TYPE_STRING, "interleaved", NULL);
-        g_object_set(src, "caps", c, NULL); gst_caps_unref(c);
-        gst_bin_add_many(GST_BIN(g_pipeline), src, convert, resample, caps_flt, appsink, NULL);
-        link_ok = gst_element_link_many(src, convert, resample, caps_flt, appsink, NULL);
-    } else {
-        g_signal_connect(decode, "pad-added", G_CALLBACK(on_pad_added), convert);
-        gst_bin_add_many(GST_BIN(g_pipeline), src, decode, convert, resample, caps_flt, appsink, NULL);
-        link_ok = gst_element_link(src, decode) &&
-                  gst_element_link_many(convert, resample, caps_flt, appsink, NULL);
-    }
-    if (!link_ok) {
-        fprintf(stderr, "[rtp_recv] pipeline link failed (mode=%s)\n", mode_str);
-        gst_object_unref(g_pipeline); return 1;
+    /* 멀티캐스트(224.0.0.0/4) 여부를 먼저 판단 후 바인드 주소 결정 */
+    struct in_addr bind_in = { .s_addr = INADDR_ANY };
+    int is_multicast = 0;
+    if (g_bind_addr[0] && inet_aton(g_bind_addr, &bind_in)) {
+        uint32_t ba = ntohl(bind_in.s_addr);
+        is_multicast = (ba >= 0xE0000000u && ba <= 0xEFFFFFFFu);
     }
 
-    GstBus *bus = gst_element_get_bus(g_pipeline);
-    gst_bus_add_watch(bus, bus_msg, NULL);
-    gst_object_unref(bus);
-
-    gst_element_set_state(g_pipeline, GST_STATE_PLAYING);
-
-    {
-        GstPad *src_pad = gst_element_get_static_pad(src, "src");
-        if (src_pad) {
-            gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, udp_probe, NULL, NULL);
-            if (g_auto_detect)
-                gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, auto_pt_probe, NULL, NULL);
-            gst_object_unref(src_pad);
-        }
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port   = htons((uint16_t)port),
+        /* 멀티캐스트: 그룹 주소로 바인드 → 유니캐스트 패킷 수신 차단
+         * 유니캐스트: INADDR_ANY                                       */
+        .sin_addr.s_addr = is_multicast ? bind_in.s_addr : INADDR_ANY,
+    };
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("[rtp_recv] bind"); close(sock); return 1;
     }
+
+    /* 멀티캐스트 그룹 join */
+    if (is_multicast) {
+        struct ip_mreq mreq;
+        mreq.imr_multiaddr        = bind_in;
+        mreq.imr_interface.s_addr = INADDR_ANY;
+        if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                       &mreq, sizeof(mreq)) < 0)
+            fprintf(stderr, "[rtp_recv] multicast join failed: %s\n", strerror(errno));
+        else
+            fprintf(stderr, "[rtp_recv] multicast joined %s\n", g_bind_addr);
+    }
+
+    fprintf(stderr, "[rtp_recv] mode=%s port=%d ch=%d bufMs=%d addr=%s\n",
+            proto_arg, port, g_ch, g_buf_ms, g_bind_addr);
+
+    pthread_t recv_tid, decode_tid, stats_tid;
+    pthread_create(&recv_tid,   NULL, recv_thread,   &sock);
+    pthread_create(&decode_tid, NULL, decode_thread, NULL);
+    pthread_create(&stats_tid,  NULL, stats_thread,  NULL);
 
     fprintf(stderr, "[rtp_recv] ready\n");
     fflush(stderr);
 
-    pthread_t stats_tid;
-    pthread_create(&stats_tid, NULL, stats_thread, NULL);
-
-    GMainLoop *loop = g_main_loop_new(NULL, FALSE);
-    while (!g_quit) {
-        g_main_context_iteration(NULL, FALSE);
-        usleep(1000);
-    }
-    g_main_loop_unref(loop);
+    while (!g_quit) usleep(50000);
 
     g_quit = 1;
-    pthread_join(stats_tid, NULL);
+    pthread_cond_broadcast(&g_pkt_cond);
 
-    gst_element_set_state(g_pipeline, GST_STATE_NULL);
-    gst_object_unref(g_pipeline);
+    pthread_join(recv_tid,   NULL);
+    pthread_join(decode_tid, NULL);
+    pthread_join(stats_tid,  NULL);
 
-    if (g_shm) { munmap(g_shm, SHMRING_SIZE); g_shm = NULL; }
+    if (g_src_state) { src_delete(g_src_state); g_src_state = NULL; }
+    if (g_shm)     { munmap(g_shm, SHMRING_SIZE); g_shm = NULL; }
     if (g_shm_fd >= 0) { close(g_shm_fd); g_shm_fd = -1; }
-    /* shm_unlink은 aoip_engine(owner)이 담당 */
+    close(sock);
 
     fprintf(stderr, "[rtp_recv] exiting\n");
     return g_exit_code;

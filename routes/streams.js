@@ -75,11 +75,16 @@ router.get('/rtp/:client', (req, res) => {
 router.post('/rtp/:client/start', (req, res) => {
   const { client } = req.params;
   try {
-    const updates = parseBody(req.body);
-    const detail  = getRtpStreamDetail(client);
+    const updates    = parseBody(req.body);
+    const detail     = getRtpStreamDetail(client);
     if (!detail) return res.status(404).json({ error: `stream ${client} not found` });
-    if (Object.keys(updates).length > 0 && detail.type === 'rtp_in')
-      updateRtpInConfig(client, updates);
+    const hasUpdates = Object.keys(updates).length > 0;
+    if (hasUpdates) {
+      // 설정이 변경된 경우 실행 중이더라도 중지 후 재시작
+      stopRtpStream(client);
+      if (detail.type === 'rtp_in')  updateRtpInConfig(client, updates);
+      if (detail.type === 'rtp_out') updateRtpOutConfig(client, updates);
+    }
     startRtpStream(client);
     res.json({ ok: true, stream: getRtpStreamDetail(client) });
   } catch (e) { res.status(400).json({ error: e.message }); }

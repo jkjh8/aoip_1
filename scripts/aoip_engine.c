@@ -1,51 +1,17 @@
 /*
- * aoip_engine.c — Unified AoIP audio matrix engine (JACK-free)
- *
- * jackd + audio_in + audio_out + dsp_engine + jack_pipe_in + jack_pipe_out 통합 대체.
+ * aoip_engine.c — Unified AoIP 오디오 매트릭스 엔진
  *
  * 스레드 구성:
  *   [P85] dsp_thread          — timerfd 기반 마스터 오디오 루프
- *   [P80] alsa_capture_thread × N  — ALSA 장치별 캡처
- *   [P80] alsa_playback_thread × N — ALSA 장치별 재생
- *   [  ]  control_thread      — stdin 명령 파서
+ *   [P80] alsa_capture_thread × N  — 장치별 캡처 (alsa_device.c)
+ *   [P80] alsa_playback_thread × N — 장치별 재생 (alsa_device.c)
  *   [  ]  reporter_thread     — ~8Hz stdout 레벨 미터
- *
- * RTP I/O: POSIX 공유 메모리(ShmRing)로 DSP와 완전 분리.
- *   - aoip_engine이 shm 생성/소유 (owner)
- *   - rtp_recv(writer) / rtp_send(reader)는 attach만
- *   - GStreamer가 없어도 DSP는 완벽하게 동작
- *
- * stdin 명령 (dsp_engine 완전 호환 + 신규):
- *   gain in|out <ch> <linear>
- *   mute in|out <ch> <0|1>
- *   bypass in|out <ch> <0|1>
- *   hpf in <ch> enable|freq|slope <val>
- *   eq in|out <ch> <band> enable|coeffs|freq|gain|q|type <val>
- *   limiter out <ch> enable|threshold|attack|release|makeup <val>
- *   bridge add     <name> <dev> <rate> <period> <nperiods> <ch> [ch_start]
- *   bridge add_in  <name> <dev> <rate> <period> <nperiods> <ch> [ch_start]
- *   bridge add_out <name> <dev> <rate> <period> <nperiods> <ch> [ch_start]
- *   bridge start|stop <name>
- *   route add <in_ch> <out_ch> [gain]    (1-based)
- *   route remove <in_ch> <out_ch>
- *   rtp_in add <name> <shm_name> [ch] [ch_start]   (/rtp_in_<name>)
- *   rtp_in remove <name>
- *   rtp_out add <name> <shm_name> [ch] [ch_start]  (/rtp_out_<name>)
- *   rtp_out remove <name>
- *
- * stdout 출력:
- *   [aoip_engine] ready client=<name> (in=N out=N sr=48000)
- *   lvl in <ch> <db>
- *   lvl out <ch> <db>
- *   lm out <ch> <pre_db> <post_db>
- *   bridge:<name>:ready
- *   bridge:<name>:stopped
- *   route:updated
+ *   [  ]  stdin cmd_loop      — stdin 명령 파서 (main 스레드)
  *
  * Build:
- *   gcc -O3 -o aoip_engine aoip_engine.c -lrt -lasound -lsamplerate -lpthread -lm
+ *   gcc -O3 -o aoip_engine aoip_engine.c alsa_device.c dsp_math.c \
+ *       -I. -lrt -lasound -lsamplerate -lpthread -lm
  */
-
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,199 +26,19 @@
 #include <sys/timerfd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <alsa/asoundlib.h>
-#include <samplerate.h>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+#include "include/engine_constants.h"
+#include "include/shm_ring.h"
+#include "include/ring_buf.h"
+#include "include/dsp_math.h"
+#include "include/alsa_device.h"
 
-/* ── 상수 ──────────────────────────────────────────────── */
-#define SAMPLE_RATE     48000
-#define PERIOD_FRAMES   512
-#define RING_FRAMES     16384       /* 2의 거듭제곱, ~341 ms */
-#define MAX_CH          8
-#define MAX_DEVICES     8
-#define MAX_RTP         4
-#define MAX_EQ_BANDS    4
-#define CMD_RING_SIZE   128
-#define GAIN_MAX        2.0f
-#define FILL_TARGET     (RING_FRAMES / 4)
-#define PREBUF_FRAMES   (RING_FRAMES / 8)
+/* ── RT 우선순위 (CLI로 재정의 가능) ─────────────────────────────── */
+static int g_prio_dsp     = 92;
+static int g_prio_alsa    = 80;
+static int g_prio_ravenna = 95;
 
-/* ── POSIX 공유 메모리 링버퍼 (DSP ↔ rtp_recv / rtp_send) ── */
-#define SHM_RING_FRAMES  16384      /* 공유 메모리 링 크기 (RING_FRAMES와 동일) */
-#define SHM_MAX_CH       8          /* 공유 메모리 최대 채널 수 */
-
-typedef struct {
-    _Atomic uint32_t wp;            /* 단조 증가 write frame 카운터 */
-    _Atomic uint32_t rp;            /* 단조 증가 read  frame 카운터 */
-    int32_t  channels;
-    int32_t  ring_frames;
-    uint8_t  _pad[48];              /* 헤더를 64바이트로 정렬 */
-    float    buf[SHM_RING_FRAMES * SHM_MAX_CH];
-} ShmRing;
-
-#define SHMRING_SIZE ((size_t)sizeof(ShmRing))
-
-/* ── PI 제어 상수 ─────────────────────────────────────── */
-#define RATIO_KP        0.00005
-#define RATIO_KI        0.000000005
-#define RATIO_MIN       0.99990
-#define RATIO_MAX       1.00010
-
-/* ── 락프리 SPSC 링버퍼 (ALSA용) ─────────────────────── */
-typedef struct {
-    float       *buf;
-    atomic_uint  wp, rp;
-    int          ring_frames;
-    int          channels;
-} RingBuf;
-
-static void rb_init(RingBuf *r, int frames, int ch) {
-    r->buf = calloc((size_t)(frames * ch), sizeof(float));
-    atomic_init(&r->wp, 0);
-    atomic_init(&r->rp, 0);
-    r->ring_frames = frames;
-    r->channels    = ch;
-}
-
-static int rb_avail(const RingBuf *r) {
-    unsigned wp = atomic_load_explicit(&r->wp, memory_order_acquire);
-    unsigned rp = atomic_load_explicit(&r->rp, memory_order_relaxed);
-    return (int)(wp - rp);
-}
-
-static int rb_free(const RingBuf *r) {
-    unsigned wp = atomic_load_explicit(&r->wp, memory_order_relaxed);
-    unsigned rp = atomic_load_explicit(&r->rp, memory_order_acquire);
-    return (int)((unsigned)r->ring_frames - (wp - rp));
-}
-
-static void rb_write(RingBuf *r, const float *src, int n) {
-    unsigned wp   = atomic_load_explicit(&r->wp, memory_order_relaxed);
-    unsigned rp   = atomic_load_explicit(&r->rp, memory_order_acquire);
-    int      free = (int)((unsigned)r->ring_frames - (wp - rp));
-    if (n > free) n = free;
-    for (int i = 0; i < n; i++) {
-        unsigned idx = (wp + (unsigned)i) % (unsigned)r->ring_frames;
-        memcpy(&r->buf[idx * r->channels], &src[i * r->channels],
-               (size_t)r->channels * sizeof(float));
-    }
-    atomic_store_explicit(&r->wp, wp + (unsigned)n, memory_order_release);
-}
-
-static int rb_read(RingBuf *r, float *dst, int n) {
-    unsigned rp = atomic_load_explicit(&r->rp, memory_order_relaxed);
-    unsigned wp = atomic_load_explicit(&r->wp, memory_order_acquire);
-    if ((int)(wp - rp) < n) return 0;
-    for (int i = 0; i < n; i++) {
-        unsigned idx = (rp + (unsigned)i) % (unsigned)r->ring_frames;
-        memcpy(&dst[i * r->channels], &r->buf[idx * r->channels],
-               (size_t)r->channels * sizeof(float));
-    }
-    atomic_store_explicit(&r->rp, rp + (unsigned)n, memory_order_release);
-    return 1;
-}
-
-static void rb_reset(RingBuf *r) {
-    unsigned wp = atomic_load_explicit(&r->wp, memory_order_relaxed);
-    atomic_store_explicit(&r->rp, wp, memory_order_release);
-}
-
-/* ── Biquad 필터 ──────────────────────────────────────── */
-typedef struct { float b0,b1,b2,a1,a2, x1,x2,y1,y2; } Biquad;
-typedef struct { double b0,b1,b2,a1,a2; } BqCoeffs;
-
-static inline void bq_reset(Biquad *bq) {
-    bq->x1 = bq->x2 = bq->y1 = bq->y2 = 0.0f;
-}
-
-static inline float bq_process(Biquad *bq, float x) {
-    float y = bq->b0*x + bq->b1*bq->x1 + bq->b2*bq->x2
-                       - bq->a1*bq->y1  - bq->a2*bq->y2;
-    bq->x2 = bq->x1; bq->x1 = x;
-    bq->y2 = bq->y1; bq->y1 = y;
-    return y;
-}
-
-typedef enum { T_PEAK=0, T_LOSHELF, T_HISHELF, T_LP, T_HP } EqType;
-
-static void calc_hpf(BqCoeffs *c, float freq, float sr) {
-    double w0 = 2.0*M_PI*freq/sr, cw = cos(w0), sw = sin(w0);
-    double alpha = sw/(2.0*0.7071), a0 = 1.0+alpha;
-    c->b0 =  (1.0+cw)/2.0/a0; c->b1 = -(1.0+cw)/a0; c->b2 = (1.0+cw)/2.0/a0;
-    c->a1 = -2.0*cw/a0;       c->a2 =  (1.0-alpha)/a0;
-}
-
-static void calc_eq(BqCoeffs *c, EqType type, float freq, float gain_db,
-                    float q, float sr) {
-    double w0 = 2.0*M_PI*freq/sr, cw = cos(w0), sw = sin(w0);
-    double A = pow(10.0, gain_db/40.0), alpha = sw/(2.0*q), sqA, a0;
-    switch (type) {
-    case T_PEAK:
-        a0 = 1.0+alpha/A;
-        c->b0 = (1.0+alpha*A)/a0; c->b1 = c->a1 = -2.0*cw/a0;
-        c->b2 = (1.0-alpha*A)/a0; c->a2 = (1.0-alpha/A)/a0; break;
-    case T_LOSHELF:
-        sqA = sqrt(A); alpha = sw/2.0*sqrt((A+1.0/A)*(1.0/q-1.0)+2.0);
-        a0 = (A+1)+(A-1)*cw+2.0*sqA*alpha;
-        c->b0 =  A*((A+1)-(A-1)*cw+2.0*sqA*alpha)/a0;
-        c->b1 = 2*A*((A-1)-(A+1)*cw)/a0;
-        c->b2 =  A*((A+1)-(A-1)*cw-2.0*sqA*alpha)/a0;
-        c->a1 = -2*((A-1)+(A+1)*cw)/a0;
-        c->a2 =    ((A+1)+(A-1)*cw-2.0*sqA*alpha)/a0; break;
-    case T_HISHELF:
-        sqA = sqrt(A); alpha = sw/2.0*sqrt((A+1.0/A)*(1.0/q-1.0)+2.0);
-        a0 = (A+1)-(A-1)*cw+2.0*sqA*alpha;
-        c->b0 =  A*((A+1)+(A-1)*cw+2.0*sqA*alpha)/a0;
-        c->b1 =-2*A*((A-1)+(A+1)*cw)/a0;
-        c->b2 =  A*((A+1)+(A-1)*cw-2.0*sqA*alpha)/a0;
-        c->a1 =  2*((A-1)-(A+1)*cw)/a0;
-        c->a2 =    ((A+1)-(A-1)*cw-2.0*sqA*alpha)/a0; break;
-    case T_LP:
-        a0 = 1.0+alpha;
-        c->b0 = (1.0-cw)/2.0/a0; c->b1 = (1.0-cw)/a0; c->b2 = (1.0-cw)/2.0/a0;
-        c->a1 = -2.0*cw/a0; c->a2 = (1.0-alpha)/a0; break;
-    case T_HP:
-        a0 = 1.0+alpha;
-        c->b0 =  (1.0+cw)/2.0/a0; c->b1 = -(1.0+cw)/a0; c->b2 = (1.0+cw)/2.0/a0;
-        c->a1 = -2.0*cw/a0; c->a2 = (1.0-alpha)/a0; break;
-    }
-}
-
-/* ── 리미터 ───────────────────────────────────────────── */
-typedef struct {
-    int   enabled;
-    float threshold, attack_coef, release_coef, makeup;
-    float env, gr;
-} Limiter;
-
-typedef struct { float threshold, attack_coef, release_coef, makeup; } LimCoeffs;
-
-static inline void lim_reset(Limiter *l) { l->env = 0.0f; l->gr = 1.0f; }
-
-static inline float lim_process(Limiter *l, float x) {
-    float peak = fabsf(x);
-    if (peak > l->env) l->env += l->attack_coef  * (peak - l->env);
-    else               l->env += l->release_coef * (peak - l->env);
-    float gr = (l->env > l->threshold && l->env > 0.0f)
-               ? l->threshold / l->env : 1.0f;
-    l->gr = gr;
-    return x * gr * l->makeup;
-}
-
-static LimCoeffs calc_limiter(float thr_db, float atk_ms, float rel_ms,
-                               float mkup_db, float sr) {
-    LimCoeffs c;
-    c.threshold    = powf(10.0f, thr_db/20.0f);
-    c.attack_coef  = 1.0f - expf(-1.0f / fmaxf(1.0f, atk_ms*sr/1000.0f));
-    c.release_coef = 1.0f - expf(-1.0f / fmaxf(1.0f, rel_ms*sr/1000.0f));
-    c.makeup       = powf(10.0f, mkup_db/20.0f);
-    return c;
-}
-
-/* ── SPSC 명령 링버퍼 ─────────────────────────────────── */
+/* ── SPSC 명령 링버퍼 ─────────────────────────────────────────────── */
 typedef enum {
     CMD_GAIN, CMD_MUTE, CMD_BYPASS,
     CMD_HPF_ENABLE, CMD_HPF_COEFFS, CMD_HPF_STAGES,
@@ -298,7 +84,7 @@ static int cmd_pop(Cmd *c) {
     return 1;
 }
 
-/* ── 채널별 DSP 상태 ──────────────────────────────────── */
+/* ── 채널별 DSP 상태 ──────────────────────────────────────────────── */
 typedef struct {
     float   gain_tgt, gain_cur;
     int     muted, bypass_dsp;
@@ -309,85 +95,20 @@ typedef struct {
     Limiter lim;
 } Channel;
 
-/* ── PI 드리프트 보정 상태 ────────────────────────────── */
-typedef struct {
-    double ratio, integ, smooth;
-    int    prebuf_done;
-} PiState;
-
-static void pi_reset(PiState *p) {
-    p->ratio = 1.0; p->integ = 0.0; p->smooth = 0.0; p->prebuf_done = 0;
-}
-
-static void pi_update(PiState *p, int avail, int target) {
-    double err = ((double)avail - target) / (double)target;
-    p->smooth += 0.05 * (err - p->smooth);
-    p->integ  += p->smooth;
-    p->ratio   = 1.0 + p->smooth * RATIO_KP + p->integ * RATIO_KI;
-    if (p->ratio < RATIO_MIN) {
-        p->ratio = RATIO_MIN;
-        p->integ = (RATIO_MIN - 1.0 - p->smooth * RATIO_KP) / RATIO_KI;
-    }
-    if (p->ratio > RATIO_MAX) {
-        p->ratio = RATIO_MAX;
-        p->integ = (RATIO_MAX - 1.0 - p->smooth * RATIO_KP) / RATIO_KI;
-    }
-}
-
-/* ── ALSA 장치 구조체 ────────────────────────────────── */
-#define DEV_TMP_FRAMES ((PERIOD_FRAMES + 8) * 2)
-
-typedef struct {
-    char  name[32];
-    char  dev[64];
-    int   rate, period, nperiods, channels;
-    int   enabled;
-    int   ch_start;
-    int   mode;        /* 0=both, 1=capture_only, 2=playback_only */
-
-    RingBuf    in_ring;
-    RingBuf    out_ring;
-
-    PiState    cap_pi;
-    SRC_STATE *cap_src;
-    PiState    play_pi;
-    SRC_STATE *play_src;
-
-    float tmp_cap_in [DEV_TMP_FRAMES * MAX_CH];
-    float tmp_cap_out[DEV_TMP_FRAMES * MAX_CH];
-    float tmp_play_in[DEV_TMP_FRAMES * MAX_CH];
-    float tmp_play_out[DEV_TMP_FRAMES * MAX_CH];
-
-    pthread_t    cap_tid;
-    pthread_t    play_tid;
-    volatile int quit_cap;
-    volatile int quit_play;
-    int          thread_priority;  /* SCHED_FIFO priority for ALSA threads */
-
-    /* 언더런 시 클릭 방지용 페이드 버퍼 (캡처 방향, DSP 스레드 전용) */
-    float       *cap_fade_buf;     /* 마지막 정상 캡처 데이터 (interleaved) */
-    int          cap_fade_cnt;     /* 현재 페이드아웃 진행 횟수 */
-} Device;
-
-#define UNDERRUN_FADE_PERIODS 4    /* 언더런 페이드아웃 기간 수 (~42ms) */
-
-/* ── RTP 공유 메모리 연결 구조체 ─────────────────────── */
+/* ── RTP 공유 메모리 연결 ─────────────────────────────────────────── */
 typedef struct {
     char    name[32];
-    char    shm_name[64];   /* e.g. /rtp_in_stream1 */
+    char    shm_name[64];
     int     channels;
     int     ch_start;
     int     enabled;
-    ShmRing *shm;           /* mmap'd 주소 */
-    int     fd;             /* shm fd */
+    ShmRing *shm;
+    int     fd;
 } ShmBuf;
 
-/* ── RT 우선순위 (커맨드라인으로 재정의 가능) ─────────── */
-static int g_prio_dsp     = 92;   /* DSP 스레드           */
-static int g_prio_alsa    = 80;   /* 일반 ALSA 브릿지     */
-static int g_prio_ravenna = 95;   /* RAVENNA(AES67) 브릿지 */
+/* ── 전역 상태 ────────────────────────────────────────────────────── */
+volatile int g_quit = 0;  /* alsa_device.c 에서 extern 참조 */
 
-/* ── 전역 상태 ───────────────────────────────────────── */
 static Device  g_dev[MAX_DEVICES];
 static int     g_n_dev = 0;
 
@@ -400,7 +121,7 @@ static Channel g_in_ch[MAX_CH];
 static Channel g_out_ch[MAX_CH];
 static int     g_n_in = 8, g_n_out = 8;
 static float   g_sr   = (float)SAMPLE_RATE;
-static int     g_bypass_all_dsp = 0;  /* --bypass-dsp: HPF/EQ/limiter 전체 스킵 */
+static int     g_bypass_all_dsp = 0;
 
 static float   g_route[MAX_CH][MAX_CH];
 
@@ -409,7 +130,6 @@ static volatile float g_out_level[MAX_CH];
 static volatile float g_lim_pre[MAX_CH];
 static volatile float g_lim_post[MAX_CH];
 
-static volatile int g_quit = 0;
 static volatile int g_reporter_running = 0;
 
 typedef struct {
@@ -421,218 +141,12 @@ typedef struct {
 static ChState g_in_state[MAX_CH];
 static ChState g_out_state[MAX_CH];
 
-/* ── 시그널 핸들러 ───────────────────────────────────── */
+/* ── 시그널 핸들러 ───────────────────────────────────────────────── */
 static void sig_handler(int s) { (void)s; g_quit = 1; fclose(stdin); }
 
-/* ── ALSA 헬퍼 ───────────────────────────────────────── */
-static snd_pcm_t *alsa_open(const char *dev, int stream, int rate,
-                              int period, int nperiods, int ch) {
-    snd_pcm_t *pcm = NULL;
-    int err;
-    if ((err = snd_pcm_open(&pcm, dev, stream, 0)) < 0) {
-        fprintf(stderr, "[aoip_engine] alsa_open %s (%s): %s\n",
-                dev, stream == SND_PCM_STREAM_CAPTURE ? "cap" : "play",
-                snd_strerror(err));
-        return NULL;
-    }
-    snd_pcm_hw_params_t *hw;
-    snd_pcm_hw_params_alloca(&hw);
-    snd_pcm_hw_params_any(pcm, hw);
-    snd_pcm_hw_params_set_access(pcm, hw, SND_PCM_ACCESS_RW_INTERLEAVED);
-    if ((err = snd_pcm_hw_params_set_format(pcm, hw, SND_PCM_FORMAT_S32_LE)) < 0) {
-        fprintf(stderr, "[aoip_engine] alsa_open %s: S32_LE not supported: %s\n",
-                dev, snd_strerror(err));
-        snd_pcm_close(pcm); return NULL;
-    }
-    snd_pcm_hw_params_set_channels(pcm, hw, (unsigned)ch);
-    unsigned r = (unsigned)rate;
-    snd_pcm_hw_params_set_rate_near(pcm, hw, &r, 0);
-    snd_pcm_uframes_t p = (snd_pcm_uframes_t)period;
-    snd_pcm_hw_params_set_period_size_near(pcm, hw, &p, 0);
-    snd_pcm_uframes_t buf = p * (snd_pcm_uframes_t)nperiods;
-    snd_pcm_hw_params_set_buffer_size_near(pcm, hw, &buf);
-    if ((err = snd_pcm_hw_params(pcm, hw)) < 0) {
-        fprintf(stderr, "[aoip_engine] alsa_open %s hw_params: %s\n",
-                dev, snd_strerror(err));
-        snd_pcm_close(pcm); return NULL;
-    }
-    if (r != (unsigned)rate)
-        fprintf(stderr, "[aoip_engine] alsa_open %s: rate %d → %u\n", dev, rate, r);
-    if (p != (snd_pcm_uframes_t)period)
-        fprintf(stderr, "[aoip_engine] alsa_open %s: period %d → %lu\n", dev, period, (unsigned long)p);
-    snd_pcm_prepare(pcm);
-    return pcm;
-}
-
-/* ── ALSA 캡처 스레드 ────────────────────────────────── */
-static void *alsa_capture_thread(void *arg) {
-    Device *d = (Device *)arg;
-
-    struct sched_param sp = { .sched_priority = d->thread_priority };
-    pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
-
-    /* 초기 오픈 실패 시 재시도 (예: PTP 동기화 전 RAVENNA 장치 미준비) */
-    snd_pcm_t *pcm = NULL;
-    while (!d->quit_cap && !g_quit) {
-        pcm = alsa_open(d->dev, SND_PCM_STREAM_CAPTURE,
-                        d->rate, d->period, d->nperiods, d->channels);
-        if (pcm) break;
-        fprintf(stderr, "[aoip_engine] cap %s: open failed, retry in 2s\n", d->name);
-        usleep(2000000);
-    }
-    if (!pcm) return NULL;
-
-    int32_t *ibuf = malloc((size_t)(d->period * d->channels) * sizeof(int32_t));
-    float   *fbuf = malloc((size_t)(d->period * d->channels) * sizeof(float));
-
-    int cap_err_count = 0;
-
-    while (!d->quit_cap && !g_quit) {
-        snd_pcm_sframes_t n = snd_pcm_readi(pcm, ibuf, (snd_pcm_uframes_t)d->period);
-        if (n == -EPIPE) {
-            fprintf(stderr, "[aoip_engine] cap %s: xrun (overrun)\n", d->name);
-            snd_pcm_prepare(pcm); continue;
-        }
-        if (n == -ESTRPIPE) {
-            while (!g_quit && snd_pcm_resume(pcm) == -EAGAIN) usleep(10000);
-            snd_pcm_prepare(pcm); continue;
-        }
-        if (n == -EIO) {
-            /* UAC2 가젯: 호스트가 스트림을 열지 않은 경우 — prepare 후 100ms 대기 */
-            if (cap_err_count++ == 0)
-                fprintf(stderr, "[aoip_engine] cap %s: EIO, host stream not active\n", d->name);
-            snd_pcm_prepare(pcm);
-            usleep(100000);
-            continue;
-        }
-        if (n < 0) {
-            if (cap_err_count++ == 0)
-                fprintf(stderr, "[aoip_engine] cap %s: %s\n", d->name, snd_strerror((int)n));
-            snd_pcm_close(pcm); pcm = NULL;
-            rb_reset(&d->in_ring);
-            while (!d->quit_cap && !g_quit) {
-                usleep(500000);
-                pcm = alsa_open(d->dev, SND_PCM_STREAM_CAPTURE,
-                                d->rate, d->period, d->nperiods, d->channels);
-                if (pcm) {
-                    fprintf(stderr, "[aoip_engine] cap %s reopened\n", d->name);
-                    cap_err_count = 0;
-                    break;
-                }
-            }
-            continue;
-        }
-        cap_err_count = 0;
-        for (int i = 0; i < (int)n * d->channels; i++)
-            fbuf[i] = (float)ibuf[i] * (1.0f / 2147483648.0f);
-        rb_write(&d->in_ring, fbuf, (int)n);
-    }
-
-    free(ibuf); free(fbuf);
-    if (pcm) snd_pcm_close(pcm);
-    return NULL;
-}
-
-/* ── ALSA 재생 스레드 ────────────────────────────────── */
-static void *alsa_playback_thread(void *arg) {
-    Device *d = (Device *)arg;
-
-    struct sched_param sp = { .sched_priority = d->thread_priority };
-    pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
-
-    /* 초기 오픈 실패 시 재시도 (예: PTP 동기화 전 RAVENNA 장치 미준비) */
-    snd_pcm_t *pcm = NULL;
-    while (!d->quit_play && !g_quit) {
-        pcm = alsa_open(d->dev, SND_PCM_STREAM_PLAYBACK,
-                        d->rate, d->period, d->nperiods, d->channels);
-        if (pcm) break;
-        fprintf(stderr, "[aoip_engine] play %s: open failed, retry in 2s\n", d->name);
-        usleep(2000000);
-    }
-    if (!pcm) return NULL;
-
-    float   *fbuf      = malloc((size_t)(d->period * d->channels) * sizeof(float));
-    float   *fade_buf  = calloc((size_t)(d->period * d->channels), sizeof(float));
-    int32_t *ibuf      = malloc((size_t)(d->period * d->channels) * sizeof(int32_t));
-    int      fade_cnt  = 0;
-
-    int play_err_count = 0;
-
-    while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < PREBUF_FRAMES)
-        usleep(1000);
-
-    while (!d->quit_play && !g_quit) {
-        if (!rb_read(&d->out_ring, fbuf, d->period)) {
-            /* 언더런: 급격한 무음 대신 페이드아웃으로 클릭 방지 */
-            float scale = (fade_cnt < UNDERRUN_FADE_PERIODS)
-                          ? 1.0f - (float)(fade_cnt + 1) / (float)UNDERRUN_FADE_PERIODS
-                          : 0.0f;
-            int n = d->period * d->channels;
-            for (int i = 0; i < n; i++) fbuf[i] = fade_buf[i] * scale;
-            if (fade_cnt < UNDERRUN_FADE_PERIODS) fade_cnt++;
-        } else {
-            memcpy(fade_buf, fbuf, (size_t)(d->period * d->channels) * sizeof(float));
-            fade_cnt = 0;
-        }
-        for (int i = 0; i < d->period * d->channels; i++) {
-            float v = fbuf[i];
-            if (v >  1.0f) v =  1.0f;
-            if (v < -1.0f) v = -1.0f;
-            ibuf[i] = (int32_t)(v * 2147483647.0f);
-        }
-
-        snd_pcm_sframes_t n = snd_pcm_writei(pcm, ibuf, (snd_pcm_uframes_t)d->period);
-        if (n == -EPIPE) {
-            fprintf(stderr, "[aoip_engine] play %s: xrun (underrun)\n", d->name);
-            rb_reset(&d->out_ring); snd_pcm_prepare(pcm);
-            while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < PREBUF_FRAMES)
-                usleep(1000);
-        } else if (n == -ESTRPIPE) {
-            rb_reset(&d->out_ring);
-            while (!g_quit && snd_pcm_resume(pcm) == -EAGAIN) usleep(10000);
-            snd_pcm_prepare(pcm);
-            while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < PREBUF_FRAMES)
-                usleep(1000);
-        } else if (n == -EIO) {
-            /* UAC2 가젯: 호스트가 스트림을 열지 않은 경우 EIO 반환.
-             * ring을 리셋해 stale 데이터 누적 방지 후 100ms 대기. */
-            if (play_err_count++ == 0)
-                fprintf(stderr, "[aoip_engine] play %s: EIO, host stream not active\n",
-                        d->name);
-            rb_reset(&d->out_ring);
-            snd_pcm_prepare(pcm);
-            usleep(100000);
-        } else if (n < 0) {
-            play_err_count++;
-            if (play_err_count == 1)
-                fprintf(stderr, "[aoip_engine] play %s: %s (will suppress repeats)\n",
-                        d->name, snd_strerror((int)n));
-            snd_pcm_close(pcm); pcm = NULL;
-            rb_reset(&d->out_ring);
-            while (!d->quit_play && !g_quit) {
-                usleep(500000);
-                pcm = alsa_open(d->dev, SND_PCM_STREAM_PLAYBACK,
-                                d->rate, d->period, d->nperiods, d->channels);
-                if (pcm) {
-                    fprintf(stderr, "[aoip_engine] play %s reopened\n", d->name);
-                    play_err_count = 0;
-                    while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < PREBUF_FRAMES)
-                        usleep(1000);
-                    break;
-                }
-            }
-        } else {
-            play_err_count = 0;
-        }
-    }
-
-    free(fbuf); free(fade_buf); free(ibuf);
-    if (pcm) snd_pcm_close(pcm);
-    return NULL;
-}
-
-/* ── 명령 적용 (DSP 스레드) ──────────────────────────── */
-static void apply_cmd(const Cmd *cmd) {
+/* ── 명령 적용 (DSP 스레드) ──────────────────────────────────────── */
+static void apply_cmd(const Cmd *cmd)
+{
     Channel *ch = (cmd->dir == 0) ? &g_in_ch[cmd->ch] : &g_out_ch[cmd->ch];
     switch (cmd->type) {
     case CMD_GAIN:   ch->gain_tgt = cmd->gain; break;
@@ -666,11 +180,12 @@ static void apply_cmd(const Cmd *cmd) {
     }
 }
 
-/* ── DSP 스레드 마스터 루프 ──────────────────────────── */
+/* ── DSP 스레드 마스터 루프 ──────────────────────────────────────── */
 static float g_in_buf[MAX_CH][PERIOD_FRAMES];
 static float g_out_buf[MAX_CH][PERIOD_FRAMES];
 
-static void *dsp_thread(void *arg) {
+static void *dsp_thread(void *arg)
+{
     (void)arg;
 
     struct sched_param sp = { .sched_priority = g_prio_dsp };
@@ -715,7 +230,7 @@ static void *dsp_thread(void *arg) {
 
             int input_need = (int)ceil((double)PERIOD_FRAMES / d->cap_pi.ratio) + 2;
             if (input_need > avail) {
-                /* 언더런: 급격한 무음 대신 페이드아웃으로 클릭 방지 */
+                /* 언더런: 페이드아웃으로 클릭 방지 */
                 if (d->cap_fade_buf) {
                     float scale = (d->cap_fade_cnt < UNDERRUN_FADE_PERIODS)
                                   ? 1.0f - (float)(d->cap_fade_cnt + 1) / (float)UNDERRUN_FADE_PERIODS
@@ -761,7 +276,6 @@ static void *dsp_thread(void *arg) {
                 for (long f = 0; f < gen; f++) dst[f] = d->tmp_cap_out[f*d->channels+c];
                 for (long f = gen; f < PERIOD_FRAMES; f++) dst[f] = 0.0f;
             }
-            /* 마지막 정상 프레임 저장 — 다음 언더런 시 페이드 소스로 사용 */
             if (d->cap_fade_buf) {
                 d->cap_fade_cnt = 0;
                 for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
@@ -770,22 +284,17 @@ static void *dsp_thread(void *arg) {
             }
         }
 
-        /* ── 입력 읽기: RTP 공유 메모리 ──
-         * GStreamer(rtp_recv)가 없으면 무음으로 채움 — DSP에는 영향 없음
-         */
+        /* ── 입력 읽기: RTP 공유 메모리 ── */
         for (int ri = 0; ri < g_n_rtp_in; ri++) {
             ShmBuf *r = &g_rtp_in[ri];
             if (!r->enabled || !r->shm) {
-                /* 비활성 슬롯: 잔류 데이터 노이즈 방지 — 해당 채널 무음 */
                 for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
                     memset(g_in_buf[r->ch_start+c], 0, PERIOD_FRAMES*sizeof(float));
                 continue;
             }
-
             ShmRing *ring = r->shm;
             uint32_t wp = atomic_load_explicit(&ring->wp, memory_order_acquire);
             uint32_t rp = atomic_load_explicit(&ring->rp, memory_order_relaxed);
-
             if ((int32_t)(wp - rp) >= PERIOD_FRAMES) {
                 for (int f = 0; f < PERIOD_FRAMES; f++) {
                     uint32_t idx = (rp + (uint32_t)f) % (uint32_t)SHM_RING_FRAMES;
@@ -795,7 +304,6 @@ static void *dsp_thread(void *arg) {
                 atomic_store_explicit(&ring->rp, rp + (uint32_t)PERIOD_FRAMES,
                                       memory_order_release);
             } else {
-                /* rtp_recv 미연결: 무음 */
                 for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
                     memset(g_in_buf[r->ch_start+c], 0, PERIOD_FRAMES*sizeof(float));
             }
@@ -805,26 +313,15 @@ static void *dsp_thread(void *arg) {
         for (int ch = 0; ch < g_n_in; ch++) {
             Channel *ic  = &g_in_ch[ch];
             float   *buf = g_in_buf[ch];
-
             if (ic->muted) {
                 memset(buf, 0, PERIOD_FRAMES*sizeof(float));
                 ic->gain_cur = ic->gain_tgt;
                 continue;
             }
-
             float cur  = ic->gain_cur;
             float step = (ic->gain_tgt - cur) / (float)PERIOD_FRAMES;
-
             for (int i = 0; i < PERIOD_FRAMES; i++) {
                 float s = buf[i];
-                // if (!ic->bypass_dsp && !g_bypass_all_dsp) {
-                //     if (ic->hpf_enabled) {
-                //         s = bq_process(&ic->hpf[0], s);
-                //         if (ic->hpf_stages > 1) s = bq_process(&ic->hpf[1], s);
-                //     }
-                //     for (int b = 0; b < MAX_EQ_BANDS; b++)
-                //         if (ic->eq_enabled[b]) s = bq_process(&ic->eq[b], s);
-                // }
                 float peak = fabsf(s);
                 if (peak > g_in_level[ch]) g_in_level[ch] = peak;
                 cur += step;
@@ -848,29 +345,17 @@ static void *dsp_thread(void *arg) {
         for (int ch = 0; ch < g_n_out; ch++) {
             Channel *oc  = &g_out_ch[ch];
             float   *buf = g_out_buf[ch];
-
             if (oc->muted) {
                 memset(buf, 0, PERIOD_FRAMES*sizeof(float));
                 oc->gain_cur = oc->gain_tgt;
                 continue;
             }
-
             float cur  = oc->gain_cur;
             float step = (oc->gain_tgt - cur) / (float)PERIOD_FRAMES;
-
             for (int i = 0; i < PERIOD_FRAMES; i++) {
                 float s = buf[i];
                 if (!oc->bypass_dsp && !g_bypass_all_dsp) {
-                    // for (int b = 0; b < MAX_EQ_BANDS; b++)
-                    //     if (oc->eq_enabled[b]) s = bq_process(&oc->eq[b], s);
-
-                    // float pre_peak = fabsf(s);
-                    // if (pre_peak > g_lim_pre[ch]) g_lim_pre[ch] = pre_peak;
-
-                    // if (oc->lim.enabled) s = lim_process(&oc->lim, s);
-
                     float post_peak = fabsf(s);
-                    // if (post_peak > g_lim_post[ch]) g_lim_post[ch] = post_peak;
                     if (post_peak > g_out_level[ch]) g_out_level[ch] = post_peak;
                 } else {
                     float peak = fabsf(s);
@@ -886,19 +371,15 @@ static void *dsp_thread(void *arg) {
         for (int di = 0; di < g_n_dev; di++) {
             Device *d = &g_dev[di];
             if (!d->enabled || d->mode == 1) continue;
-
             for (int f = 0; f < PERIOD_FRAMES; f++) {
                 for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
                     d->tmp_play_in[f*d->channels+c] = g_out_buf[d->ch_start+c][f];
             }
-
             int avail_out = rb_avail(&d->out_ring);
             pi_update(&d->play_pi, avail_out, FILL_TARGET);
-
             long out_max = (long)ceil((double)PERIOD_FRAMES * d->play_pi.ratio) + 4;
             if (out_max > DEV_TMP_FRAMES) out_max = DEV_TMP_FRAMES;
             if (rb_free(&d->out_ring) < (int)out_max) continue;
-
             SRC_DATA sd = {
                 .data_in       = d->tmp_play_in,
                 .data_out      = d->tmp_play_out,
@@ -911,23 +392,17 @@ static void *dsp_thread(void *arg) {
             rb_write(&d->out_ring, d->tmp_play_out, (int)sd.output_frames_gen);
         }
 
-        /* ── 출력 기록: RTP 공유 메모리 ──
-         * rtp_send가 없어도 ring을 overwrite 방식으로 계속 씀.
-         * DSP 동작에는 전혀 영향 없음.
-         */
+        /* ── 출력 기록: RTP 공유 메모리 ── */
         for (int ri = 0; ri < g_n_rtp_out; ri++) {
             ShmBuf *r = &g_rtp_out[ri];
             if (!r->enabled || !r->shm) continue;
-
             ShmRing *ring = r->shm;
             uint32_t wp = atomic_load_explicit(&ring->wp, memory_order_relaxed);
-
             for (int f = 0; f < PERIOD_FRAMES; f++) {
                 uint32_t idx = (wp + (uint32_t)f) % (uint32_t)SHM_RING_FRAMES;
                 for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
                     ring->buf[idx * SHM_MAX_CH + c] = g_out_buf[r->ch_start+c][f];
             }
-            /* wp를 마지막에 한 번에 업데이트 (원자적으로 reader에 노출) */
             atomic_store_explicit(&ring->wp, wp + (uint32_t)PERIOD_FRAMES,
                                   memory_order_release);
         }
@@ -937,8 +412,9 @@ static void *dsp_thread(void *arg) {
     return NULL;
 }
 
-/* ── 리포터 스레드 ────────────────────────────────────── */
-static void *reporter_thread(void *arg) {
+/* ── 리포터 스레드 ────────────────────────────────────────────────── */
+static void *reporter_thread(void *arg)
+{
     (void)arg;
     while (g_reporter_running) {
         usleep(125000);
@@ -963,59 +439,10 @@ static void *reporter_thread(void *arg) {
     return NULL;
 }
 
-/* ── 장치 시작/중지 헬퍼 ─────────────────────────────── */
-static void device_start(Device *d) {
-    d->enabled = 1;  /* stop→start 재사용 시 enabled 복원 */
-    int err;
-    d->quit_cap = d->quit_play = 0;
-    if (d->mode != 2) {
-        d->cap_src = src_new(SRC_SINC_FASTEST, d->channels, &err);
-        pi_reset(&d->cap_pi);
-        rb_init(&d->in_ring,  RING_FRAMES, d->channels);
-        d->cap_fade_buf = calloc((size_t)(PERIOD_FRAMES * d->channels), sizeof(float));
-        d->cap_fade_cnt = 0;
-        pthread_create(&d->cap_tid,  NULL, alsa_capture_thread,  d);
-    }
-    if (d->mode != 1) {
-        d->play_src = src_new(SRC_SINC_FASTEST, d->channels, &err);
-        pi_reset(&d->play_pi);
-        rb_init(&d->out_ring, RING_FRAMES, d->channels);
-        pthread_create(&d->play_tid, NULL, alsa_playback_thread, d);
-    }
-    printf("bridge:%s:ready\n", d->name);
-    fflush(stdout);
-}
-
-static void device_stop(Device *d) {
-    /* DSP 스레드가 이 장치의 링버퍼를 건너뛰도록 먼저 비활성화.
-     * DSP 루프 최대 1주기(~11ms)가 끝날 때까지 대기한 뒤 메모리를 해제한다.
-     * 이렇게 하지 않으면 DSP 스레드가 해제된 메모리에 접근해 SIGSEGV가 발생한다. */
-    d->enabled = 0;
-    __sync_synchronize();
-    usleep(25000);  /* ≥2 DSP 주기 대기 (~21ms) */
-
-    if (d->mode != 2) {
-        d->quit_cap = 1;
-        pthread_join(d->cap_tid, NULL);
-        if (d->cap_src)      { src_delete(d->cap_src); d->cap_src = NULL; }
-        if (d->in_ring.buf)  { free(d->in_ring.buf);   d->in_ring.buf = NULL; }
-        if (d->cap_fade_buf) { free(d->cap_fade_buf);  d->cap_fade_buf = NULL; }
-    }
-    if (d->mode != 1) {
-        d->quit_play = 1;
-        pthread_join(d->play_tid, NULL);
-        if (d->play_src) { src_delete(d->play_src); d->play_src = NULL; }
-        if (d->out_ring.buf) { free(d->out_ring.buf); d->out_ring.buf = NULL; }
-    }
-    printf("bridge:%s:stopped\n", d->name);
-    fflush(stdout);
-}
-
-/* ── RTP shm 헬퍼 ────────────────────────────────────── */
-static int shmbuf_open(ShmBuf *r, int is_out) {
-    /* 이전 잔여 shm 제거 후 새로 생성 */
+/* ── RTP shm 헬퍼 ────────────────────────────────────────────────── */
+static int shmbuf_open(ShmBuf *r, int is_out)
+{
     shm_unlink(r->shm_name);
-
     r->fd = shm_open(r->shm_name, O_RDWR | O_CREAT | O_TRUNC, 0666);
     if (r->fd < 0) {
         fprintf(stderr, "[aoip_engine] shm_open(%s) failed: %s\n",
@@ -1037,27 +464,26 @@ static int shmbuf_open(ShmBuf *r, int is_out) {
         r->shm = NULL;
         return 0;
     }
-    /* 초기화: ftruncate 후 OS가 페이지를 0으로 보장하므로 buf memset 불필요.
-     * ring_frames를 마지막에 써서 rtp_send의 준비 완료 감지에 사용. */
     atomic_init(&r->shm->wp, 0u);
     atomic_init(&r->shm->rp, 0u);
     r->shm->channels = r->channels;
     __atomic_store_n(&r->shm->ring_frames, SHM_RING_FRAMES, __ATOMIC_RELEASE);
-
     fprintf(stderr, "[aoip_engine] rtp_%s '%s' shm=%s ch=%d ch_start=%d\n",
             is_out ? "out" : "in", r->name, r->shm_name, r->channels, r->ch_start);
     return 1;
 }
 
-static void shmbuf_close(ShmBuf *r) {
+static void shmbuf_close(ShmBuf *r)
+{
     if (r->shm) { munmap(r->shm, SHMRING_SIZE); r->shm = NULL; }
     if (r->fd >= 0) { close(r->fd); r->fd = -1; }
     shm_unlink(r->shm_name);
     r->enabled = 0;
 }
 
-/* ── EQ 타입 파서 ────────────────────────────────────── */
-static EqType parse_eq_type(const char *s) {
+/* ── EQ 타입 파서 ────────────────────────────────────────────────── */
+static EqType parse_eq_type(const char *s)
+{
     if (!strcmp(s, "loshelf")) return T_LOSHELF;
     if (!strcmp(s, "hishelf")) return T_HISHELF;
     if (!strcmp(s, "lp"))      return T_LP;
@@ -1065,8 +491,9 @@ static EqType parse_eq_type(const char *s) {
     return T_PEAK;
 }
 
-/* ── stdin 명령 루프 ─────────────────────────────────── */
-static void cmd_loop(void) {
+/* ── stdin 명령 루프 ─────────────────────────────────────────────── */
+static void cmd_loop(void)
+{
     char line[512];
     while (fgets(line, sizeof(line), stdin)) {
         char *tok[16]; int n = 0;
@@ -1080,9 +507,7 @@ static void cmd_loop(void) {
         if (!strcmp(verb, "bridge") && n >= 3) {
             const char *sub  = tok[1];
             const char *name = tok[2];
-
             if ((!strcmp(sub, "add") || !strcmp(sub, "add_in") || !strcmp(sub, "add_out")) && n >= 8) {
-                /* 동일 이름 장치가 이미 있으면 재사용 (stop 후 재설정) */
                 Device *d = NULL;
                 for (int i = 0; i < g_n_dev; i++)
                     if (!strcmp(g_dev[i].name, name)) { d = &g_dev[i]; break; }
@@ -1102,8 +527,6 @@ static void cmd_loop(void) {
                 d->mode     = !strcmp(sub, "add_in")  ? 1 :
                               !strcmp(sub, "add_out") ? 2 : 0;
                 d->enabled  = 1;
-                /* AES67/RAVENNA 디바이스는 데몬 수신 스레드 간섭 방지를 위해
-                   낮은 우선순위 사용 (기타 브릿지는 FIFO 80 유지) */
                 d->thread_priority = strstr(d->dev, "RAVENNA") ? g_prio_ravenna : g_prio_alsa;
                 device_start(d);
             } else if (!strcmp(sub, "start")) {
@@ -1143,20 +566,12 @@ static void cmd_loop(void) {
                 snprintf(r->shm_name, sizeof(r->shm_name), "%s", tok[3]);
                 r->channels = n >= 5 ? atoi(tok[4]) : 2;
                 r->ch_start = n >= 6 ? atoi(tok[5]) : g_n_rtp_in * 2;
-                r->enabled  = 1;
-                r->fd       = -1;
-                r->shm      = NULL;
-                if (shmbuf_open(r, 0))
-                    g_n_rtp_in++;
-                else
-                    r->enabled = 0;
+                r->enabled  = 1; r->fd = -1; r->shm = NULL;
+                if (shmbuf_open(r, 0)) g_n_rtp_in++;
+                else                   r->enabled = 0;
             } else if (!strcmp(sub, "remove")) {
-                for (int i = 0; i < g_n_rtp_in; i++) {
-                    if (!strcmp(g_rtp_in[i].name, name)) {
-                        shmbuf_close(&g_rtp_in[i]);
-                        break;
-                    }
-                }
+                for (int i = 0; i < g_n_rtp_in; i++)
+                    if (!strcmp(g_rtp_in[i].name, name)) { shmbuf_close(&g_rtp_in[i]); break; }
             }
             continue;
         }
@@ -1171,20 +586,12 @@ static void cmd_loop(void) {
                 snprintf(r->shm_name, sizeof(r->shm_name), "%s", tok[3]);
                 r->channels = n >= 5 ? atoi(tok[4]) : 2;
                 r->ch_start = n >= 6 ? atoi(tok[5]) : g_n_rtp_out * 2;
-                r->enabled  = 1;
-                r->fd       = -1;
-                r->shm      = NULL;
-                if (shmbuf_open(r, 1))
-                    g_n_rtp_out++;
-                else
-                    r->enabled = 0;
+                r->enabled  = 1; r->fd = -1; r->shm = NULL;
+                if (shmbuf_open(r, 1)) g_n_rtp_out++;
+                else                   r->enabled = 0;
             } else if (!strcmp(sub, "remove")) {
-                for (int i = 0; i < g_n_rtp_out; i++) {
-                    if (!strcmp(g_rtp_out[i].name, name)) {
-                        shmbuf_close(&g_rtp_out[i]);
-                        break;
-                    }
-                }
+                for (int i = 0; i < g_n_rtp_out; i++)
+                    if (!strcmp(g_rtp_out[i].name, name)) { shmbuf_close(&g_rtp_out[i]); break; }
             }
             continue;
         }
@@ -1219,18 +626,15 @@ static void cmd_loop(void) {
             } else if (!strcmp(param, "freq")) {
                 cs->hpf_freq = (float)atof(tok[4]);
                 BqCoeffs c; calc_hpf(&c, cs->hpf_freq, g_sr);
-                cmd.type = CMD_HPF_COEFFS; cmd.band = 0; cmd.coeffs = c;
-                cmd_push(&cmd);
+                cmd.type = CMD_HPF_COEFFS; cmd.band = 0; cmd.coeffs = c; cmd_push(&cmd);
                 if (cs->hpf_slope >= 24) { cmd.band = 1; cmd_push(&cmd); }
             } else if (!strcmp(param, "slope")) {
                 cs->hpf_slope = atoi(tok[4]);
                 int stages = (cs->hpf_slope >= 24) ? 2 : 1;
-                cmd.type = CMD_HPF_STAGES; cmd.flag = stages;
-                cmd_push(&cmd);
+                cmd.type = CMD_HPF_STAGES; cmd.flag = stages; cmd_push(&cmd);
                 if (cs->hpf_freq > 0.0f) {
                     BqCoeffs c; calc_hpf(&c, cs->hpf_freq, g_sr);
-                    cmd.type = CMD_HPF_COEFFS; cmd.band = 0; cmd.coeffs = c;
-                    cmd_push(&cmd);
+                    cmd.type = CMD_HPF_COEFFS; cmd.band = 0; cmd.coeffs = c; cmd_push(&cmd);
                     if (stages > 1) { cmd.band = 1; cmd_push(&cmd); }
                 }
             }
@@ -1241,12 +645,10 @@ static void cmd_loop(void) {
             cmd.band = band;
             const char *param = tok[4];
             if (!strcmp(param, "enable")) {
-                cmd.type = CMD_EQ_ENABLE; cmd.flag = atoi(tok[5]);
-                cmd_push(&cmd);
+                cmd.type = CMD_EQ_ENABLE; cmd.flag = atoi(tok[5]); cmd_push(&cmd);
             } else if (!strcmp(param, "coeffs") && n >= 10) {
                 BqCoeffs c = {atof(tok[5]),atof(tok[6]),atof(tok[7]),atof(tok[8]),atof(tok[9])};
-                cmd.type = CMD_EQ_COEFFS; cmd.coeffs = c;
-                cmd_push(&cmd);
+                cmd.type = CMD_EQ_COEFFS; cmd.coeffs = c; cmd_push(&cmd);
             } else {
                 if      (!strcmp(param, "freq")) cs->eq[band].freq    = (float)atof(tok[5]);
                 else if (!strcmp(param, "gain")) cs->eq[band].gain_db = (float)atof(tok[5]);
@@ -1256,16 +658,14 @@ static void cmd_loop(void) {
                 BqCoeffs c;
                 calc_eq(&c, cs->eq[band].type, cs->eq[band].freq,
                         cs->eq[band].gain_db, cs->eq[band].q, g_sr);
-                cmd.type = CMD_EQ_COEFFS; cmd.coeffs = c;
-                cmd_push(&cmd);
+                cmd.type = CMD_EQ_COEFFS; cmd.coeffs = c; cmd_push(&cmd);
             }
 
         } else if (!strcmp(verb, "limiter") && n >= 5) {
             if (dir != 1) continue;
             const char *param = tok[3];
             if (!strcmp(param, "enable")) {
-                cmd.type = CMD_LIMITER_ENABLE; cmd.flag = atoi(tok[4]);
-                cmd_push(&cmd);
+                cmd.type = CMD_LIMITER_ENABLE; cmd.flag = atoi(tok[4]); cmd_push(&cmd);
             } else {
                 if      (!strcmp(param, "threshold")) cs->lim.threshold_db = (float)atof(tok[4]);
                 else if (!strcmp(param, "attack"))    cs->lim.attack_ms    = fmaxf(0.1f,(float)atof(tok[4]));
@@ -1274,15 +674,15 @@ static void cmd_loop(void) {
                 else continue;
                 LimCoeffs lc = calc_limiter(cs->lim.threshold_db, cs->lim.attack_ms,
                                             cs->lim.release_ms,   cs->lim.makeup_db, g_sr);
-                cmd.type = CMD_LIMITER_PARAMS; cmd.lim_coeffs = lc;
-                cmd_push(&cmd);
+                cmd.type = CMD_LIMITER_PARAMS; cmd.lim_coeffs = lc; cmd_push(&cmd);
             }
         }
     }
 }
 
-/* ── main ────────────────────────────────────────────── */
-int main(int argc, char *argv[]) {
+/* ── main ────────────────────────────────────────────────────────── */
+int main(int argc, char *argv[])
+{
     signal(SIGPIPE, SIG_IGN);
     if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
         fprintf(stderr, "[aoip_engine] mlockall failed: %s\n", strerror(errno));
@@ -1293,21 +693,21 @@ int main(int argc, char *argv[]) {
     }
     g_n_in  = atoi(argv[1]);
     g_n_out = atoi(argv[2]);
-    if (g_n_in  < 0 || g_n_in  > MAX_CH ||
-        g_n_out < 0 || g_n_out > MAX_CH) {
+    if (g_n_in < 0 || g_n_in > MAX_CH || g_n_out < 0 || g_n_out > MAX_CH) {
         fprintf(stderr, "[aoip_engine] channel count out of range (max %d)\n", MAX_CH);
         return 1;
     }
 
     const char *name = "aoip_engine";
     for (int i = 3; i < argc; i++) {
-        if (!strcmp(argv[i], "--name")              && i+1 < argc) name             = argv[++i];
+        if      (!strcmp(argv[i], "--name")         && i+1 < argc) name             = argv[++i];
         else if (!strcmp(argv[i], "--dsp-prio")     && i+1 < argc) g_prio_dsp     = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--alsa-prio")    && i+1 < argc) g_prio_alsa    = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ravenna-prio") && i+1 < argc) g_prio_ravenna = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bypass-dsp"))                 g_bypass_all_dsp = 1;
     }
 
+    /* 채널 초기 상태 */
     for (int i = 0; i < g_n_in; i++) {
         g_in_state[i].hpf_freq  = 80.0f;
         g_in_state[i].hpf_slope = 12;
@@ -1346,7 +746,6 @@ int main(int argc, char *argv[]) {
 
     memset(g_route, 0, sizeof(g_route));
 
-    /* RTP shm 슬롯 초기화 */
     for (int i = 0; i < MAX_RTP; i++) {
         g_rtp_in[i].fd  = -1; g_rtp_in[i].shm  = NULL;
         g_rtp_out[i].fd = -1; g_rtp_out[i].shm = NULL;
@@ -1376,7 +775,6 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < g_n_dev; i++)
         if (g_dev[i].enabled) device_stop(&g_dev[i]);
 
-    /* RTP shm 정리 */
     for (int i = 0; i < g_n_rtp_in; i++)
         if (g_rtp_in[i].enabled) shmbuf_close(&g_rtp_in[i]);
     for (int i = 0; i < g_n_rtp_out; i++)

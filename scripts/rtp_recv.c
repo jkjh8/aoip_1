@@ -36,20 +36,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/* ── ShmRing (aoip_engine.c 와 동일한 레이아웃) ──────── */
-#define SHM_RING_FRAMES  16384
-#define SHM_MAX_CH       8
-
-typedef struct {
-    _Atomic uint32_t wp;
-    _Atomic uint32_t rp;
-    int32_t  channels;
-    int32_t  ring_frames;
-    uint8_t  _pad[48];
-    float    buf[SHM_RING_FRAMES * SHM_MAX_CH];
-} ShmRing;
-
-#define SHMRING_SIZE ((size_t)sizeof(ShmRing))
+/* ShmRing 레이아웃은 aoip_engine.c 와 공유 */
+#include "include/shm_ring.h"
 
 /* ── globals ─────────────────────────────────────── */
 static int             g_ch      = 2;

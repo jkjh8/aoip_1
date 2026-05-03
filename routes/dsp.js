@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { isDspRunning } from '../lib/dsp.js';
-import { getDspChannelCounts } from '../lib/channels.js';
+import { isDspRunning } from '../lib/dsp/index.js';
+import { getDspChannelCounts } from '../lib/channels/index.js';
 
 const router = Router();
 

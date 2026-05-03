@@ -42,7 +42,7 @@ static int g_prio_ravenna = 95;
 typedef enum {
     CMD_GAIN, CMD_MUTE, CMD_BYPASS,
     CMD_HPF_ENABLE, CMD_HPF_COEFFS, CMD_HPF_STAGES,
-    CMD_EQ_ENABLE, CMD_EQ_COEFFS,
+    CMD_EQ_ENABLE, CMD_EQ_COEFFS, CMD_EQ_GLOBAL_ENABLE,
     CMD_LIMITER_ENABLE, CMD_LIMITER_PARAMS,
     CMD_ROUTE_SET,
 } CmdType;
@@ -90,6 +90,7 @@ typedef struct {
     int     muted, bypass_dsp;
     int     hpf_enabled, hpf_stages;
     Biquad  hpf[2];
+    int     eq_global_enabled;          /* EQ 섹션 전체 on/off */
     int     eq_enabled[MAX_EQ_BANDS];
     Biquad  eq[MAX_EQ_BANDS];
     Limiter lim;
@@ -132,6 +133,21 @@ static volatile float g_lim_post[MAX_CH];
 
 static volatile int g_reporter_running = 0;
 
+/* ── 병렬 DSP 워커 ────────────────────────────────────────────────── */
+typedef struct {
+    int id;
+    int ch_start;
+    int ch_count;
+    int n_in;
+    int n_out;
+} WorkerArg;
+
+static WorkerArg         g_worker_arg[DSP_WORKER_COUNT];
+static pthread_t         g_worker_tid[DSP_WORKER_COUNT];
+static pthread_barrier_t g_barrier_work_start;
+static pthread_barrier_t g_barrier_work_done;
+static volatile int      g_worker_quit = 0;
+
 typedef struct {
     float hpf_freq; int hpf_slope;
     struct { float freq, gain_db, q; EqType type; } eq[MAX_EQ_BANDS];
@@ -160,6 +176,7 @@ static void apply_cmd(const Cmd *cmd)
         bq->a1=(float)cmd->coeffs.a1; bq->a2=(float)cmd->coeffs.a2; break;
     }
     case CMD_EQ_ENABLE: ch->eq_enabled[cmd->band] = cmd->flag; break;
+    case CMD_EQ_GLOBAL_ENABLE: ch->eq_global_enabled = cmd->flag; break;
     case CMD_EQ_COEFFS: {
         Biquad *bq = &ch->eq[cmd->band];
         bq->b0=(float)cmd->coeffs.b0; bq->b1=(float)cmd->coeffs.b1; bq->b2=(float)cmd->coeffs.b2;
@@ -180,9 +197,129 @@ static void apply_cmd(const Cmd *cmd)
     }
 }
 
-/* ── DSP 스레드 마스터 루프 ──────────────────────────────────────── */
+/* ── DSP 처리 함수 (채널 슬라이스 단위, 워커/마스터 공용) ─────────── */
 static float g_in_buf[MAX_CH][PERIOD_FRAMES];
 static float g_out_buf[MAX_CH][PERIOD_FRAMES];
+
+static void process_input_dsp(int ch_start, int ch_count, int n_in)
+{
+    for (int ch = ch_start; ch < ch_start + ch_count && ch < n_in; ch++) {
+        Channel *ic  = &g_in_ch[ch];
+        float   *buf = g_in_buf[ch];
+        if (ic->muted) {
+            memset(buf, 0, PERIOD_FRAMES * sizeof(float));
+            ic->gain_cur = ic->gain_tgt;
+            continue;
+        }
+        if (!ic->bypass_dsp && !g_bypass_all_dsp) {
+            if (ic->hpf_enabled) {
+                for (int i = 0; i < PERIOD_FRAMES; i++)
+                    buf[i] = bq_process(&ic->hpf[0], buf[i]);
+                if (ic->hpf_stages >= 2)
+                    for (int i = 0; i < PERIOD_FRAMES; i++)
+                        buf[i] = bq_process(&ic->hpf[1], buf[i]);
+            }
+            if (ic->eq_global_enabled) {
+                for (int b = 0; b < MAX_EQ_BANDS; b++) {
+                    if (!ic->eq_enabled[b]) continue;
+                    for (int i = 0; i < PERIOD_FRAMES; i++)
+                        buf[i] = bq_process(&ic->eq[b], buf[i]);
+                }
+            }
+        }
+        float cur  = ic->gain_cur;
+        float step = (ic->gain_tgt - cur) / (float)PERIOD_FRAMES;
+        float peak = 0.0f;
+        for (int i = 0; i < PERIOD_FRAMES; i++) {
+            cur += step;
+            buf[i] *= cur;
+            float ap = fabsf(buf[i]);
+            if (ap > peak) peak = ap;
+        }
+        ic->gain_cur = ic->gain_tgt;
+        if (peak > g_in_level[ch]) g_in_level[ch] = peak;
+    }
+}
+
+static void process_routing(int out_start, int out_count, int n_in, int n_out)
+{
+    for (int out = out_start; out < out_start + out_count && out < n_out; out++) {
+        memset(g_out_buf[out], 0, PERIOD_FRAMES * sizeof(float));
+        for (int in = 0; in < n_in; in++) {
+            float gain = g_route[out][in];
+            if (gain == 0.0f) continue;
+            for (int f = 0; f < PERIOD_FRAMES; f++)
+                g_out_buf[out][f] += g_in_buf[in][f] * gain;
+        }
+    }
+}
+
+static void process_output_dsp(int ch_start, int ch_count, int n_out)
+{
+    for (int ch = ch_start; ch < ch_start + ch_count && ch < n_out; ch++) {
+        Channel *oc  = &g_out_ch[ch];
+        float   *buf = g_out_buf[ch];
+        if (oc->muted) {
+            memset(buf, 0, PERIOD_FRAMES * sizeof(float));
+            oc->gain_cur = oc->gain_tgt;
+            continue;
+        }
+        if (!oc->bypass_dsp && !g_bypass_all_dsp) {
+            if (oc->eq_global_enabled) {
+                for (int b = 0; b < MAX_EQ_BANDS; b++) {
+                    if (!oc->eq_enabled[b]) continue;
+                    for (int i = 0; i < PERIOD_FRAMES; i++)
+                        buf[i] = bq_process(&oc->eq[b], buf[i]);
+                }
+            }
+            if (oc->lim.enabled) {
+                float pre_peak = 0.0f;
+                for (int i = 0; i < PERIOD_FRAMES; i++) {
+                    float ap = fabsf(buf[i]);
+                    if (ap > pre_peak) pre_peak = ap;
+                    buf[i] = lim_process(&oc->lim, buf[i]);
+                }
+                if (pre_peak > g_lim_pre[ch]) g_lim_pre[ch] = pre_peak;
+            }
+        }
+        float cur  = oc->gain_cur;
+        float step = (oc->gain_tgt - cur) / (float)PERIOD_FRAMES;
+        float peak = 0.0f;
+        for (int i = 0; i < PERIOD_FRAMES; i++) {
+            cur += step;
+            buf[i] *= cur;
+            float ap = fabsf(buf[i]);
+            if (ap > peak) peak = ap;
+        }
+        oc->gain_cur = oc->gain_tgt;
+        if (peak > g_out_level[ch]) g_out_level[ch] = peak;
+        if (oc->lim.enabled && peak > g_lim_post[ch]) g_lim_post[ch] = peak;
+    }
+}
+
+static void *dsp_worker_thread(void *arg)
+{
+    WorkerArg *w = (WorkerArg *)arg;
+
+    struct sched_param sp = { .sched_priority = g_prio_dsp };
+    pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+
+    /* RT 스택 page-fault 방지 */
+    volatile char stack_touch[4096];
+    memset((void *)stack_touch, 0, sizeof(stack_touch));
+
+    while (!g_worker_quit) {
+        pthread_barrier_wait(&g_barrier_work_start);
+        if (g_worker_quit) break;
+        process_input_dsp(w->ch_start, w->ch_count, w->n_in);
+        process_routing(w->ch_start, w->ch_count, w->n_in, w->n_out);
+        process_output_dsp(w->ch_start, w->ch_count, w->n_out);
+        pthread_barrier_wait(&g_barrier_work_done);
+    }
+    return NULL;
+}
+
+/* ── DSP 스레드 마스터 루프 ──────────────────────────────────────── */
 
 static void *dsp_thread(void *arg)
 {
@@ -309,63 +446,19 @@ static void *dsp_thread(void *arg)
             }
         }
 
-        /* ── 입력 DSP: HPF → EQ → gain ramp → level meter ── */
-        for (int ch = 0; ch < g_n_in; ch++) {
-            Channel *ic  = &g_in_ch[ch];
-            float   *buf = g_in_buf[ch];
-            if (ic->muted) {
-                memset(buf, 0, PERIOD_FRAMES*sizeof(float));
-                ic->gain_cur = ic->gain_tgt;
-                continue;
-            }
-            float cur  = ic->gain_cur;
-            float step = (ic->gain_tgt - cur) / (float)PERIOD_FRAMES;
-            for (int i = 0; i < PERIOD_FRAMES; i++) {
-                float s = buf[i];
-                float peak = fabsf(s);
-                if (peak > g_in_level[ch]) g_in_level[ch] = peak;
-                cur += step;
-                buf[i] = s * cur;
-            }
-            ic->gain_cur = ic->gain_tgt;
+        /* ── 병렬 DSP: 입력 DSP + 라우팅 + 출력 DSP ── */
+        /* 워커에 채널 수 전달 (배리어 전 — 워커는 아직 대기 중) */
+        for (int w = 0; w < DSP_WORKER_COUNT; w++) {
+            g_worker_arg[w].n_in  = g_n_in;
+            g_worker_arg[w].n_out = g_n_out;
         }
-
-        /* ── 라우팅 매트릭스 믹싱 ── */
-        for (int out = 0; out < g_n_out; out++) {
-            memset(g_out_buf[out], 0, PERIOD_FRAMES*sizeof(float));
-            for (int in = 0; in < g_n_in; in++) {
-                float gain = g_route[out][in];
-                if (gain == 0.0f) continue;
-                for (int f = 0; f < PERIOD_FRAMES; f++)
-                    g_out_buf[out][f] += g_in_buf[in][f] * gain;
-            }
-        }
-
-        /* ── 출력 DSP: EQ → limiter → gain ramp → level meter ── */
-        for (int ch = 0; ch < g_n_out; ch++) {
-            Channel *oc  = &g_out_ch[ch];
-            float   *buf = g_out_buf[ch];
-            if (oc->muted) {
-                memset(buf, 0, PERIOD_FRAMES*sizeof(float));
-                oc->gain_cur = oc->gain_tgt;
-                continue;
-            }
-            float cur  = oc->gain_cur;
-            float step = (oc->gain_tgt - cur) / (float)PERIOD_FRAMES;
-            for (int i = 0; i < PERIOD_FRAMES; i++) {
-                float s = buf[i];
-                if (!oc->bypass_dsp && !g_bypass_all_dsp) {
-                    float post_peak = fabsf(s);
-                    if (post_peak > g_out_level[ch]) g_out_level[ch] = post_peak;
-                } else {
-                    float peak = fabsf(s);
-                    if (peak > g_out_level[ch]) g_out_level[ch] = peak;
-                }
-                cur += step;
-                buf[i] = s * cur;
-            }
-            oc->gain_cur = oc->gain_tgt;
-        }
+        /* 워커 해제 + 마스터는 ch 0..(DSP_WORKER_CH-1) 담당 */
+        pthread_barrier_wait(&g_barrier_work_start);
+        process_input_dsp(0, DSP_WORKER_CH, g_n_in);
+        process_routing(0, DSP_WORKER_CH, g_n_in, g_n_out);
+        process_output_dsp(0, DSP_WORKER_CH, g_n_out);
+        /* 워커(ch DSP_WORKER_CH 이상) 완료 대기 */
+        pthread_barrier_wait(&g_barrier_work_done);
 
         /* ── 출력 기록: ALSA 장치 ── */
         for (int di = 0; di < g_n_dev; di++) {
@@ -639,6 +732,9 @@ static void cmd_loop(void)
                 }
             }
 
+        } else if (!strcmp(verb, "eq") && n >= 5 && !strcmp(tok[3], "global")) {
+            cmd.type = CMD_EQ_GLOBAL_ENABLE; cmd.flag = atoi(tok[4]); cmd_push(&cmd);
+
         } else if (!strcmp(verb, "eq") && n >= 6) {
             int band = atoi(tok[3]);
             if (band < 0 || band >= MAX_EQ_BANDS) continue;
@@ -718,8 +814,9 @@ int main(int argc, char *argv[])
             g_in_state[i].eq[b].q       = 0.7f;
             g_in_state[i].eq[b].type    = T_PEAK;
         }
-        g_in_ch[i].gain_tgt = g_in_ch[i].gain_cur = 1.0f;
-        g_in_ch[i].lim.gr   = 1.0f;
+        g_in_ch[i].gain_tgt        = g_in_ch[i].gain_cur = 1.0f;
+        g_in_ch[i].lim.gr          = 1.0f;
+        g_in_ch[i].eq_global_enabled = 1;
     }
     for (int i = 0; i < g_n_out; i++) {
         g_out_state[i].hpf_freq  = 80.0f;
@@ -740,8 +837,9 @@ int main(int argc, char *argv[])
         g_out_ch[i].lim.attack_coef  = lc.attack_coef;
         g_out_ch[i].lim.release_coef = lc.release_coef;
         g_out_ch[i].lim.makeup       = lc.makeup;
-        g_out_ch[i].lim.gr           = 1.0f;
-        g_out_ch[i].gain_tgt = g_out_ch[i].gain_cur = 1.0f;
+        g_out_ch[i].lim.gr             = 1.0f;
+        g_out_ch[i].gain_tgt           = g_out_ch[i].gain_cur = 1.0f;
+        g_out_ch[i].eq_global_enabled  = 1;
     }
 
     memset(g_route, 0, sizeof(g_route));
@@ -753,6 +851,16 @@ int main(int argc, char *argv[])
 
     signal(SIGTERM, sig_handler);
     signal(SIGINT,  sig_handler);
+
+    /* 병렬 DSP 워커 초기화 */
+    pthread_barrier_init(&g_barrier_work_start, NULL, DSP_WORKER_COUNT + 1);
+    pthread_barrier_init(&g_barrier_work_done,  NULL, DSP_WORKER_COUNT + 1);
+    for (int w = 0; w < DSP_WORKER_COUNT; w++) {
+        g_worker_arg[w].id       = w;
+        g_worker_arg[w].ch_start = (w + 1) * DSP_WORKER_CH;  /* 마스터가 0 담당, 워커는 그 이상 */
+        g_worker_arg[w].ch_count = DSP_WORKER_CH;
+        pthread_create(&g_worker_tid[w], NULL, dsp_worker_thread, &g_worker_arg[w]);
+    }
 
     pthread_t dsp_tid;
     pthread_create(&dsp_tid, NULL, dsp_thread, NULL);
@@ -771,6 +879,15 @@ int main(int argc, char *argv[])
     g_reporter_running = 0;
     pthread_join(rep_tid, NULL);
     pthread_join(dsp_tid, NULL);
+
+    /* 워커 스레드 종료 */
+    g_worker_quit = 1;
+    pthread_barrier_wait(&g_barrier_work_start);  /* 대기 중인 워커 해제 */
+    pthread_barrier_wait(&g_barrier_work_done);
+    for (int w = 0; w < DSP_WORKER_COUNT; w++)
+        pthread_join(g_worker_tid[w], NULL);
+    pthread_barrier_destroy(&g_barrier_work_start);
+    pthread_barrier_destroy(&g_barrier_work_done);
 
     for (int i = 0; i < g_n_dev; i++)
         if (g_dev[i].enabled) device_stop(&g_dev[i]);

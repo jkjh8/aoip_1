@@ -1,5 +1,5 @@
-import { getChannels, setHpf, setEqBand, setLimiter } from '../lib/channels.js';
-import { isDspRunning, sendHpf, sendEqBand, sendLimiter } from '../lib/dsp.js';
+import { getChannels, setHpf, setEqBand, setEqEnabled, setLimiter } from '../lib/channels/index.js';
+import { isDspRunning, sendHpf, sendEqBand, sendEqEnabled, sendLimiter } from '../lib/dsp/index.js';
 
 export default function register(socket, { io, getCached, limiterWatchers }) {
   const hpfTimers  = new Map();
@@ -45,6 +45,15 @@ export default function register(socket, { io, getCached, limiterWatchers }) {
             sendEqBand(p.type === 'input' ? 'in' : 'out', p.id, p.band, p.params);
         }, 60));
       }
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  socket.on('dsp:eq_toggle', ({ type, id, enabled } = {}, cb) => {
+    try {
+      setEqEnabled(type, id, enabled);
+      if (isDspRunning()) sendEqEnabled(type === 'input' ? 'in' : 'out', id, enabled);
+      io.emit('channels', getChannels(getCached()));
+      cb?.({ ok: true });
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 

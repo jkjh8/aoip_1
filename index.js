@@ -17,19 +17,19 @@ import aes67Routes   from './routes/aes67.js';
 import { setupSocket } from './socket/index.js';
 import logger from './lib/logger.js';
 
-import { connect }                                                                from './lib/jack.js';
 import { startBridges, stopBridges, startUsbGadgetWatcher, killOrphanBridges } from './lib/bridges.js';
 import { startRxPipeline, startTxClient,
          waitForRxReady, waitForTxReady,
          startRtpStreams, waitForRtpStreamsReady,
-         getRtpStreamStatus }                         from './lib/gstreamer.js';
+         getRtpStreamStatus }                         from './lib/rtp/index.js';
 import { getChannels,
          getSavedRoutes,
-         getDspChannelCounts }                       from './lib/channels.js';
+         getDspChannelCounts }                       from './lib/channels/index.js';
 import { startDsp, sendGain, sendMute,
          sendBypass, sendAllDsp,
          sendToEngine, waitForDspReady,
-         addEngineRestartListener }                  from './lib/dsp.js';
+         addEngineRestartListener,
+         connect }                                   from './lib/dsp/index.js';
 import { getConfig } from './lib/config.js';
 import { getDaemonStatus } from './lib/aes67daemon.js';
 

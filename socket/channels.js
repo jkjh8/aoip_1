@@ -1,6 +1,5 @@
-import { getChannels, setGain, setMute, setLabel, addRoute, removeRoute } from '../lib/channels.js';
-import { sendGain, sendMute, sendBypass, sendAllDsp } from '../lib/dsp.js';
-import { connect, disconnect } from '../lib/jack.js';
+import { getChannels, setGain, setMute, setLabel, addRoute, removeRoute } from '../lib/channels/index.js';
+import { sendGain, sendMute, sendBypass, sendAllDsp, connect, disconnect } from '../lib/dsp/index.js';
 
 export default function register(socket, { broadcastStatus }) {
   // ── 라우팅 매트릭스 ──────────────────────────────────

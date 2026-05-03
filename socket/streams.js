@@ -5,7 +5,7 @@ import {
   getRtpStreamStatus, getRtpStreamDetail,
   addRtpOutTarget, removeRtpOutTarget, setRtpOutCodec,
   updateRtpInConfig, stopRtpStream, startRtpStream,
-} from '../lib/gstreamer.js';
+} from '../lib/rtp/index.js';
 
 function parseUpdates({ port, protocol, address, sampleRate, codec, bitrate, bufferMs, channels, targets } = {}) {
   const u = {};

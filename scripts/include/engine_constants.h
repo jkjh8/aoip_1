@@ -9,5 +9,7 @@
 #define MAX_EQ_BANDS    4
 #define CMD_RING_SIZE   128
 #define GAIN_MAX        2.0f
+#define DSP_WORKER_COUNT 2
+#define DSP_WORKER_CH   (MAX_CH / DSP_WORKER_COUNT)
 #define FILL_TARGET     (RING_FRAMES / 4)
 #define PREBUF_FRAMES   (RING_FRAMES / 8)

@@ -8,7 +8,7 @@ import {
   startRtpStream, stopRtpStream,
   updateRtpInConfig, updateRtpOutConfig,
   addRtpOutTarget, removeRtpOutTarget, setRtpOutCodec,
-} from '../lib/gstreamer.js';
+} from '../lib/rtp/index.js';
 
 function parseBody(body = {}) {
   const updates = {};

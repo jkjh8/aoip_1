@@ -1,0 +1,55 @@
+[Unit]
+Description=AES67 Linux Daemon
+After=network-online.target ptp4l.service
+Wants=network-online.target
+Requires=ptp4l.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/kjh/aoip_1/install/aes67
+
+# 우선순위 설정
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=90
+Nice=-10
+
+# CPU 격리: JACK(CPU3)과 분리
+# CPUAffinity=2 3
+
+# 커널 모듈 로드 (modprobe — /lib/modules 영구 설치 기반)
+ExecStartPre=-/sbin/modprobe -r MergingRavennaALSA
+ExecStartPre=/sbin/modprobe MergingRavennaALSA
+
+# CPU 스케일링 비활성화
+ExecStartPre=/home/kjh/aoip_1/install/aes67/scripts/disable_cpu_scaling.sh
+
+# 데몬 실행
+ExecStart=/home/kjh/aoip_1/install/aes67/aes67-daemon -c /home/kjh/aoip_1/install/aes67/daemon.conf
+
+# 종료 시 커널 모듈 언로드
+ExecStopPost=/sbin/modprobe -r MergingRavennaALSA
+
+# 메모리 스왑 방지
+LockMemory=yes
+
+# 보안 필터
+PrivateTmp=yes
+PrivateMounts=yes
+LockPersonality=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_NETLINK AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+RemoveIPC=yes
+UMask=077
+
+# 재시작 설정
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

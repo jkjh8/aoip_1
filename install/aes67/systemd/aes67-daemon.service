@@ -13,7 +13,7 @@ CPUSchedulingPolicy=fifo
 CPUSchedulingPriority=90
 Nice=-10
 
-# CPU 격리: JACK(CPU3)과 분리
+# CPU 격리: JACK(CPU3)과 분리 (필요 시 주석 해제)
 # CPUAffinity=2 3
 
 # 커널 모듈 로드 (modprobe — /lib/modules 영구 설치 기반)

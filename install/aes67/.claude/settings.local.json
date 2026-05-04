@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(file /home/kjh/aes67/driver/*.ko)",
+      "Bash(modinfo /home/kjh/aes67/driver/MergingRavennaALSA.ko)",
+      "Bash(find /home/kjh/aes67 -name Makefile -o -name *.c)",
+      "Bash(sudo apt:*)",
+      "Bash(make)",
+      "Bash(modinfo /tmp/aes67-linux-daemon/3rdparty/ravenna-alsa-lkm/driver/MergingRavennaALSA.ko)",
+      "Bash(sudo cp:*)",
+      "Bash(sudo insmod:*)",
+      "Bash(lsmod)"
+    ]
+  }
+}

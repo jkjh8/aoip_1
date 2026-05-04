@@ -1,0 +1,14 @@
+[Unit]
+Description=Merging Ravenna ALSA Kernel Module
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/modprobe MergingRavennaALSA
+ExecStartPost=/sbin/sysctl -w kernel.perf_cpu_time_max_percent=0
+ExecStop=/sbin/modprobe -r MergingRavennaALSA
+
+[Install]
+WantedBy=multi-user.target

@@ -1,8 +1,8 @@
 [Unit]
 Description=AoIP Backend
-After=network-online.target aoip-soundcard.service
+After=network-online.target aes67-daemon.service
 Wants=network-online.target
-Requires=aoip-soundcard.service
+Requires=aes67-daemon.service
 
 [Service]
 Type=simple

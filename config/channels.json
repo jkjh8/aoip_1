@@ -15,6 +15,7 @@
           "type": "output",
           "slope": 12
         },
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -64,6 +65,7 @@
           "enabled": false,
           "freq": 80
         },
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -105,7 +107,7 @@
       "label": "USB AUDIO IN 1",
       "jackPort": "usb:out_1",
       "srcPort": "USB Audio IN:audio_in_1",
-      "gain": 100,
+      "gain": 94,
       "muted": false,
       "bypassDsp": true,
       "dsp": {
@@ -113,6 +115,7 @@
           "enabled": false,
           "freq": 80
         },
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -154,7 +157,7 @@
       "label": "USB AUDIO IN 2",
       "jackPort": "usb:out_2",
       "srcPort": "USB Audio IN:audio_in_2",
-      "gain": 100,
+      "gain": 94,
       "muted": false,
       "bypassDsp": true,
       "dsp": {
@@ -162,6 +165,7 @@
           "enabled": false,
           "freq": 80
         },
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -211,6 +215,7 @@
           "enabled": false,
           "freq": 80
         },
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -260,6 +265,7 @@
           "enabled": false,
           "freq": 80
         },
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -309,6 +315,7 @@
           "enabled": false,
           "freq": 80
         },
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -358,6 +365,7 @@
           "enabled": false,
           "freq": 80
         },
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -405,6 +413,7 @@
       "muted": false,
       "bypassDsp": true,
       "dsp": {
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -465,6 +474,7 @@
       "muted": false,
       "bypassDsp": true,
       "dsp": {
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -517,6 +527,7 @@
       "muted": false,
       "bypassDsp": true,
       "dsp": {
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -569,6 +580,7 @@
       "muted": false,
       "bypassDsp": true,
       "dsp": {
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -621,6 +633,7 @@
       "muted": false,
       "bypassDsp": true,
       "dsp": {
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -673,6 +686,7 @@
       "muted": false,
       "bypassDsp": true,
       "dsp": {
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -725,6 +739,7 @@
       "muted": false,
       "bypassDsp": true,
       "dsp": {
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,
@@ -777,6 +792,7 @@
       "muted": false,
       "bypassDsp": true,
       "dsp": {
+        "eqEnabled": true,
         "eq": [
           {
             "enabled": false,

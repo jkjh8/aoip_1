@@ -1,0 +1,16 @@
+[Unit]
+Description=PTP Clock (AES67)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/ptp4l -i eth0 -H -m -q \
+  --tx_timestamp_timeout 100 \
+  --ptp_minor_version 0
+Restart=on-failure
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { startBridges, stopBridges, getBridgeStatus } from '../lib/bridges.js';
-import { getConfig } from '../lib/config.js';
+import { startBridges, stopBridges, getBridgeStatus } from '../../lib/bridges.js';
+import { getConfig } from '../../lib/config.js';
 
 const router = Router();
 

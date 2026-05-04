@@ -1,7 +1,7 @@
 import { Router } from 'express';
-import { getNetworkInfo, setStaticIp, setDhcp, rebootSystem } from '../lib/system.js';
-import { getConfig, saveConfig } from '../lib/config.js';
-import { setUsbGadgetEnabled, getUsbGadgetEnabled, isUdcConnected, restartUsbBridges } from '../lib/bridges.js';
+import { getNetworkInfo, setStaticIp, setDhcp, rebootSystem } from '../../lib/system.js';
+import { getConfig, saveConfig } from '../../lib/config.js';
+import { setUsbGadgetEnabled, getUsbGadgetEnabled, isUdcConnected, restartUsbBridges } from '../../lib/bridges.js';
 
 const router = Router();
 

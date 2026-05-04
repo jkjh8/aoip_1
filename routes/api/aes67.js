@@ -6,7 +6,7 @@ import {
   getSources, addSource, removeSource, getSourceSdp,
   getSinks, addSink, removeSink, getSinkStatus,
   browseAll, browseMdns, browseSap,
-} from '../lib/aes67daemon.js';
+} from '../../lib/aes67daemon.js';
 
 const router = Router();
 

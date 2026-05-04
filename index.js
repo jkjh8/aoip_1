@@ -6,31 +6,16 @@ import { createServer } from 'http';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import httpLogger from 'morgan';
-import cookieParser from 'cookie-parser'
+import cookieParser from 'cookie-parser';
 
-import bridgesRoutes from './routes/bridges.js';
-import streamsRoutes from './routes/streams.js';
-import dspRoutes     from './routes/dsp.js';
-import systemRoutes  from './routes/system.js';
-import aes67Routes   from './routes/aes67.js';
-
+import apiRoutes from './routes/index.js';
 import { setupSocket } from './socket/index.js';
 import logger from './lib/logger.js';
-
-import { startBridges, stopBridges, startUsbGadgetWatcher, killOrphanBridges } from './lib/bridges.js';
-import { startRxPipeline, startTxClient,
-         waitForRxReady, waitForTxReady,
-         startRtpStreams, waitForRtpStreamsReady,
-         getRtpStreamStatus }                         from './lib/rtp/index.js';
-import { getChannels,
-         getSavedRoutes,
-         getDspChannelCounts }                       from './lib/channels/index.js';
-import { startDsp, sendGain, sendMute,
-         sendBypass, sendAllDsp,
-         sendToEngine, waitForDspReady,
-         addEngineRestartListener,
-         connect }                                   from './lib/dsp/index.js';
 import { getConfig } from './lib/config.js';
+import { getDspChannelCounts, restoreRoutes, restoreDspState } from './lib/channels/index.js';
+import { startupDsp, registerAnalogBridge, waitForDspReady, addEngineRestartListener } from './lib/dsp/index.js';
+import { startupBridges, reregisterBridges } from './lib/bridges.js';
+import { startupRtp } from './lib/rtp/index.js';
 import { getDaemonStatus } from './lib/aes67daemon.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -42,8 +27,8 @@ const PORT = process.env.PORT ?? 3000;
 
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: false }))
-app.use(cookieParser())
+app.use(express.urlencoded({ extended: false }));
+app.use(cookieParser());
 app.use((_req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -51,14 +36,8 @@ app.use((_req, res, next) => {
   if (_req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
-
-app.use(httpLogger('dev'))
-
-app.use('/bridges', bridgesRoutes);
-app.use('/streams', streamsRoutes);
-app.use('/dsp',     dspRoutes);
-app.use('/system',  systemRoutes);
-app.use('/aes67',   aes67Routes);
+app.use(httpLogger('dev'));
+app.use('/api', apiRoutes);
 
 // ── SPA 정적 파일 서빙 ────────────────────────────────
 const SPA_DIR = join(__dirname, 'public/spa');
@@ -72,130 +51,23 @@ setupSocket(httpServer, config);
 
 // ── Startup ───────────────────────────────────────────
 
-async function connectWithRetry(src, dst, retries = 5) {
-  for (let i = 0; i < retries; i++) {
-    try { await connect(src, dst); return true; } catch (e) {
-      if (i < retries - 1) await new Promise(r => setTimeout(r, 1000));
-      else logger.warn('[startup] connect %s→%s failed: %s', src, dst, e.message);
-    }
-  }
-  return false;
-}
-
-
 async function startup() {
-  /* ── aoip_engine 시작 (JACK 대체 단일 C 데몬) ── */
   const dspCounts = getDspChannelCounts();
-  logger.info('[startup] Starting aoip_engine: %s',
-    [...dspCounts.entries()].map(([n, c]) => `${n}(${c.n_in}in/${c.n_out}out)`).join(', '));
-  for (const [name, { n_in, n_out }] of dspCounts) {
-    try { startDsp(name, n_in, n_out); } catch (e) { logger.warn('[startup] dsp %s:', name, e.message); }
-  }
+  await startupDsp(dspCounts, config);
+  await startupBridges(config);
+  await startupRtp(config);
+  await restoreRoutes();
+  restoreDspState();
+  getDaemonStatus();
 
-  /* ── aoip_engine ready 대기 ── */
-  try { await Promise.all([...dspCounts.keys()].map(name => waitForDspReady(name))); }
-  catch (e) { logger.warn('[startup] aoip_engine ready timeout: %s', e.message); }
-
-  /* ── 메인 아날로그 장치 bridge 등록 (config.jack) ── */
-  const jackCfg = config.jack;
-  if (jackCfg?.device) {
-    const ch = jackCfg.channels ?? 2;
-    const cmd = `bridge add analog ${jackCfg.device} ${jackCfg.rate ?? 48000} ${jackCfg.period ?? 512} ${jackCfg.periods ?? 3} ${ch} 0`;
-    logger.info('[startup] Registering analog bridge: %s', cmd);
-    sendToEngine(cmd);
-  }
-
-  /* ── ALSA 브릿지 등록 ── */
-  logger.info('[startup] Registering ALSA bridges...');
-  await killOrphanBridges();
-  try { await startBridges(config.bridges); } catch (e) { logger.warn('[startup] bridges:', e.message); }
-  startUsbGadgetWatcher();
-
-  /* ── RTP 스트림 기동 ── */
-  if (config.rtp_streams?.length) {
-    logger.info('[startup] Starting RTP streams (%d)...', config.rtp_streams.length);
-    try { startRtpStreams(config.rtp_streams); } catch (e) { logger.warn('[startup] rtp_streams:', e.message); }
-    try { await waitForRtpStreamsReady(6000); }
-    catch (e) { logger.warn('[startup] rtp_streams ready timeout: %s', e.message); }
-  } else if (config.rtp) {
-    logger.info('[startup] Starting GStreamer RTP (legacy)...');
-    try { startRxPipeline(config.rtp.input); } catch (e) { logger.warn('[startup] gst rx:', e.message); }
-    try { startTxClient({ channels: 2 }); } catch (e) { logger.warn('[startup] rtp_send:', e.message); }
-    try { await Promise.all([waitForRxReady(6000), waitForTxReady(6000)]); }
-    catch (e) { logger.warn('[startup] rtp ready timeout: %s', e.message); }
-  }
-
-  /* ── 저장된 라우팅 매트릭스 복원 ── */
-  const savedRoutes = getSavedRoutes();
-  if (savedRoutes.length > 0) {
-    const { inputs: activeIn, outputs: activeOut } = getChannels([]);
-    const validSrcs = new Set(activeIn.map(ch => ch.jackPort));
-    const validDsts = new Set(activeOut.map(ch => ch.jackPort));
-    logger.info('[startup] Restoring %d saved routes...', savedRoutes.length);
-    for (const { src, dst } of savedRoutes) {
-      if (!validSrcs.has(src) || !validDsts.has(dst)) continue;
-      await connectWithRetry(src, dst);  /* → jack.js stub → dsp.js route add */
-    }
-  }
-
-  /* ── 저장된 gain/mute/DSP 상태 복원 ── */
-  const { inputs, outputs } = getChannels([]);
-  for (const ch of inputs) {
-    if (ch.bypassDsp) sendBypass('in', ch.id, true);
-    sendGain('in', ch.id, ch.gain);
-    if (ch.muted) sendMute('in', ch.id, true);
-  }
-  for (const ch of outputs) {
-    if (ch.bypassDsp) sendBypass('out', ch.id, true);
-    sendGain('out', ch.id, ch.gain);
-    if (ch.muted) sendMute('out', ch.id, true);
-  }
-  sendAllDsp({ inputs, outputs });
-
-  /* ── AES67 서비스 초기화 (SAP + RTSP + mDNS + PTP) ── */
-  getDaemonStatus();   // lazy init 트리거
-
-  /* ── 엔진 비정상 종료 후 재시작 시 설정 재적용 ── */
   addEngineRestartListener(async () => {
     logger.info('[startup] aoip_engine restarted — re-applying config...');
-    try { await Promise.all([...dspCounts.keys()].map(name => waitForDspReady(name))); }
+    try { await waitForDspReady('_engine'); }
     catch (e) { logger.warn('[startup] restart ready timeout: %s', e.message); return; }
-
-    /* 아날로그 브릿지 재등록 */
-    if (jackCfg?.device) {
-      const ch = jackCfg.channels ?? 2;
-      sendToEngine(`bridge add analog ${jackCfg.device} ${jackCfg.rate ?? 48000} ${jackCfg.period ?? 512} ${jackCfg.periods ?? 3} ${ch} 0`);
-    }
-
-    /* 비-USB ALSA 브릿지 재등록 */
-    try { await startBridges(config.bridges); }
-    catch (e) { logger.warn('[startup] bridges restart: %s', e.message); }
-
-    /* 라우팅 매트릭스 재적용 */
-    const restoredRoutes = getSavedRoutes();
-    if (restoredRoutes.length > 0) {
-      const { inputs: activeIn, outputs: activeOut } = getChannels([]);
-      const validSrcs = new Set(activeIn.map(ch => ch.jackPort));
-      const validDsts = new Set(activeOut.map(ch => ch.jackPort));
-      for (const { src, dst } of restoredRoutes) {
-        if (!validSrcs.has(src) || !validDsts.has(dst)) continue;
-        await connectWithRetry(src, dst);
-      }
-    }
-
-    /* gain/mute/DSP 상태 재적용 */
-    const { inputs: ins, outputs: outs } = getChannels([]);
-    for (const ch of ins) {
-      if (ch.bypassDsp) sendBypass('in', ch.id, true);
-      sendGain('in', ch.id, ch.gain);
-      if (ch.muted) sendMute('in', ch.id, true);
-    }
-    for (const ch of outs) {
-      if (ch.bypassDsp) sendBypass('out', ch.id, true);
-      sendGain('out', ch.id, ch.gain);
-      if (ch.muted) sendMute('out', ch.id, true);
-    }
-    sendAllDsp({ inputs: ins, outputs: outs });
+    registerAnalogBridge(config);
+    await reregisterBridges(config);
+    await restoreRoutes();
+    restoreDspState();
     logger.info('[startup] config re-applied after engine restart');
   });
 

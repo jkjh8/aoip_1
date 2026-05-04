@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getConfig } from '../lib/config.js';
+import { getConfig } from '../../lib/config.js';
 import {
   startRxPipeline, stopRxPipeline, isRxRunning,
   startTxClient, stopTxClient, isTxRunning,
@@ -8,7 +8,7 @@ import {
   startRtpStream, stopRtpStream,
   updateRtpInConfig, updateRtpOutConfig,
   addRtpOutTarget, removeRtpOutTarget, setRtpOutCodec,
-} from '../lib/rtp/index.js';
+} from '../../lib/rtp/index.js';
 
 function parseBody(body = {}) {
   const updates = {};

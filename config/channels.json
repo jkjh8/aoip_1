@@ -107,7 +107,7 @@
       "label": "USB AUDIO IN 1",
       "jackPort": "usb:out_1",
       "srcPort": "USB Audio IN:audio_in_1",
-      "gain": 94,
+      "gain": 100,
       "muted": false,
       "bypassDsp": true,
       "dsp": {
@@ -157,7 +157,7 @@
       "label": "USB AUDIO IN 2",
       "jackPort": "usb:out_2",
       "srcPort": "USB Audio IN:audio_in_2",
-      "gain": 94,
+      "gain": 100,
       "muted": false,
       "bypassDsp": true,
       "dsp": {

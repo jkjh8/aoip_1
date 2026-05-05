@@ -34,6 +34,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <math.h>
+#include <setjmp.h>
 
 /* ── 상수 ────────────────────────────────────────────── */
 #define MAX_TARGETS    16
@@ -100,6 +101,10 @@ static atomic_ulong g_bytes_sent = 0;
 /* reader thread */
 static pthread_t    g_reader_tid;
 static volatile int g_reader_run = 0;
+
+/* SIGBUS 복구: reader thread 전용 */
+static _Thread_local sigjmp_buf  g_bus_jmp;
+static _Thread_local int         g_bus_armed = 0;
 
 /* ── codec 변경 플래그 ───────────────────────────────── */
 static volatile int    g_codec_changed = 0;
@@ -327,11 +332,18 @@ static void *shm_reader_thread(void *arg)
     int out_rate  = g_out_rate;
     int need_src  = (out_rate != SAMPLE_RATE) && (g_src != NULL);
 
-    float *in_buf  = calloc(PERIOD_FRAMES * g_ch, sizeof(float));
-    int out_max    = need_src
+    float * volatile in_buf  = calloc(PERIOD_FRAMES * g_ch, sizeof(float));
+    int out_max              = need_src
         ? (int)((double)PERIOD_FRAMES * out_rate / SAMPLE_RATE * 1.1 + 64)
         : PERIOD_FRAMES;
-    float *out_buf = calloc(out_max * g_ch, sizeof(float));
+    float * volatile out_buf = calloc(out_max * g_ch, sizeof(float));
+
+    if (!in_buf || !out_buf) {
+        fprintf(stderr, "[rtp_send] calloc failed in reader thread\n");
+        free(in_buf); free(out_buf);
+        g_quit = 1;
+        return NULL;
+    }
 
     while (g_reader_run) {
         /* 코덱 변경 처리 */
@@ -358,11 +370,22 @@ static void *shm_reader_thread(void *arg)
             if (!shm_attach()) { usleep(100000); continue; }
         }
 
+        /* SIGBUS 복구 지점: aoip_engine이 SHM 재생성 시 mmap 무효화 대응 */
+        if (sigsetjmp(g_bus_jmp, 1)) {
+            fprintf(stderr, "[rtp_send] SIGBUS: SHM invalidated, re-attaching...\n");
+            if (g_shm)   { munmap(g_shm, SHMRING_SIZE); g_shm   = NULL; }
+            if (g_shm_fd >= 0) { close(g_shm_fd);       g_shm_fd = -1;  }
+            usleep(500000);
+            continue;
+        }
+        g_bus_armed = 1;
+
         ShmRing *ring = g_shm;
         uint32_t wp   = atomic_load_explicit(&ring->wp, memory_order_acquire);
         uint32_t rp   = atomic_load_explicit(&ring->rp, memory_order_relaxed);
 
         if ((int32_t)(wp - rp) < PERIOD_FRAMES) {
+            g_bus_armed = 0;
             usleep(1000);
             continue;
         }
@@ -374,6 +397,7 @@ static void *shm_reader_thread(void *arg)
                 in_buf[f * g_ch + c] = ring->buf[idx * SHM_MAX_CH + c];
         }
         atomic_store_explicit(&ring->rp, rp + PERIOD_FRAMES, memory_order_release);
+        g_bus_armed = 0;
 
         /* libsamplerate */
         float *send_buf;
@@ -498,12 +522,25 @@ static void *stdin_thread(void *arg)
 /* ── signal ──────────────────────────────────────────── */
 static void on_signal(int sig) { (void)sig; g_quit = 1; }
 
+static void on_sigbus(int sig, siginfo_t *info, void *ctx) {
+    (void)sig; (void)info; (void)ctx;
+    if (g_bus_armed) {
+        g_bus_armed = 0;
+        siglongjmp(g_bus_jmp, 1);
+    }
+    /* reader thread 밖에서 발생한 경우 기본 동작 */
+    signal(SIGBUS, SIG_DFL);
+    raise(SIGBUS);
+}
+
 /* ── main ────────────────────────────────────────────── */
 int main(int argc, char *argv[])
 {
     signal(SIGTERM, on_signal);
     signal(SIGINT,  on_signal);
     signal(SIGPIPE, SIG_IGN);  /* stdout/UDP 파이프 broken 시 크래시 방지 */
+    struct sigaction sa_bus = { .sa_sigaction = on_sigbus, .sa_flags = SA_SIGINFO };
+    sigaction(SIGBUS, &sa_bus, NULL);
     if (mlockall(MCL_CURRENT) != 0)
         fprintf(stderr, "[rtp_send] mlockall failed: %s\n", strerror(errno));
 

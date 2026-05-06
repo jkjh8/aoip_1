@@ -13,13 +13,20 @@ extern float *g_in_ptr[MAX_CH];
 extern float *g_out_ptr[MAX_CH];
 
 /* ── PI 드리프트 보정 ────────────────────────────────────────────── */
+/* hw:aoip 크리스탈 실측 drift 보정 초기값 (-10ppm).
+ * integ를 미리 세팅하여 수렴 시간 없이 즉시 보정 적용. */
+#define RATIO_INIT_OFFSET  (-10e-6)
+
 void pi_reset(PiState *p) {
-    p->ratio = 1.0; p->integ = 0.0; p->smooth = 0.0;
+    double ki = p->ki > 0.0 ? p->ki : RATIO_KI;
+    p->smooth = 0.0;
+    p->integ  = RATIO_INIT_OFFSET / ki;
+    p->ratio  = 1.0 + RATIO_INIT_OFFSET;
 }
 
 void pi_update(PiState *p, int avail, int target) {
     double err  = ((double)target - avail) / (double)target;
-    p->smooth  += 0.1 * (err - p->smooth);
+    p->smooth  += 0.2 * (err - p->smooth);
     p->integ   += p->smooth;
     p->ratio    = 1.0 + p->smooth * p->kp + p->integ * p->ki;
     if (p->ratio < p->min) { p->ratio = p->min; p->integ = (p->min - 1.0 - p->smooth * p->kp) / p->ki; }

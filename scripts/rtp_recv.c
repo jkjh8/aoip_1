@@ -23,6 +23,8 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
@@ -80,6 +82,13 @@ struct RtpRecvCtx {
     /* decode error suppression */
     int          dec_err_count;
     int          dec_err_logged;
+
+    /* flood / bad-pkt protection */
+    int          flood_threshold;    /* pkt/s 초과 시 flood 백오프 (0=비활성) */
+    int          flood_backoff_ms;   /* flood/bad-streak 시 드레인+슬립 시간(ms) */
+    int          bad_pkt_threshold;  /* 연속 bad pkt 개수 초과 시 백오프 */
+    int8_t       force_pt;           /* -1=auto, 0-127=고정 PT 필터 */
+    atomic_int   in_backoff;
 
     /* stats */
     atomic_ulong packets, drops, udp_bytes;
@@ -443,6 +452,37 @@ static void *decode_thread(void *arg)
     return NULL;
 }
 
+/* ── flood/bad-pkt 백오프: 소켓 드레인 후 슬립 ──────── */
+static void flood_drain_and_backoff(RtpRecvCtx *ctx, int backoff_ms)
+{
+    atomic_store(&ctx->in_backoff, 1);
+    fprintf(stderr, "[rtp_recv:%s] backoff %dms — draining socket\n",
+            ctx->key, backoff_ms);
+
+    struct timespec end_ts;
+    clock_gettime(CLOCK_MONOTONIC, &end_ts);
+    long ns = end_ts.tv_nsec + (long)backoff_ms * 1000000L;
+    end_ts.tv_sec  += ns / 1000000000L;
+    end_ts.tv_nsec  = ns % 1000000000L;
+
+    uint8_t drain_buf[MAX_PKT_LEN];
+    while (!ctx->quit) {
+        ssize_t n;
+        /* 소켓 버퍼를 논블럭으로 비움 */
+        while ((n = recvfrom(ctx->udp_sock, drain_buf, sizeof(drain_buf),
+                             MSG_DONTWAIT, NULL, NULL)) > 0)
+            atomic_fetch_add_explicit(&ctx->drops, 1, memory_order_relaxed);
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec > end_ts.tv_sec ||
+            (now.tv_sec == end_ts.tv_sec && now.tv_nsec >= end_ts.tv_nsec))
+            break;
+        usleep(10000); /* 10ms 간격으로 드레인 반복 */
+    }
+    atomic_store(&ctx->in_backoff, 0);
+}
+
 /* ── receive thread ──────────────────────────────────── */
 static void *recv_thread(void *arg)
 {
@@ -456,8 +496,24 @@ static void *recv_thread(void *arg)
     struct sockaddr_in from;
     socklen_t fromlen = sizeof(from);
 
+    struct pollfd pfd = { .fd = ctx->udp_sock, .events = POLLIN };
+
+    /* flood 감지용 슬라이딩 윈도우 */
+    unsigned long win_pkts = 0;
+    int bad_streak = 0;
+    struct timespec win_ts;
+    clock_gettime(CLOCK_MONOTONIC, &win_ts);
+
     while (!ctx->quit) {
-        ssize_t n = recvfrom(ctx->udp_sock, buf, sizeof(buf), 0,
+        int r = poll(&pfd, 1, 100); /* 100ms timeout → quit 플래그 주기적 확인 */
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            if (!ctx->quit) perror("[rtp_recv] poll");
+            break;
+        }
+        if (r == 0) continue; /* timeout */
+
+        ssize_t n = recvfrom(ctx->udp_sock, buf, sizeof(buf), MSG_DONTWAIT,
                              (struct sockaddr *)&from, &fromlen);
         if (n <= 0) {
             if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK) continue;
@@ -465,6 +521,64 @@ static void *recv_thread(void *arg)
             break;
         }
 
+        /* ── 1. flood 감지: 1초 윈도우 패킷 수 체크 ── */
+        if (ctx->flood_threshold > 0) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long elapsed_ms = (now.tv_sec  - win_ts.tv_sec)  * 1000L
+                            + (now.tv_nsec - win_ts.tv_nsec) / 1000000L;
+            if (elapsed_ms >= 1000) {
+                if (win_pkts > (unsigned long)ctx->flood_threshold) {
+                    fprintf(stderr, "[rtp_recv:%s] flood: %lu pkt/s — backoff %dms\n",
+                            ctx->key, win_pkts, ctx->flood_backoff_ms);
+                    flood_drain_and_backoff(ctx, ctx->flood_backoff_ms);
+                    bad_streak = 0;
+                }
+                win_pkts = 0;
+                win_ts   = now;
+            }
+            win_pkts++;
+        }
+
+        /* ── 2. 조기 RTP 패킷 검증 (PROTO_RTP 모드) ── */
+        if (ctx->proto == PROTO_RTP) {
+            if (n < RTP_HDR_MIN) {
+                /* 너무 짧은 패킷 — RTP 헤더 최소 크기 미달 */
+                atomic_fetch_add_explicit(&ctx->drops, 1, memory_order_relaxed);
+                goto check_bad_streak;
+            }
+            /* RTP 버전 필드는 반드시 2 */
+            if ((buf[0] >> 6) != 2) {
+                atomic_fetch_add_explicit(&ctx->drops, 1, memory_order_relaxed);
+                goto check_bad_streak;
+            }
+            /* PT 고정 필터: force_pt 또는 이미 감지된 last_rtp_pt 기준 */
+            uint8_t pt = buf[1] & 0x7F;
+            int expected_pt = (ctx->force_pt >= 0)
+                              ? (int)ctx->force_pt
+                              : ((ctx->detected && ctx->last_rtp_pt != 0xFF)
+                                 ? (int)ctx->last_rtp_pt : -1);
+            if (expected_pt >= 0 && (int)pt != expected_pt
+                    && !(pt >= 72 && pt <= 76)) { /* RTCP mux는 허용 (decode_thread에서 drop) */
+                atomic_fetch_add_explicit(&ctx->drops, 1, memory_order_relaxed);
+                goto check_bad_streak;
+            }
+        }
+
+        /* 정상 패킷: bad_streak 리셋 */
+        bad_streak = 0;
+        goto enqueue;
+
+check_bad_streak:
+        if (ctx->bad_pkt_threshold > 0 && ++bad_streak >= ctx->bad_pkt_threshold) {
+            fprintf(stderr, "[rtp_recv:%s] bad-pkt streak %d — backoff %dms\n",
+                    ctx->key, bad_streak, ctx->flood_backoff_ms);
+            flood_drain_and_backoff(ctx, ctx->flood_backoff_ms);
+            bad_streak = 0;
+        }
+        continue;
+
+enqueue:
         pthread_mutex_lock(&ctx->addr_mtx);
         inet_ntop(AF_INET, &from.sin_addr, ctx->src_ip, sizeof(ctx->src_ip));
         ctx->src_port = ntohs(from.sin_port);
@@ -578,6 +692,13 @@ RtpRecvCtx *rtp_recv_start(RingBuf *ring, const char *key, const char *sock_path
     ctx->proto = (strcmp(proto_str, "raw") == 0) ? PROTO_RAW : PROTO_RTP;
     rtp_cfg_str(cfg, "addr", ctx->bind_addr, sizeof(ctx->bind_addr), "0.0.0.0");
 
+    /* flood / bad-pkt 보호 설정 */
+    ctx->flood_threshold  = rtp_cfg_int(cfg, "floodThreshold",  5000); /* 0=비활성 */
+    ctx->flood_backoff_ms = rtp_cfg_int(cfg, "floodBackoffMs",   500);
+    ctx->bad_pkt_threshold= rtp_cfg_int(cfg, "badPktThreshold",  200);
+    int force_pt_val      = rtp_cfg_int(cfg, "pt",               -1);
+    ctx->force_pt = (force_pt_val >= 0 && force_pt_val <= 127) ? (int8_t)force_pt_val : -1;
+
     /* 수동 codec/rate 설정 */
     if (codec_str[0]) {
         if      (strcmp(codec_str, "l16")  == 0) { ctx->enc = ENC_L16;  snprintf(ctx->codec_str, sizeof(ctx->codec_str), "L16");  if (!ctx->in_rate) ctx->in_rate = 48000; }
@@ -615,10 +736,11 @@ RtpRecvCtx *rtp_recv_start(RingBuf *ring, const char *key, const char *sock_path
     int reuse = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
-    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     int rcvbuf = 2 * 1024 * 1024;
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    /* 논블럭 소켓: poll()로 타임아웃 제어, SO_RCVTIMEO 불필요 */
+    int fl = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, fl | O_NONBLOCK);
 
     int port = rtp_cfg_int(cfg, "port", 5004);
     struct in_addr bind_in = { .s_addr = INADDR_ANY };

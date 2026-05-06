@@ -15,7 +15,7 @@
     "name": "Analog",
     "rate": 48000,
     "period": 48,
-    "periods": 3,
+    "periods": 2,
     "channels": 2
   },
   "bridges": [

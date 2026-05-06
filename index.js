@@ -51,7 +51,7 @@ setupSocket(httpServer, config);
 async function startup() {
   const dspCounts = getDspChannelCounts();
   await startupDsp(dspCounts, config);
-  await startupBridges(config);
+  startupBridges();
   await startupRtp(config);
   await restoreRoutes();
   restoreDspState();
@@ -62,7 +62,7 @@ async function startup() {
     try { await waitForDspReady('_engine'); }
     catch (e) { logger.warn('[startup] restart ready timeout: %s', e.message); return; }
     registerAnalogBridge(config);
-    await reregisterBridges(config);
+    await reregisterBridges();
     await restoreRoutes();
     restoreDspState();
     logger.info('[startup] config re-applied after engine restart');

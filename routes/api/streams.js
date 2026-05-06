@@ -1,8 +1,5 @@
 import { Router } from 'express';
-import { getConfig } from '../../lib/config.js';
 import {
-  startRxPipeline, stopRxPipeline, isRxRunning,
-  startTxClient, stopTxClient, isTxRunning,
   getGstStatus,
   getRtpStreamStatus, getRtpStreamDetail,
   startRtpStream, stopRtpStream,
@@ -32,34 +29,6 @@ router.get('/', (_req, res) => {
   res.json(getGstStatus());
 });
 
-// ── RX (legacy) ──────────────────────────────────────
-
-router.post('/rx/start', (_req, res) => {
-  if (isRxRunning()) return res.status(409).json({ error: 'rx pipeline already running' });
-  startRxPipeline(getConfig().rtp?.input ?? {});
-  res.json({ ok: true });
-});
-
-router.post('/rx/stop', (_req, res) => {
-  stopRxPipeline();
-  res.json({ ok: true });
-});
-
-// ── TX (legacy) ──────────────────────────────────────
-
-router.post('/tx/start', (_req, res) => {
-  if (isTxRunning()) return res.status(409).json({ error: 'tx pipeline already running' });
-  startTxClient();
-  res.json({ ok: true });
-});
-
-router.post('/tx/stop', (_req, res) => {
-  stopTxClient();
-  res.json({ ok: true });
-});
-
-// ── rtp_streams ──────────────────────────────────────
-
 // GET /streams/rtp — 전체 목록
 router.get('/rtp', (_req, res) => {
   res.json({ ok: true, streams: getRtpStreamStatus() });
@@ -80,7 +49,6 @@ router.post('/rtp/:client/start', async (req, res) => {
     if (!detail) return res.status(404).json({ error: `stream ${client} not found` });
     const hasUpdates = Object.keys(updates).length > 0;
     if (hasUpdates) {
-      // 설정이 변경된 경우 실행 중이더라도 중지 후 재시작
       stopRtpStream(client);
       if (detail.type === 'rtp_in')  updateRtpInConfig(client, updates);
       if (detail.type === 'rtp_out') updateRtpOutConfig(client, updates);
@@ -90,7 +58,7 @@ router.post('/rtp/:client/start', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-// PUT /streams/rtp/:client/config — rtp_in 설정 변경 (저장만, 적용은 재시작 필요)
+// PUT /streams/rtp/:client/config
 router.put('/rtp/:client/config', (req, res) => {
   const { client } = req.params;
   try {
@@ -113,7 +81,7 @@ router.post('/rtp/:client/stop', (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-// POST /streams/rtp/:client/targets  { host, port } — rtp_out 전송 대상 추가
+// POST /streams/rtp/:client/targets
 router.post('/rtp/:client/targets', (req, res) => {
   const { client } = req.params;
   const { host, port } = req.body ?? {};
@@ -124,7 +92,7 @@ router.post('/rtp/:client/targets', (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-// DELETE /streams/rtp/:client/targets  { host, port } — rtp_out 전송 대상 제거
+// DELETE /streams/rtp/:client/targets
 router.delete('/rtp/:client/targets', (req, res) => {
   const { client } = req.params;
   const { host, port } = req.body ?? {};
@@ -135,7 +103,7 @@ router.delete('/rtp/:client/targets', (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-// PUT /streams/rtp/:client/codec  { codec, bitrate } — rtp_out 코덱 변경
+// PUT /streams/rtp/:client/codec
 router.put('/rtp/:client/codec', (req, res) => {
   const { client } = req.params;
   const { codec, bitrate } = req.body ?? {};

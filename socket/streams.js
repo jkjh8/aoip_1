@@ -1,10 +1,10 @@
 import {
   getRtpStreamStatus, getRtpStreamDetail,
   addRtpOutTarget, removeRtpOutTarget, setRtpOutCodec,
-  updateRtpInConfig, stopRtpStream, startRtpStream,
+  updateRtpInConfig, updateRtpOutConfig, stopRtpStream, startRtpStream,
 } from '../lib/rtp/index.js';
 
-function parseUpdates({ port, protocol, address, sampleRate, codec, bitrate, bufferMs, channels, targets } = {}) {
+function parseUpdates({ port, protocol, address, sampleRate, codec, bitrate, bufferMs, channels } = {}) {
   const u = {};
   if (port       != null) u.port       = Number(port);
   if (protocol   != null) u.protocol   = protocol;
@@ -14,7 +14,6 @@ function parseUpdates({ port, protocol, address, sampleRate, codec, bitrate, buf
   if (bitrate    != null) u.bitrate    = Number(bitrate);
   if (bufferMs   != null) u.bufferMs   = Number(bufferMs);
   if (channels   != null) u.channels   = Number(channels);
-  if (targets    != null) u.targets    = targets;
   return u;
 }
 
@@ -35,13 +34,17 @@ export default function register(socket, { broadcastStatus }) {
 
   socket.on('rtp:stream:start', (data = {}, cb) => {
     try {
-      const { client } = data;
+      const { client, targets } = data;
       if (!client) return cb?.({ ok: false, error: 'client required' });
       const detail = getRtpStreamDetail(client);
       if (!detail) return cb?.({ ok: false, error: `stream ${client} not found` });
       const updates = parseUpdates(data);
-      if (Object.keys(updates).length > 0 && detail.type === 'rtp_in')
-        updateRtpInConfig(client, updates);
+      if (Object.keys(updates).length > 0) {
+        if (detail.type === 'rtp_in')  updateRtpInConfig(client, updates);
+        if (detail.type === 'rtp_out') updateRtpOutConfig(client, updates);
+      }
+      if (detail.type === 'rtp_out' && Array.isArray(targets))
+        for (const { host, port } of targets) if (host && port) addRtpOutTarget(client, host, Number(port));
       startRtpStream(client);
       broadcastStatus();
       cb?.({ ok: true, stream: getRtpStreamDetail(client) });

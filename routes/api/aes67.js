@@ -103,7 +103,9 @@ router.delete('/sinks/:id', async (req, res) => {
 
 // GET /aes67/sinks/:id/status
 router.get('/sinks/:id/status', async (req, res) => {
-  try { res.json(await getSinkStatus(req.params.id)); }
+  const { id } = req.params;
+  if (!id || id === 'undefined' || id === 'null') return res.status(400).json({ error: 'invalid id' });
+  try { res.json(await getSinkStatus(id)); }
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 

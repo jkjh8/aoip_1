@@ -1,9 +1,9 @@
 import { Server as SocketIO } from 'socket.io';
 import { getBridgeStatus } from '../lib/bridges.js';
 import { getDaemonStatus, daemonEvents }             from '../lib/aes67daemon.js';
-import { getGstStatus, getRxStats, getRtpStreamStatus } from '../lib/rtp/index.js';
+import { getGstStatus, getRxStats, getRtpStreamStatus, streamEvents } from '../lib/rtp/index.js';
 import { getChannels, getSavedRoutes }              from '../lib/channels/index.js';
-import { isDspRunning, getLimiterMeters }           from '../lib/dsp/index.js';
+import { isDspRunning }                             from '../lib/dsp/index.js';
 
 import logger from '../lib/logger.js';
 import registerBridges  from './bridges.js';
@@ -18,14 +18,6 @@ const LEVEL_INTERVAL  = 80;   // ~12 fps
 
 let cachedConnections = [];
 let cachedAes67Status = { running: false, ready: false, url: 'http://127.0.0.1:8080' };
-const limiterWatchers = new Map();
-
-function watchedChannels() {
-  const ids = new Set();
-  for (const set of limiterWatchers.values()) for (const id of set) ids.add(id);
-  return ids;
-}
-
 function _routesToConnections(routes) {
   const map = new Map();
   for (const { src, dst } of routes) {
@@ -77,21 +69,18 @@ export function setupSocket(httpServer, config) {
   // 레벨 미터 — 빠른 주기로 별도 emit
   setInterval(() => {
     if (io.engine.clientsCount === 0) return;
-    const ch        = getChannels(cachedConnections);
-    const limMeters = getLimiterMeters();
-    const watched   = watchedChannels();
+    const ch = getChannels(cachedConnections);
     io.emit('levels', {
       inputs:  ch.inputs.map(c  => ({ id: c.id, level: c.level })),
-      outputs: ch.outputs.map(c => ({
-        id:      c.id,
-        level:   c.level,
-        limiter: watched.has(c.id) ? (limMeters.get(`out ${c.id}`) ?? null) : undefined
-      }))
+      outputs: ch.outputs.map(c => ({ id: c.id, level: c.level })),
     });
   }, LEVEL_INTERVAL);
 
   // 전체 상태 — 느린 주기
   setInterval(broadcastStatus, STATUS_INTERVAL);
+
+  // RTP 스트림 소켓 disconnect → 상태 브로드캐스트
+  streamEvents.on('state:changed', broadcastStatus);
 
   // AES67 데몬 이벤트 → Socket.IO broadcast (클라이언트 없으면 스킵)
   daemonEvents.on('sources:changed', (data) => {
@@ -108,7 +97,6 @@ export function setupSocket(httpServer, config) {
     io,
     broadcastStatus,
     getCached: () => cachedConnections,
-    limiterWatchers,
     config
   };
 
@@ -119,7 +107,6 @@ export function setupSocket(httpServer, config) {
 
     socket.on('disconnect', () => {
       logger.info('[io] disconnected:', socket.id);
-      limiterWatchers.delete(socket.id);
     });
 
     registerBridges(socket, ctx);

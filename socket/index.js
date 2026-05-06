@@ -3,13 +3,11 @@ import { getBridgeStatus } from '../lib/bridges.js';
 import { getDaemonStatus, daemonEvents, enrichSinks } from '../lib/aes67daemon.js';
 import { getGstStatus, getRxStats, getRtpStreamStatus, streamEvents } from '../lib/rtp/index.js';
 import { getChannels, getSavedRoutes }              from '../lib/channels/index.js';
-import { isDspRunning }                             from '../lib/dsp/index.js';
+import { isDspRunning, getDspUptime }               from '../lib/dsp/index.js';
 
 import logger from '../lib/logger.js';
-import registerBridges  from './bridges.js';
 import registerStreams   from './streams.js';
 import registerChannels from './channels.js';
-import registerDsp      from './dsp.js';
 import registerSystem   from './system.js';
 import registerAes67    from './aes67.js';
 
@@ -32,7 +30,7 @@ async function snapshot() {
   cachedConnections = connections;
 
   return {
-    engine:   { running: isDspRunning() },
+    engine:   { running: isDspRunning(), uptime: getDspUptime() },
     bridges:  getBridgeStatus(),
     streams:  { ...getGstStatus(), rtpStreams: getRtpStreamStatus() },
     rxStats:  getRxStats(),
@@ -62,7 +60,6 @@ export function setupSocket(httpServer, config) {
     try {
       const s = await snapshot();
       io.emit('status', s);
-      // io.emit('rx:stats', s.rxStats);
     } catch { /* engine not ready */ }
   }
 
@@ -109,10 +106,8 @@ export function setupSocket(httpServer, config) {
       logger.info('[io] disconnected:', socket.id);
     });
 
-    registerBridges(socket, ctx);
     registerStreams(socket, ctx);
     registerChannels(socket, ctx);
-    registerDsp(socket, ctx);
     registerSystem(socket);
     registerAes67(socket, ctx);
   });

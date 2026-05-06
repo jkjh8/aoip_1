@@ -9,8 +9,7 @@
  *   [  ]  stdin cmd_loop      — stdin 명령 파서 (main 스레드)
  *
  * Build:
- *   gcc -O3 -o aoip_engine aoip_engine.c alsa_device.c dsp_math.c \
- *       -I. -lrt -lasound -lsamplerate -lpthread -lm
+ *   make -C scripts/   (또는 make -j$(nproc))
  */
 #define _GNU_SOURCE
 #include <stdio.h>

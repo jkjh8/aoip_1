@@ -733,9 +733,6 @@ RtpRecvCtx *rtp_recv_start(RingBuf *ring, const char *key, const char *sock_path
         free(ctx->pkts); free(ctx); close(sfd);
         return NULL;
     }
-    int reuse = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
     int rcvbuf = 2 * 1024 * 1024;
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
     /* 논블럭 소켓: poll()로 타임아웃 제어, SO_RCVTIMEO 불필요 */
@@ -752,7 +749,7 @@ RtpRecvCtx *rtp_recv_start(RingBuf *ring, const char *key, const char *sock_path
     struct sockaddr_in addr = {
         .sin_family      = AF_INET,
         .sin_port        = htons((uint16_t)port),
-        .sin_addr.s_addr = is_multicast ? bind_in.s_addr : INADDR_ANY,
+        .sin_addr.s_addr = INADDR_ANY,
     };
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         fprintf(stderr, "[rtp_recv:%s] bind: %s\n", key, strerror(errno));

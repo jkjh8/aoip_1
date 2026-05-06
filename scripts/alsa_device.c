@@ -242,6 +242,7 @@ static void *alsa_capture_thread(void *arg)
                     atomic_store_explicit(&d->ravenna_flush, 1, memory_order_release);
                     rb_reset(&d->in_ring);
                     d->ravenna_prebuf_count = 0;
+                    d->ravenna_unmute_count = 0;
                     fprintf(stderr, "[aoip_engine] cap %s: EIO (PTP not locked), muting\n", d->name);
                 }
                 d->ravenna_accum = 0;
@@ -269,21 +270,34 @@ static void *alsa_capture_thread(void *arg)
             }
             continue;
         }
-        /* PTP 잠금/재잠금: 클럭 안정화를 위해 RAVENNA_LOCK_PREBUF 프레임 쌓은 뒤 언뮤트.
-         * 초기 시작(cap_err_count==0)과 EIO 복구 후(cap_err_count>0) 모두 처리. */
+        /* PTP 잠금/재잠금:
+         * Phase 1 — RAVENNA_LOCK_PREBUF 프레임: 캡처 클럭 안정화 확인
+         * Phase 2 — SAMPLE_RATE 프레임(1초): PTP 클럭 완전 안정화 대기
+         * 두 단계 모두 in_ring에 쓰지 않음. 완료 후 ring 초기화 + 언뮤트.
+         * ravenna_ptp_locked=1 전환 시 DSP cap_prebuf_ready=0 상태이므로
+         * DSP-level prefill이 자동으로 재시작됨. */
         if (d->is_ravenna &&
             !atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed)) {
             d->ravenna_prebuf_count += (int)n;
             if (d->ravenna_prebuf_count < RAVENNA_LOCK_PREBUF) {
-                /* 아직 prebuffer 중 — in_ring에 쓰지 않고 대기 */
+                /* Phase 1: 캡처 prebuffer 중 — in_ring에 쓰지 않고 대기 */
                 cap_err_count = 0;
                 continue;
             }
-            /* prebuffer 완료: in_ring 초기화 후 언뮤트 */
+            /* Phase 2: 1초 대기 (PTP 클럭 완전 안정화) */
+            if (d->ravenna_unmute_count == 0)
+                fprintf(stderr, "[aoip_engine] cap %s: PTP clk stable, waiting 1s before unmute\n", d->name);
+            d->ravenna_unmute_count += (int)n;
+            if (d->ravenna_unmute_count < SAMPLE_RATE) {
+                cap_err_count = 0;
+                continue;
+            }
+            /* Phase 2 완료: in_ring 초기화 후 언뮤트 → DSP prefill 재시작 */
             rb_reset(&d->in_ring);
             atomic_store_explicit(&d->ravenna_ptp_locked, 1, memory_order_release);
             d->ravenna_prebuf_count = 0;
-            fprintf(stderr, "[aoip_engine] cap %s: PTP locked, unmuting capture\n", d->name);
+            d->ravenna_unmute_count = 0;
+            fprintf(stderr, "[aoip_engine] cap %s: PTP locked (1s stable), unmuting → DSP prefill\n", d->name);
         }
         cap_err_count = 0;
 

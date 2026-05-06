@@ -6,6 +6,7 @@ import {
   getSources, addSource, removeSource, getSourceSdp,
   getSinks, addSink, removeSink, getSinkStatus,
   browseAll, browseMdns, browseSap,
+  fetchSinkStats, resetSinkStats,
 } from '../../lib/aes67daemon.js';
 
 const router = Router();
@@ -104,6 +105,18 @@ router.delete('/sinks/:id', async (req, res) => {
 router.get('/sinks/:id/status', async (req, res) => {
   try { res.json(await getSinkStatus(req.params.id)); }
   catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// GET /aes67/sinks/:id/stats  — 누적 패킷 오류 카운터 (요청 시 조회)
+router.get('/sinks/:id/stats', async (req, res) => {
+  try { res.json(await fetchSinkStats(Number(req.params.id))); }
+  catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// DELETE /aes67/sinks/:id/stats  — 카운터 초기화
+router.delete('/sinks/:id/stats', (req, res) => {
+  resetSinkStats(Number(req.params.id));
+  res.json({ ok: true });
 });
 
 // ── Browse (원격 AES67 소스 탐색) ────────────────────────

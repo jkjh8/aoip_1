@@ -97,7 +97,7 @@ router.put('/sinks/:id', async (req, res) => {
 
 // DELETE /aes67/sinks/:id
 router.delete('/sinks/:id', async (req, res) => {
-  try { res.json(await removeSink(req.params.id)); }
+  try { res.json(await removeSink(req.params.id) ?? {}); }
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 

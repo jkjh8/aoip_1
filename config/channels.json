@@ -3,666 +3,88 @@
     {
       "id": 1,
       "label": "Analog 1",
-      "jackPort": "analog:out_1",
-      "srcPort": "system:capture_1",
+      "port": "analog:out_1",
       "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80,
-          "type": "output",
-          "slope": 12
-        },
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": -1.960563229505051,
-            "b2": 0.9613112803093317,
-            "a1": -1.960563229505051,
-            "a2": 0.9613112803093317,
-            "freq": 211,
-            "gain": 0,
-            "q": 0.7,
-            "bandType": "peak"
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": -1.9066459797557105,
-            "b2": 0.9107370143743273,
-            "a1": -1.9066459797557105,
-            "a2": 0.9107370143743273,
-            "freq": 500,
-            "gain": 0,
-            "q": 0.7,
-            "bandType": "peak"
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": -1.6304323980330466,
-            "b2": 0.6879478254525045,
-            "a1": -1.6304323980330466,
-            "a2": 0.6879478254525045,
-            "freq": 2000,
-            "gain": 0,
-            "q": 0.7,
-            "bandType": "peak"
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": -7.143772995026227e-17,
-            "b2": 0.16666666666666666,
-            "a1": -7.143772995026227e-17,
-            "a2": 0.16666666666666666,
-            "freq": 12000,
-            "gain": 0,
-            "q": 0.7,
-            "bandType": "peak"
-          }
-        ]
-      }
+      "muted": false
     },
     {
       "id": 2,
       "label": "Analog 2",
-      "jackPort": "analog:out_2",
-      "srcPort": "system:capture_2",
+      "port": "analog:out_2",
       "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 114,
-          "type": "input",
-          "slope": 12
-        },
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 0.9869170450666496,
-            "b1": -1.9480686408338956,
-            "b2": 0.9617994903105911,
-            "a1": -1.9480686408338956,
-            "a2": 0.9487165353772407,
-            "freq": 197,
-            "gain": -6.2,
-            "q": 0.7,
-            "bandType": "peak"
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": -1.9066459797557105,
-            "b2": 0.9107370143743273,
-            "a1": -1.9066459797557105,
-            "a2": 0.9107370143743273,
-            "freq": 500,
-            "gain": 0,
-            "q": 0.7,
-            "bandType": "peak"
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": -1.6304323980330466,
-            "b2": 0.6879478254525045,
-            "a1": -1.6304323980330466,
-            "a2": 0.6879478254525045,
-            "freq": 2000,
-            "gain": 0,
-            "q": 0.7,
-            "bandType": "peak"
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": -7.143772995026227e-17,
-            "b2": 0.16666666666666666,
-            "a1": -7.143772995026227e-17,
-            "a2": 0.16666666666666666,
-            "freq": 12000,
-            "gain": 0,
-            "q": 0.7,
-            "bandType": "peak"
-          }
-        ]
-      }
+      "muted": false
     },
     {
       "id": 3,
       "label": "Stream IN 1",
-      "jackPort": "stream:out_1",
-      "srcPort": "rtp_in_1:out_1",
+      "port": "stream:out_1",
       "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80
-        },
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ]
-      }
+      "muted": false
     },
     {
       "id": 4,
       "label": "Stream IN 2",
-      "jackPort": "stream:out_2",
-      "srcPort": "rtp_in_1:out_2",
+      "port": "stream:out_2",
       "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80
-        },
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ]
-      }
+      "muted": false
     },
     {
       "id": 5,
       "label": "AES67 1",
-      "jackPort": "aes67:out_1",
-      "srcPort": "AES67_in:audio_in_1",
+      "port": "aes67:out_1",
       "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80
-        },
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ]
-      }
+      "muted": false
     },
     {
       "id": 6,
       "label": "AES67 2",
-      "jackPort": "aes67:out_2",
-      "srcPort": "AES67_in:audio_in_2",
+      "port": "aes67:out_2",
       "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80
-        },
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ]
-      }
+      "muted": false
     }
   ],
   "outputs": [
     {
       "id": 1,
       "label": "Analog 1",
-      "jackPort": "analog:sin_1",
-      "sinkPort": "system:playback_1",
+      "port": "analog:sin_1",
       "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 0.9664790245019084,
-            "b1": -1.8221174904101904,
-            "b2": 0.8648366931575284,
-            "a1": -1.8221174904101904,
-            "a2": 0.8313157176594368,
-            "freq": 766,
-            "gain": -4.4,
-            "q": 0.7,
-            "bandType": "peak"
-          },
-          {
-            "enabled": false,
-            "b0": 0.9211216766988778,
-            "b1": -1.7358137565323313,
-            "b2": 0.827859246486972,
-            "a1": -1.7358137565323313,
-            "a2": 0.7489809231858499,
-            "freq": 938,
-            "gain": -8.6,
-            "q": 0.7,
-            "bandType": "peak"
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -30,
-          "attack": 5,
-          "release": 100,
-          "makeup": 0
-        }
-      }
+      "muted": false
     },
     {
       "id": 2,
       "label": "Analog 2",
-      "jackPort": "analog:sin_2",
-      "sinkPort": "system:playback_2",
+      "port": "analog:sin_2",
       "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -30,
-          "attack": 5,
-          "release": 100,
-          "makeup": 0
-        }
-      }
+      "muted": false
     },
     {
       "id": 3,
       "label": "Stream OUT 1",
-      "jackPort": "stream:sin_1",
-      "sinkPort": "rtp_out_1:in_src_1",
+      "port": "stream:sin_1",
       "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 100,
-          "makeup": 0
-        }
-      }
+      "muted": false
     },
     {
       "id": 4,
       "label": "Stream OUT 2",
-      "jackPort": "stream:sin_2",
-      "sinkPort": "rtp_out_1:in_src_2",
+      "port": "stream:sin_2",
       "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 100,
-          "makeup": 0
-        }
-      }
+      "muted": false
     },
     {
       "id": 5,
       "label": "AES67 1",
-      "jackPort": "aes67:sin_1",
-      "sinkPort": "AES67_out:audio_out_1",
+      "port": "aes67:sin_1",
       "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 100,
-          "makeup": 0
-        }
-      }
+      "muted": false
     },
     {
       "id": 6,
       "label": "AES67 2",
-      "jackPort": "aes67:sin_2",
-      "sinkPort": "AES67_out:audio_out_2",
+      "port": "aes67:sin_2",
       "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 100,
-          "makeup": 0
-        }
-      }
+      "muted": false
     }
   ],
   "routing": [

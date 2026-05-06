@@ -2,9 +2,9 @@ import {
   getDaemonStatus,
   getConfig, setConfig,
   getPtpConfig, setPtpConfig, getPtpStatus,
-  getSources, addSource, removeSource, getSourceSdp, invalidateSources,
-  getSinks, addSink, removeSink, getSinkStatus, invalidateSinks,
-  browseAll, browseMdns, browseSap,
+  getSources, fetchSources, addSource, removeSource, getSourceSdp,
+  getSinks, fetchSinks, addSink, removeSink, getSinkStatus,
+  browseAll, browseMdns, browseSap, enrichSinks,
 } from '../lib/aes67daemon.js';
 
 /**
@@ -35,18 +35,16 @@ export default function register(socket, ctx) {
   const { io } = ctx;
 
   async function broadcastSources() {
-    invalidateSources();
-    try { io.emit('aes67:sources', await getSources()); } catch { /* ignore */ }
+    try { io.emit('aes67:sources', await fetchSources()); } catch { /* ignore */ }
   }
 
   async function broadcastSinks() {
-    invalidateSinks();
-    try { io.emit('aes67:sinks', await getSinks()); } catch { /* ignore */ }
+    try { io.emit('aes67:sinks', enrichSinks(await fetchSinks())); } catch { /* ignore */ }
   }
 
-  // 접속 시 초기 데이터 전송
-  getSources().then(s => socket.emit('aes67:sources', s)).catch(() => {});
-  getSinks().then(s => socket.emit('aes67:sinks', s)).catch(() => {});
+  // 접속 시 초기 데이터 전송 — 항상 REST API 우선 (캐시 우회)
+  fetchSources().then(s => socket.emit('aes67:sources', s)).catch(() => {});
+  fetchSinks().then(s => socket.emit('aes67:sinks', enrichSinks(s))).catch(() => {});
   getPtpStatus().then(s => socket.emit('aes67:ptp:status', s)).catch(() => {});
 
   // ── 상태 조회 ──────────────────────────────────────────
@@ -139,6 +137,9 @@ export default function register(socket, ctx) {
   socket.on('aes67:sink:status', async ({ id } = {}, cb) => {
     try {
       if (id == null) return cb?.({ ok: false, error: 'id required' });
+      const sinks = await getSinks();
+      if (!sinks.some(s => String(s.id) === String(id)))
+        return cb?.({ ok: true, status: null });
       cb?.({ ok: true, status: await getSinkStatus(id) });
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });

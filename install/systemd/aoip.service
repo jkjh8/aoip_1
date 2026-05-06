@@ -6,28 +6,23 @@ Requires=aoip-soundcard.service aes67-daemon.service
 
 [Service]
 Type=simple
+User=kjh
+Group=audio
 WorkingDirectory=/home/kjh/aoip_1
-ExecStart=/usr/bin/node --max-old-space-size=128 index.js
+Environment=PATH=/home/kjh/.nvm/versions/node/v24.14.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do [ -c /dev/snd/pcmC0D0p ] && amixer -D hw:aoip info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+ExecStart=/home/kjh/.nvm/versions/node/v24.14.1/bin/node --max-old-space-size=128 index.js
 Restart=on-failure
 RestartSec=5
 RuntimeDirectory=aoip
 RuntimeDirectoryPreserve=yes
-
-User=kjh
-Group=audio
-
-# Allow real-time scheduling (required for jackd/chrt -f)
 LimitRTPRIO=99
 LimitMEMLOCK=infinity
-LimitNICE=-20
-CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=50
-CPUAffinity=0 1
-
-# stdout/stderr to journald
+Nice=-5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=aoip
+OOMScoreAdjust=-500
 
 [Install]
 WantedBy=multi-user.target

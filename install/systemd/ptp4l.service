@@ -5,12 +5,20 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/ptp4l -i eth0 -H -m -q \
-  --tx_timestamp_timeout 100 \
+Environment=LD_PRELOAD=/usr/local/lib/ptp_mcast_loop.so
+ExecStart=/usr/sbin/ptp4l \
+  -f /etc/linuxptp/ptp4l.conf \
+  -i eth0 -H -m -q \
   --ptp_minor_version 0
 Restart=on-failure
 RestartSec=3
 User=root
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=92
+CPUAffinity=1
+OOMScoreAdjust=-900
+LimitRTPRIO=infinity
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=multi-user.target

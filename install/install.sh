@@ -11,7 +11,8 @@
 #   5. C 바이너리 빌드 (aoip_engine, rtp_recv, rtp_send)
 #   6. uac2-gadget.sh 배포
 #   7. systemd 서비스 설치 및 활성화
-#   8. 권한 설정
+#   8. daemon.conf 동적 설정 (MAC → IP, multicast)
+#   9. 권한 설정
 # =============================================================================
 
 set -e
@@ -32,6 +33,7 @@ fi
 
 # 프로젝트 루트 (install/ 의 부모)
 AOIP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
 info "프로젝트 경로: ${AOIP_DIR}"
 
 # =============================================================================
@@ -85,19 +87,49 @@ fi
 # =============================================================================
 section "2. Node.js / npm"
 
-NODE_VER=$(node --version 2>/dev/null | sed 's/v//' | cut -d. -f1 || echo 0)
-if [ "$NODE_VER" -lt 18 ] 2>/dev/null; then
-    warn "Node.js v${NODE_VER} — v20 설치 중..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-    apt-get install -y nodejs
-else
-    info "Node.js $(node --version) 설치됨"
+# NVM 또는 시스템 node 경로 감지
+NODE_BIN=""
+# 설치된 사용자의 NVM 경로 먼저 탐색
+TARGET_USER="${SUDO_USER:-$(logname 2>/dev/null || echo "")}"
+if [ -n "${TARGET_USER}" ]; then
+    NVM_DIR="/home/${TARGET_USER}/.nvm"
+    if [ -d "${NVM_DIR}/versions/node" ]; then
+        # 가장 최신 버전 선택
+        NVM_NODE=$(ls -v "${NVM_DIR}/versions/node" | tail -1)
+        if [ -n "${NVM_NODE}" ]; then
+            CANDIDATE="${NVM_DIR}/versions/node/${NVM_NODE}/bin/node"
+            if [ -x "${CANDIDATE}" ]; then
+                NODE_BIN="${CANDIDATE}"
+                info "NVM Node.js 감지: ${NODE_BIN}"
+            fi
+        fi
+    fi
 fi
+
+# NVM 없으면 시스템 node 사용
+if [ -z "${NODE_BIN}" ]; then
+    NODE_BIN=$(command -v node 2>/dev/null || true)
+    if [ -z "${NODE_BIN}" ]; then
+        warn "Node.js 없음 — v20 설치 중..."
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+        apt-get install -y nodejs
+        NODE_BIN=$(command -v node)
+    fi
+    info "Node.js 감지: ${NODE_BIN}"
+fi
+
+NODE_VER=$("${NODE_BIN}" --version 2>/dev/null | sed 's/v//' | cut -d. -f1 || echo 0)
+if [ "${NODE_VER}" -lt 18 ] 2>/dev/null; then
+    warn "Node.js v${NODE_VER} — v20 이상 권장"
+fi
+
+NODE_DIR=$(dirname "${NODE_BIN}")
+info "Node.js $(${NODE_BIN} --version) — ${NODE_BIN}"
 
 if [ -f "${AOIP_DIR}/package.json" ]; then
     info "npm install 실행 중..."
     cd "${AOIP_DIR}"
-    npm install --omit=dev
+    sudo -u "${TARGET_USER:-root}" "${NODE_DIR}/npm" install --omit=dev
 fi
 
 # =============================================================================
@@ -105,9 +137,7 @@ fi
 # =============================================================================
 section "3. Ravenna ALSA 커널 모듈"
 
-INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
 RAVENNA_SRC="${INSTALL_DIR}/ravenna-alsa-lkm/driver"
-RAVENNA_KO="${RAVENNA_SRC}/MergingRavennaALSA.ko"
 KVER=$(uname -r)
 KMOD_EXTRA="/lib/modules/${KVER}/extra"
 
@@ -115,10 +145,8 @@ if [ -f "${RAVENNA_SRC}/Makefile" ]; then
     info "커널 모듈 빌드 중... (커널: ${KVER})"
     make -C "${RAVENNA_SRC}" clean
     make -C "${RAVENNA_SRC}"
-
-    info "커널 모듈 설치: ${KMOD_EXTRA}/"
     mkdir -p "${KMOD_EXTRA}"
-    cp "${RAVENNA_KO}" "${KMOD_EXTRA}/"
+    cp "${RAVENNA_SRC}/MergingRavennaALSA.ko" "${KMOD_EXTRA}/"
     depmod -a
     info "MergingRavennaALSA.ko 설치 완료"
 else
@@ -179,11 +207,13 @@ section "7. systemd 서비스 설치"
 SYSTEMD_SRC="${INSTALL_DIR}/systemd"
 SYSTEMD_DST="/etc/systemd/system"
 
+# 설치 + 활성화할 서비스
 SERVICES=(
     ravenna-module.service
     ptp4l.service
     uac2-gadget.service
     aes67-daemon.service
+    aoip-soundcard.service
     aoip.service
     aoip-rt-tune.service
 )
@@ -197,6 +227,11 @@ for svc in "${SERVICES[@]}"; do
         warn "${svc} 없음 — 건너뜀"
     fi
 done
+
+# aoip.service: node 경로 치환
+sed -i "s|__NODE_BIN__|${NODE_BIN}|g" "${SYSTEMD_DST}/aoip.service"
+sed -i "s|__NODE_DIR__|${NODE_DIR}|g" "${SYSTEMD_DST}/aoip.service"
+info "aoip.service node 경로 설정: ${NODE_BIN}"
 
 systemctl daemon-reload
 
@@ -216,17 +251,72 @@ if [ -f "${RT_TUNE_SH}" ]; then
 fi
 
 # =============================================================================
-# 8. 권한 설정
+# 8. daemon.conf 동적 설정 (MAC 기반)
 # =============================================================================
-section "8. 권한 설정"
+section "8. daemon.conf 동적 설정"
 
-# 실행 권한
+DAEMON_CONF="${INSTALL_DIR}/aes67/daemon.conf"
+
+if [ ! -f "${DAEMON_CONF}" ]; then
+    warn "daemon.conf 없음 — 건너뜀"
+else
+    # eth0 MAC 주소 읽기
+    ETH_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null || true)
+    if [ -z "${ETH_MAC}" ]; then
+        warn "eth0 MAC 읽기 실패 — daemon.conf 설정 건너뜀"
+    else
+        # eth0 IP 주소 읽기
+        ETH_IP=$(ip -4 addr show eth0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+        if [ -z "${ETH_IP}" ]; then
+            warn "eth0 IP 없음 — ip_addr 설정 건너뜀"
+        fi
+
+        # MAC → multicast 주소 생성: 239.69.<byte4>.<byte5>
+        IFS=':' read -ra MAC_BYTES <<< "${ETH_MAC}"
+        MCAST_X=$((16#${MAC_BYTES[4]}))
+        MCAST_Y=$((16#${MAC_BYTES[5]}))
+        RTP_MCAST="239.69.${MCAST_X}.${MCAST_Y}"
+
+        info "MAC: ${ETH_MAC}"
+        info "IP:  ${ETH_IP:-unchanged}"
+        info "RTP Multicast Base: ${RTP_MCAST}"
+
+        # daemon.conf JSON 패치 (python3 이용)
+        python3 - "${DAEMON_CONF}" "${ETH_MAC}" "${ETH_IP}" "${RTP_MCAST}" <<'PYEOF'
+import sys, json
+
+conf_path = sys.argv[1]
+mac       = sys.argv[2]
+ip        = sys.argv[3] if sys.argv[3] else None
+mcast     = sys.argv[4]
+
+with open(conf_path) as f:
+    cfg = json.load(f)
+
+cfg["mac_addr"]       = mac
+cfg["custom_node_id"] = f"aoip {mac}"
+cfg["node_id"]        = f"aoip {mac}"
+cfg["rtp_mcast_base"] = mcast
+if ip:
+    cfg["ip_addr"] = ip
+
+with open(conf_path, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PYEOF
+        info "daemon.conf 업데이트 완료"
+    fi
+fi
+
+# =============================================================================
+# 9. 권한 설정
+# =============================================================================
+section "9. 권한 설정"
+
 chmod +x "${INSTALL_DIR}/aes67/aes67-daemon"
 chmod +x "${INSTALL_DIR}/aes67/scripts/"*.sh
 chmod +x "${AOIP_DIR}/scripts/"*.sh
 
-# 현재 로그인 사용자를 audio 그룹에 추가
-TARGET_USER="${SUDO_USER:-$(logname 2>/dev/null || echo "")}"
 if [ -n "${TARGET_USER}" ]; then
     usermod -aG audio "${TARGET_USER}"
     info "${TARGET_USER} → audio 그룹 추가"

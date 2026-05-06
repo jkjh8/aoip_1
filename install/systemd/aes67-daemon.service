@@ -7,31 +7,31 @@ Requires=ptp4l.service
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/kjh/aoip_1/install/aes67
+WorkingDirectory=/home/kjh/aes67
 
 # 우선순위 설정
 CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=90
+CPUSchedulingPriority=91
 Nice=-10
 
 # CPU 격리: JACK(CPU3)과 분리
-# CPUAffinity=2 3
+# eth0 IRQ/ptp4l과 함께 CPU1에 고정 — RAVENNA 네트워크 처리
+CPUAffinity=1
 
 # 커널 모듈 로드 (modprobe — /lib/modules 영구 설치 기반)
-ExecStartPre=-/sbin/modprobe -r MergingRavennaALSA
-ExecStartPre=/sbin/modprobe MergingRavennaALSA
+ExecStartPre=/bin/bash -c 'lsmod | grep -q MergingRavennaALSA || modprobe MergingRavennaALSA'
 
 # CPU 스케일링 비활성화
-ExecStartPre=/home/kjh/aoip_1/install/aes67/scripts/disable_cpu_scaling.sh
+ExecStartPre=/home/kjh/aes67/scripts/disable_cpu_scaling.sh
 
 # 데몬 실행
-ExecStart=/home/kjh/aoip_1/install/aes67/aes67-daemon -c /home/kjh/aoip_1/install/aes67/daemon.conf
+ExecStart=/home/kjh/aes67/aes67-daemon -c /home/kjh/aes67/daemon.conf
 
 # 종료 시 커널 모듈 언로드
 ExecStopPost=/sbin/modprobe -r MergingRavennaALSA
 
 # 메모리 스왑 방지
-LockMemory=yes
+LimitMEMLOCK=infinity
 
 # 보안 필터
 PrivateTmp=yes

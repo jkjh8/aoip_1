@@ -303,11 +303,26 @@ static void read_alsa_device(Device *d)
         if (!atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_acquire)) {
             for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
                 memset(g_in_ptr[d->ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
+            d->cap_prebuf_ready = 0;
             return;
+        }
+        /* PTP 잠금 직후 in_ring이 비어있음 — RAVENNA_FILL_TARGET/2 충전까지 zeros 출력.
+         * 충전 완료 시점에 SRC/PI 리셋하여 cold-start 아티팩트 없이 시작. */
+        if (!d->cap_prebuf_ready) {
+            if (rb_avail(&d->in_ring) < RAVENNA_FILL_TARGET / 2) {
+                for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
+                    memset(g_in_ptr[d->ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
+                return;
+            }
+            src_reset(d->cap_src);
+            pi_reset(&d->cap_pi);
+            d->cap_prebuf_ready = 1;
+            fprintf(stderr, "[aoip_engine] ravenna '%s': cap prebuffer done (fill=%d), SRC ready\n",
+                    d->name, rb_avail(&d->in_ring));
         }
         ring_capture_src(d->cap_src, &d->cap_pi, &d->in_ring,
                          d->tmp_cap_in, d->tmp_cap_out,
-                         FILL_TARGET, d->channels, d->ch_start);
+                         RAVENNA_FILL_TARGET, d->channels, d->ch_start);
     } else {
         read_alsa_master(d);
     }
@@ -356,29 +371,37 @@ static void dsp_read_inputs(void)
                 memset(g_in_ptr[r->ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
             continue;
         }
-        /* 프리버퍼링: 실데이터가 RTP_FILL_TARGET 이상 쌓일 때까지 zeros 출력 */
+        /* 프리버퍼링: 설정 버퍼의 절반 이상 쌓일 때까지 zeros 출력 */
         if (r->prebuffering) {
-            if (rb_avail(&r->ring) >= RTP_FILL_TARGET) {
+            if (rb_avail(&r->ring) >= r->fill_target / 2) {
                 r->prebuffering = 0;
-                fprintf(stderr, "[aoip_engine] rtp_in '%s': prebuffer done (fill=%d)\n",
-                        r->name, rb_avail(&r->ring));
+                fprintf(stderr, "[aoip_engine] rtp_in '%s': prebuffer done (fill=%d, target=%d)\n",
+                        r->name, rb_avail(&r->ring), r->fill_target);
             } else {
                 for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
                     memset(g_in_ptr[r->ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
                 continue;
             }
         }
+        if (rb_avail(&r->ring) > r->fill_target * 2)
+            r->overrun_total++;
         int used = ring_capture_src(r->rtp_src, &r->rtp_pi, &r->ring,
                                     r->rtp_in_buf, r->rtp_out_buf,
-                                    RTP_FILL_TARGET, r->channels, r->ch_start);
+                                    r->fill_target, r->channels, r->ch_start);
         if (used > 0) {
             r->rtp_underrun = 0;
         } else {
             r->rtp_underrun++;
-            /* 10틱(~20ms) 연속 언더런 시에만 출력, 이후 매 500틱마다 반복 */
-            if (r->rtp_underrun == 10 || (r->rtp_underrun > 100 && r->rtp_underrun % 500 == 0))
-                fprintf(stderr, "[aoip_engine] rtp_in '%s': underrun %d ticks (fill=%d)\n",
+            r->underrun_total++;
+            if (r->rtp_underrun == 10 || (r->rtp_underrun > 10 && r->rtp_underrun % 500 == 0))
+                fprintf(stderr, "[aoip_engine] rtp_in '%s': underrun %d ticks (fill=%d), re-prebuffering\n",
                         r->name, r->rtp_underrun, rb_avail(&r->ring));
+            /* 10틱 지속 언더런 시 SRC/PI 리셋 후 재충전 대기 */
+            if (r->rtp_underrun == 10) {
+                src_reset(r->rtp_src);
+                pi_reset(&r->rtp_pi);
+                r->prebuffering = 1;
+            }
         }
     }
 }
@@ -483,6 +506,7 @@ static void *dsp_thread(void *arg)
 static void *reporter_thread(void *arg)
 {
     (void)arg;
+    int buf_tick = 0;
     while (g_reporter_running) {
         usleep(125000);
         for (int i = 0; i < g_n_in; i++) {
@@ -492,6 +516,21 @@ static void *reporter_thread(void *arg)
         for (int i = 0; i < g_n_out; i++) {
             float pk = g_out_level[i]; g_out_level[i] = 0.0f;
             printf("lvl out %d %.1f\n", i+1, pk > 1e-7f ? 20.0f*log10f(pk) : -120.0f);
+        }
+        /* 2초마다 rtp_in 버퍼 fill 상태 보고 */
+        if (++buf_tick >= 16) {
+            buf_tick = 0;
+            for (int i = 0; i < g_n_rtp_in; i++) {
+                RtpStream *r = &g_rtp_in[i];
+                if (!r->enabled || !r->ring.buf) continue;
+                int fill = rb_avail(&r->ring);
+                int fill_ms  = fill * 1000 / SAMPLE_RATE;
+                int target_ms = r->fill_target > 0 ? r->fill_target * 1000 / SAMPLE_RATE : 0;
+                int pct = r->fill_target > 0 ? fill * 100 / r->fill_target : 0;
+                printf("rtp_buf %s fillMs=%d targetMs=%d pct=%d underrun=%d underrunTotal=%ld overrunTotal=%ld\n",
+                       r->name, fill_ms, target_ms, pct, r->rtp_underrun,
+                       r->underrun_total, r->overrun_total);
+            }
         }
         fflush(stdout);
     }
@@ -515,6 +554,7 @@ static void bridge_start(Device *d)
                 atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_relaxed);
                 atomic_store_explicit(&d->ravenna_flush, 0, memory_order_relaxed);
                 d->ravenna_prebuf_count = 0;
+                d->cap_prebuf_ready = 0;
             }
         }
         if (d->mode != 1) {
@@ -686,17 +726,34 @@ static void cmd_rtp_in(int n, char **tok)
     if (n < 3) return;
     const char *sub  = tok[1];
     const char *name = tok[2];
-    if (!strcmp(sub, "add") && n >= 3 && g_n_rtp_in < MAX_RTP) {
-        RtpStream *r = &g_rtp_in[g_n_rtp_in];
+    if (!strcmp(sub, "add") && n >= 3) {
+        int slot = -1;
+        for (int i = 0; i < g_n_rtp_in; i++)
+            if (!g_rtp_in[i].enabled) { slot = i; break; }
+        if (slot < 0) {
+            if (g_n_rtp_in >= MAX_RTP) return;
+            slot = g_n_rtp_in;
+        }
+        RtpStream *r = &g_rtp_in[slot];
         snprintf(r->name, sizeof(r->name), "%s", name);
         r->channels = n >= 4 ? atoi(tok[3]) : 2;
-        r->ch_start = n >= 5 ? atoi(tok[4]) : g_n_rtp_in * 2;
+        r->ch_start = n >= 5 ? atoi(tok[4]) : slot * 2;
+        int buf_ms  = RTP_FILL_TARGET * 1000 / SAMPLE_RATE; /* 기본값 */
+        for (int i = 5; i < n; i++) {
+            int v; if (sscanf(tok[i], "bufMs=%d", &v) == 1) { buf_ms = v; break; }
+        }
+        r->fill_target = buf_ms * SAMPLE_RATE / 1000;
         r->enabled  = 1;
-        if (rtp_stream_open(r, 0)) g_n_rtp_in++;
-        else                   r->enabled = 0;
+        if (rtp_stream_open(r, 0)) {
+            if (slot == g_n_rtp_in) g_n_rtp_in++;
+        } else {
+            r->enabled = 0;
+        }
     } else if (!strcmp(sub, "remove")) {
         for (int i = 0; i < g_n_rtp_in; i++)
-            if (!strcmp(g_rtp_in[i].name, name)) { rtp_stream_close(&g_rtp_in[i]); break; }
+            if (!strcmp(g_rtp_in[i].name, name) && g_rtp_in[i].enabled) {
+                rtp_stream_close(&g_rtp_in[i]); break;
+            }
     }
 }
 
@@ -705,17 +762,29 @@ static void cmd_rtp_out(int n, char **tok)
     if (n < 3) return;
     const char *sub  = tok[1];
     const char *name = tok[2];
-    if (!strcmp(sub, "add") && n >= 3 && g_n_rtp_out < MAX_RTP) {
-        RtpStream *r = &g_rtp_out[g_n_rtp_out];
+    if (!strcmp(sub, "add") && n >= 3) {
+        int slot = -1;
+        for (int i = 0; i < g_n_rtp_out; i++)
+            if (!g_rtp_out[i].enabled) { slot = i; break; }
+        if (slot < 0) {
+            if (g_n_rtp_out >= MAX_RTP) return;
+            slot = g_n_rtp_out;
+        }
+        RtpStream *r = &g_rtp_out[slot];
         snprintf(r->name, sizeof(r->name), "%s", name);
         r->channels = n >= 4 ? atoi(tok[3]) : 2;
-        r->ch_start = n >= 5 ? atoi(tok[4]) : g_n_rtp_out * 2;
+        r->ch_start = n >= 5 ? atoi(tok[4]) : slot * 2;
         r->enabled  = 1;
-        if (rtp_stream_open(r, 1)) g_n_rtp_out++;
-        else                   r->enabled = 0;
+        if (rtp_stream_open(r, 1)) {
+            if (slot == g_n_rtp_out) g_n_rtp_out++;
+        } else {
+            r->enabled = 0;
+        }
     } else if (!strcmp(sub, "remove")) {
         for (int i = 0; i < g_n_rtp_out; i++)
-            if (!strcmp(g_rtp_out[i].name, name)) { rtp_stream_close(&g_rtp_out[i]); break; }
+            if (!strcmp(g_rtp_out[i].name, name) && g_rtp_out[i].enabled) {
+                rtp_stream_close(&g_rtp_out[i]); break;
+            }
     }
 }
 

@@ -100,6 +100,9 @@ typedef struct {
 
     /* PTP 재잠금 후 클럭 안정화 prebuffer 누적 카운터 (캡처 스레드만 접근) */
     int              ravenna_prebuf_count;
+
+    /* PTP 잠금 후 cap SRC 시작 전 in_ring 충전 완료 플래그 (DSP 스레드 전용) */
+    int              cap_prebuf_ready;
 } Device;
 
 /* ── 함수 선언 ───────────────────────────────────────────────────── */

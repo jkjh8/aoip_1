@@ -5,7 +5,7 @@
 
 /* POSIX 공유 메모리 링버퍼 — aoip_engine(owner), rtp_recv/rtp_send(attach) 공통 레이아웃 */
 #define SHM_RING_FRAMES  32768
-#define SHM_MAX_CH       8
+#define SHM_MAX_CH       24
 
 typedef struct {
     _Atomic uint32_t wp;        /* 단조 증가 write frame 카운터 */

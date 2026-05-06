@@ -1,6 +1,6 @@
 import { Server as SocketIO } from 'socket.io';
 import { getBridgeStatus } from '../lib/bridges.js';
-import { getDaemonStatus, daemonEvents }             from '../lib/aes67daemon.js';
+import { getDaemonStatus, daemonEvents, enrichSinks } from '../lib/aes67daemon.js';
 import { getGstStatus, getRxStats, getRtpStreamStatus, streamEvents } from '../lib/rtp/index.js';
 import { getChannels, getSavedRoutes }              from '../lib/channels/index.js';
 import { isDspRunning }                             from '../lib/dsp/index.js';
@@ -36,7 +36,7 @@ async function snapshot() {
     bridges:  getBridgeStatus(),
     streams:  { ...getGstStatus(), rtpStreams: getRtpStreamStatus() },
     rxStats:  getRxStats(),
-    channels:    getChannels(connections),
+    channels:    getChannels(),
     connections,
     aes67:    cachedAes67Status,
   };
@@ -69,7 +69,7 @@ export function setupSocket(httpServer, config) {
   // 레벨 미터 — 빠른 주기로 별도 emit
   setInterval(() => {
     if (io.engine.clientsCount === 0) return;
-    const ch = getChannels(cachedConnections);
+    const ch = getChannels();
     io.emit('levels', {
       inputs:  ch.inputs.map(c  => ({ id: c.id, level: c.level })),
       outputs: ch.outputs.map(c => ({ id: c.id, level: c.level })),
@@ -87,7 +87,7 @@ export function setupSocket(httpServer, config) {
     if (io.engine.clientsCount > 0) io.emit('aes67:sources', data);
   });
   daemonEvents.on('sinks:changed', (data) => {
-    if (io.engine.clientsCount > 0) io.emit('aes67:sinks', data);
+    if (io.engine.clientsCount > 0) io.emit('aes67:sinks', enrichSinks(data));
   });
   daemonEvents.on('ptp:changed', (data) => {
     if (io.engine.clientsCount > 0) io.emit('aes67:ptp:status', data);

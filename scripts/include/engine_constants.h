@@ -4,7 +4,7 @@
 #define MAX_PERIOD_FRAMES   512
 #define DEFAULT_PERIOD_FRAMES 24
 #define RING_FRAMES         16384
-#define MAX_CH          8
+#define MAX_CH          24
 #define MAX_DEVICES     8
 #define MAX_RTP         4
 #define MAX_EQ_BANDS    4
@@ -18,6 +18,9 @@
 /* RTP 링버퍼 크기 및 적응형 버퍼 타겟 (bufMs=500ms → 24000 frames @48kHz) */
 #define RTP_RING_FRAMES 65536
 #define RTP_FILL_TARGET 24000
+
+/* RAVENNA 캡처 SRC 버퍼 타겟 (5ms @ 48kHz) */
+#define RAVENNA_FILL_TARGET (SAMPLE_RATE * 5 / 1000)
 
 /* RTP 전용 PI 상수 — ALSA PI보다 20x 빠른 응답, ±1000ppm 보정 범위 */
 #define RTP_RATIO_KP   0.001

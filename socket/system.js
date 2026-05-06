@@ -1,7 +1,8 @@
-import { getNetworkInfo, setStaticIp, setDhcp, rebootSystem } from '../lib/system.js';
+import { getNetworkInfo, setStaticIp, setDhcp, rebootSystem, getUptime } from '../lib/system.js';
 
 /**
  * socket events:
+ *   system:network      (server→client)  { iface, ip, subnet, gateway, dns, mode, mac }  — on connect
  *   system:network:get  (client→server)  { iface? }
  *                       (server→client)  { iface, ip, subnet, gateway, dns, mode, mac }
  *
@@ -13,9 +14,12 @@ import { getNetworkInfo, setStaticIp, setDhcp, rebootSystem } from '../lib/syste
  *                       (server→client)  { ok }
  */
 export default function register(socket) {
+  // 연결 즉시 네트워크 정보 + uptime push
+  try { socket.emit('system:network', { ...getNetworkInfo(), uptime: getUptime() }); } catch { /* ignore */ }
+
   socket.on('system:network:get', ({ iface = 'eth0' } = {}, cb) => {
     try {
-      cb?.(getNetworkInfo(iface));
+      cb?.({ ...getNetworkInfo(iface), uptime: getUptime() });
     } catch (e) {
       cb?.({ error: e.message });
     }

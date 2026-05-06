@@ -191,6 +191,7 @@ static int lame_reinit(int rate, int ch, int bitrate)
     lame_set_quality(g_lame, 7);        /* 7=fastest, 2=best */
     lame_set_VBR(g_lame, vbr_off);     /* CBR */
     lame_set_bWriteVbrTag(g_lame, 0);
+    lame_set_disable_reservoir(g_lame, 1); /* RTP 스트리밍: 각 프레임 독립 (bit reservoir 비활성) */
     if (lame_init_params(g_lame) < 0) {
         lame_close(g_lame); g_lame = NULL; return 0;
     }

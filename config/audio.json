@@ -9,7 +9,7 @@
     "device": "hw:sndrpiaoip2",
     "name": "Analog",
     "rate": 48000,
-    "period": 48,
+    "period": 96,
     "periods": 3,
     "channels": 2
   },
@@ -68,7 +68,7 @@
       "channels": 2,
       "protocol": "rtp",
       "rtpEncoding": "MPA",
-      "bufferMs": 100,
+      "bufferMs": 500,
       "enabled": true,
       "sampleRate": 44100,
       "address": "0.0.0.0"

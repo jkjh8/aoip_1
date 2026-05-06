@@ -17,10 +17,7 @@
  *   stats codec=... bufMs=N packets=N drops=N srcIp=... srcPort=N bitrateKbps=N
  */
 
-#define MINIMP3_IMPLEMENTATION
-#define MINIMP3_FLOAT_OUTPUT
-#include "include/minimp3.h"
-
+#include <lame/lame.h>
 #include <samplerate.h>
 
 #include <stdio.h>
@@ -99,7 +96,7 @@ static int      g_shm_fd        = -1;
 static ShmRing *g_shm           = NULL;
 
 /* ── decoders ────────────────────────────────────────── */
-static mp3dec_t   g_mp3dec;
+static hip_t      g_hip       = NULL;   /* LAME MP3 decoder */
 static SRC_STATE *g_src_state = NULL;
 
 /* G.711 decode tables */
@@ -213,7 +210,10 @@ static void detect_rtp_pt(uint8_t pt, const uint8_t *payload, int plen)
     case 11: g_enc = ENC_L16;  g_in_rate = 44100;
              snprintf(g_codec, sizeof(g_codec), "L16");  break;
     case 14: g_enc = ENC_MPA;  g_in_rate = 48000;
-             snprintf(g_codec, sizeof(g_codec), "MPA");  break;
+             snprintf(g_codec, sizeof(g_codec), "MPA");
+             if (g_hip) { hip_decode_exit(g_hip); }
+             g_hip = hip_decode_init();
+             break;
     default:
         /* dynamic PT: sniff payload for MP3 sync word (skip 4-byte MPA header) */
         if (plen >= 6) {
@@ -249,6 +249,8 @@ static void detect_raw(const uint8_t *payload, int len)
     if (len >= 4 && payload[0] == 0xFF && (payload[1] & 0xE0) == 0xE0) {
         g_enc = ENC_MPA;
         snprintf(g_codec, sizeof(g_codec), "mp3");
+        if (g_hip) { hip_decode_exit(g_hip); }
+        g_hip = hip_decode_init();
         fprintf(stderr, "[rtp_recv] raw: detected MP3\n");
     } else if (len > 0 && (len % (g_ch * 3)) == 0 && len > 4000) {
         g_enc = ENC_L24;
@@ -264,8 +266,8 @@ static void detect_raw(const uint8_t *payload, int len)
 }
 
 /* ── decode one payload buffer ───────────────────────── */
-#define DECODE_BUF_MAX (MINIMP3_MAX_SAMPLES_PER_FRAME > 8192 \
-                        ? MINIMP3_MAX_SAMPLES_PER_FRAME : 8192)
+/* hip decoder: 1152 samples/frame max; G.711/L16/L24: up to 8192 frames */
+#define DECODE_BUF_MAX 8192
 static float g_dec_buf[DECODE_BUF_MAX * SHM_MAX_CH];
 
 static void decode_payload(const uint8_t *payload, int len)
@@ -313,41 +315,58 @@ static void decode_payload(const uint8_t *payload, int len)
     }
 
     case ENC_MPA: {
-        /* MP3: skip RFC 2250 4-byte header in RTP mode */
+        if (!g_hip) break;
+        /* MP3: skip RFC 2250 4-byte header (MBZ + Frag_offset) in RTP mode */
         const uint8_t *mp3data = payload;
         int mp3len = len;
         if (g_proto == PROTO_RTP && len >= 4) {
+            /* Frag_offset != 0 이면 이 패킷은 이전 프레임의 continuation.
+             * hip_decode가 내부적으로 조각을 재조립하므로 그대로 전달. */
             mp3data += 4;
             mp3len  -= 4;
         }
-        /* decode all frames in this packet */
-        while (mp3len > 0) {
-            float pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
-            mp3dec_frame_info_t info;
-            int samples = mp3dec_decode_frame(&g_mp3dec, mp3data, mp3len, pcm, &info);
-            if (info.frame_bytes <= 0) break;
-            mp3data += info.frame_bytes;
-            mp3len  -= info.frame_bytes;
-            if (samples <= 0) continue;
+        if (mp3len <= 0) break;
 
-            int ch  = info.channels > 0 ? info.channels : g_ch;
-            int hz  = info.hz > 0       ? info.hz       : g_in_rate;
-            int frames = samples / ch;
+        /* LAME hip decoder: 내부 버퍼를 관리하므로 조각 재조립 불필요.
+         * hip_decode1_headers: 한 번에 최대 1 프레임 반환 + header 정보(rate/ch).
+         * 첫 호출에 데이터 제공, 이후 len=0으로 내부 버퍼 드레인. */
+        static unsigned char s_empty[1] = {0};
+        short pcm_l[1152], pcm_r[1152];
+        mp3data_struct mp3info;
+        unsigned char *feed_buf = (unsigned char *)mp3data;
+        size_t         feed_len = (size_t)mp3len;
+        int samples;
+        while ((samples = hip_decode1_headers(g_hip, feed_buf, feed_len,
+                                              pcm_l, pcm_r, &mp3info)) >= 0) {
+            /* 첫 호출 이후 내부 버퍼만 드레인 */
+            feed_buf = s_empty;
+            feed_len = 0;
 
-            /* update rate/resampler if MP3 header says different rate */
-            if (hz != g_in_rate) {
-                fprintf(stderr, "[rtp_recv] MP3 rate update: %d→%d\n", g_in_rate, hz);
-                g_in_rate = hz;
-                setup_resampler();
-            }
-            /* mono MP3 to stereo output: duplicate channel */
-            if (ch == 1 && g_ch == 2) {
-                for (int f = frames - 1; f >= 0; f--) {
-                    pcm[f*2+1] = pcm[f];
-                    pcm[f*2]   = pcm[f];
+            if (samples == 0) break;  /* 더 이상 완성된 프레임 없음 */
+
+            /* header_parsed: 처음 헤더를 파싱했을 때 rate/ch 업데이트 */
+            if (mp3info.header_parsed) {
+                int hz = mp3info.samplerate;
+                if (hz > 0 && hz != g_in_rate) {
+                    fprintf(stderr, "[rtp_recv] MP3 rate detected: %d→%d\n", g_in_rate, hz);
+                    g_in_rate = hz;
+                    setup_resampler();
                 }
             }
-            resample_and_write(pcm, frames);
+
+            /* int16 → float, interleave L/R */
+            float *out = g_dec_buf;
+            if (g_ch == 2) {
+                for (int i = 0; i < samples; i++) {
+                    out[i*2]   = pcm_l[i] / 32768.0f;
+                    out[i*2+1] = pcm_r[i] / 32768.0f;
+                }
+            } else {
+                /* mono: average L+R */
+                for (int i = 0; i < samples; i++)
+                    out[i] = (pcm_l[i] + pcm_r[i]) / 65536.0f;
+            }
+            resample_and_write(out, samples);
         }
         break;
     }
@@ -515,8 +534,8 @@ int main(int argc, char *argv[])
 
     /* argv[4] = client name (unused, for compatibility) */
     g_buf_ms  = argc > 5 ? atoi(argv[5]) : 100;
-    if (g_buf_ms < 10)  g_buf_ms = 10;
-    if (g_buf_ms > 500) g_buf_ms = 500;
+    if (g_buf_ms < 10)   g_buf_ms = 10;
+    if (g_buf_ms > 2000) g_buf_ms = 2000;
 
     g_in_rate = argc > 6 && atoi(argv[6]) > 0 ? atoi(argv[6]) : 48000;
     /* argv[7] = encoding hint (ignored: always auto-detect) */
@@ -533,8 +552,19 @@ int main(int argc, char *argv[])
     }
     if (!shm_attach()) return 1;
 
+    /* jitter buffer: wp를 bufMs만큼 선행 이동 → MP3 같은 대형 패킷에도 무음 없음 */
+    if (g_buf_ms > 0) {
+        int pre = (int)((long long)g_buf_ms * OUT_RATE / 1000);
+        /* 링 버퍼 크기를 초과하지 않도록 안전 마진(1024프레임) 확보 */
+        int max_pre = SHM_RING_FRAMES - 1024;
+        if (pre > max_pre) pre = max_pre;
+        uint32_t wp0 = atomic_load_explicit(&g_shm->wp, memory_order_relaxed);
+        atomic_store_explicit(&g_shm->wp, wp0 + (uint32_t)pre, memory_order_release);
+        fprintf(stderr, "[rtp_recv] jitter buffer: %dms (%d frames pre-buffered)\n", g_buf_ms, pre);
+    }
+
     /* init decoders */
-    mp3dec_init(&g_mp3dec);
+    g_hip = hip_decode_init();
     build_g711_tables();
 
     /* ── UDP socket ──────────────────────────────────── */
@@ -604,6 +634,7 @@ int main(int argc, char *argv[])
     pthread_join(decode_tid, NULL);
     pthread_join(stats_tid,  NULL);
 
+    if (g_hip)      { hip_decode_exit(g_hip); g_hip = NULL; }
     if (g_src_state) { src_delete(g_src_state); g_src_state = NULL; }
     if (g_shm)     { munmap(g_shm, SHMRING_SIZE); g_shm = NULL; }
     if (g_shm_fd >= 0) { close(g_shm_fd); g_shm_fd = -1; }

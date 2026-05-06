@@ -14,8 +14,8 @@ aoip_engine: aoip_engine.c alsa_device.c dsp_math.c
 	$(CC) $(AOIP_CFLAGS) -o $@ $^ $(AOIP_LDFLAGS)
 
 # GStreamer-free: libsamplerate + minimp3 (header-only)
-rtp_recv: rtp_recv.c include/minimp3.h include/shm_ring.h
-	$(CC) $(CFLAGS) -o $@ $< -lsamplerate $(LDFLAGS)
+rtp_recv: rtp_recv.c include/shm_ring.h
+	$(CC) $(CFLAGS) -o $@ $< -lsamplerate -lmp3lame $(LDFLAGS)
 
 rtp_send: rtp_send.c
 	$(CC) $(CFLAGS) -o $@ $< -lsamplerate -lmp3lame $(LDFLAGS)

@@ -45,6 +45,7 @@ app.get('*', (_req, res) => res.sendFile(join(SPA_DIR, 'index.html')));
 
 const httpServer = createServer(app);
 setupSocket(httpServer, config);
+httpServer.listen(PORT, () => logger.info(`[server] http://localhost:${PORT}`));
 
 // ── Startup ───────────────────────────────────────────
 
@@ -83,8 +84,6 @@ async function startup() {
     restoreDspState();
     logger.info('[startup] config re-applied after engine restart');
   });
-
-  httpServer.listen(PORT, () => logger.info(`[server] http://localhost:${PORT}`));
 }
 
 startup().catch((err) => {

@@ -1,11 +1,11 @@
 {
   "engine": {
     "bypassDsp": false,
-    "dspPrio": 90,
-    "alsaPrio": 89,
-    "ravennaPrio": 88,
-    "rtpPrio": 87,
-    "periodFrames": 96,
+    "dspPrio": 84,
+    "alsaPrio": 83,
+    "ravennaPrio": 86,
+    "rtpPrio": 82,
+    "periodFrames": 48,
     "lvlReport": true,
     "startupDelay": 0
   },
@@ -24,7 +24,7 @@
       "device": "hw:RAVENNA",
       "rate": 48000,
       "period": 48,
-      "periods": 8,
+      "periods": 3,
       "channels": 2,
       "aes67": true,
       "enabled": true

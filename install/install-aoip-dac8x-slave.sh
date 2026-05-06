@@ -8,7 +8,7 @@
 set -e
 
 KVER=$(uname -r)
-KBRANCH="rpi-6.12.y"
+KBRANCH="rpi-6.18.y"
 SRC_URL="https://raw.githubusercontent.com/raspberrypi/linux/${KBRANCH}/sound/soc/bcm/rpi-simple-soundcard.c"
 BUILD_DIR="/tmp/aoip-dac8x-slave-mod"
 MODULE_DIR="/lib/modules/${KVER}/kernel/sound/soc/bcm"
@@ -212,6 +212,13 @@ fi
 cp "${DTS_SRC}" "${BUILD_DIR}/aoip-dac8x-slave.dts"
 info "aoip-dac8x-slave.dts 복사 완료"
 
+DTS_MASTER="${SCRIPT_DIR}/aoip-dac8x.dts"
+if [ ! -f "${DTS_MASTER}" ]; then
+    error "aoip-dac8x.dts 를 찾을 수 없습니다: ${DTS_MASTER}"
+fi
+cp "${DTS_MASTER}" "${BUILD_DIR}/aoip-dac8x.dts"
+info "aoip-dac8x.dts 복사 완료"
+
 # -----------------------------------------------------------------------------
 # 6. Makefile 작성
 # -----------------------------------------------------------------------------
@@ -246,6 +253,11 @@ if ! dtc -@ -I dts -O dtb -o aoip-dac8x-slave.dtbo aoip-dac8x-slave.dts 2>&1; th
 fi
 info "컴파일 완료: aoip-dac8x-slave.dtbo"
 
+if ! dtc -@ -I dts -O dtb -o aoip-dac8x.dtbo aoip-dac8x.dts 2>&1; then
+    error "Master DTS 컴파일 실패."
+fi
+info "컴파일 완료: aoip-dac8x.dtbo"
+
 # -----------------------------------------------------------------------------
 # 9. 모듈 및 오버레이 설치
 # -----------------------------------------------------------------------------
@@ -257,6 +269,8 @@ info "snd-soc-aoip-soundcard.ko 설치 완료"
 info "Device Tree 오버레이 설치 중..."
 cp "${BUILD_DIR}/aoip-dac8x-slave.dtbo" "${OVERLAY_DIR}/"
 info "aoip-dac8x-slave.dtbo 설치 완료"
+cp "${BUILD_DIR}/aoip-dac8x.dtbo" "${OVERLAY_DIR}/"
+info "aoip-dac8x.dtbo 설치 완료"
 
 # -----------------------------------------------------------------------------
 # 10. /boot/firmware/config.txt 수정

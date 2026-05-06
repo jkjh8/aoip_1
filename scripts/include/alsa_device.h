@@ -8,8 +8,8 @@
 #include "ring_buf.h"
 
 /* ── PI 드리프트 보정 상수 ──────────────────────────────────────── */
-#define RATIO_KP   0.0002      /* 버퍼 오차 → ratio 비례 반응 */
-#define RATIO_KI   0.0000005   /* 버퍼 오차 적분 → 영구 drift 제거 (~3-5s 수렴) */
+#define RATIO_KP   0.0005      /* 버퍼 오차 → ratio 비례 반응 */
+#define RATIO_KI   0.000003    /* 버퍼 오차 적분 → 영구 drift 제거 (~1s 수렴 목표) */
 #define RATIO_MIN  0.99980
 #define RATIO_MAX  1.00020
 

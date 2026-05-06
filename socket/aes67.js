@@ -47,6 +47,7 @@ export default function register(socket, ctx) {
   // 접속 시 초기 데이터 전송
   getSources().then(s => socket.emit('aes67:sources', s)).catch(() => {});
   getSinks().then(s => socket.emit('aes67:sinks', s)).catch(() => {});
+  getPtpStatus().then(s => socket.emit('aes67:ptp:status', s)).catch(() => {});
 
   // ── 상태 조회 ──────────────────────────────────────────
 

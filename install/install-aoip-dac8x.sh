@@ -8,7 +8,7 @@
 set -e
 
 KVER=$(uname -r)
-KBRANCH="rpi-6.12.y"
+KBRANCH="rpi-6.18.y"
 SRC_URL="https://raw.githubusercontent.com/raspberrypi/linux/${KBRANCH}/sound/soc/bcm/rpi-simple-soundcard.c"
 BUILD_DIR="/tmp/aoip-dac8x-mod"
 MODULE_DIR="/lib/modules/${KVER}/kernel/sound/soc/bcm"

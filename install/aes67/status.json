@@ -21,7 +21,7 @@
     "io": "Audio Device",
     "use_sdp": true,
     "source": "http://127.0.0.1/",
-    "sdp": "v=0\r\no=- 699349308 699349411 IN IP4 192.168.10.146\r\ns=AES67-TX-1\r\nc=IN IP4 239.69.7.12/32\r\nt=0 0\r\nm=audio 5004 RTP/AVP 96\r\ni=Channels 1-2\r\na=recvonly\r\na=rtpmap:96 L24/48000/2\r\na=ptime:1\r\na=ts-refclk:ptp=IEEE1588-2008:2C-CF-67-FF-FE-EB-E3-ED:0\r\na=mediaclk:direct=0\r\n",
+    "sdp": "v=0\r\no=- 699349308 699349587 IN IP4 192.168.10.146\r\ns=AES67-TX-1\r\nc=IN IP4 239.69.7.12/32\r\nt=0 0\r\nm=audio 5004 RTP/AVP 96\r\ni=Channels 1-2\r\na=recvonly\r\na=rtpmap:96 L24/48000/2\r\na=ptime:1\r\na=ts-refclk:ptp=IEEE1588-2008:2C-CF-67-FF-FE-EB-E3-ED:0\r\na=mediaclk:direct=0\r\n",
     "delay": 192,
     "ignore_refclk_gmid": true,
     "map": [ 0, 1 ]

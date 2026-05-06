@@ -6,10 +6,10 @@
     "ravennaPrio": 70
   },
   "jack": {
-    "device": "hw:sndrpiaoip2",
+    "device": "hw:aoip",
     "name": "Analog",
     "rate": 48000,
-    "period": 96,
+    "period": 48,
     "periods": 3,
     "channels": 2
   },

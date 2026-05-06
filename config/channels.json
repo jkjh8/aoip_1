@@ -103,7 +103,7 @@
       }
     },
     {
-      "id": 5,
+      "id": 3,
       "label": "Stream IN 1",
       "jackPort": "stream:out_1",
       "srcPort": "rtp_in_1:out_1",
@@ -153,7 +153,7 @@
       }
     },
     {
-      "id": 6,
+      "id": 4,
       "label": "Stream IN 2",
       "jackPort": "stream:out_2",
       "srcPort": "rtp_in_1:out_2",
@@ -203,7 +203,7 @@
       }
     },
     {
-      "id": 7,
+      "id": 5,
       "label": "AES67 1",
       "jackPort": "aes67:out_1",
       "srcPort": "AES67_in:audio_in_1",
@@ -253,7 +253,7 @@
       }
     },
     {
-      "id": 8,
+      "id": 6,
       "label": "AES67 2",
       "jackPort": "aes67:out_2",
       "srcPort": "AES67_in:audio_in_2",
@@ -419,7 +419,7 @@
       }
     },
     {
-      "id": 5,
+      "id": 3,
       "label": "Stream OUT 1",
       "jackPort": "stream:sin_1",
       "sinkPort": "rtp_out_1:in_src_1",
@@ -472,7 +472,7 @@
       }
     },
     {
-      "id": 6,
+      "id": 4,
       "label": "Stream OUT 2",
       "jackPort": "stream:sin_2",
       "sinkPort": "rtp_out_1:in_src_2",
@@ -525,7 +525,7 @@
       }
     },
     {
-      "id": 7,
+      "id": 5,
       "label": "AES67 1",
       "jackPort": "aes67:sin_1",
       "sinkPort": "AES67_out:audio_out_1",
@@ -578,7 +578,7 @@
       }
     },
     {
-      "id": 8,
+      "id": 6,
       "label": "AES67 2",
       "jackPort": "aes67:sin_2",
       "sinkPort": "AES67_out:audio_out_2",
@@ -649,11 +649,11 @@
       "dst": "aes67:sin_2"
     },
     {
-      "src": "stream:out_1",
+      "src": "aes67:out_1",
       "dst": "analog:sin_1"
     },
     {
-      "src": "stream:out_2",
+      "src": "aes67:out_2",
       "dst": "analog:sin_2"
     }
   ]

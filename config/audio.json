@@ -9,33 +9,11 @@
     "device": "hw:aoip",
     "name": "Analog",
     "rate": 48000,
-    "period": 192,
+    "period": 48,
     "periods": 3,
     "channels": 2
   },
   "bridges": [
-    {
-      "type": "audio_in",
-      "name": "USB Audio IN",
-      "device": "hw:UAC2Gadget",
-      "rate": 48000,
-      "period": 512,
-      "periods": 8,
-      "channels": 2,
-      "usb_gadget": true,
-      "enabled": true
-    },
-    {
-      "type": "audio_out",
-      "name": "USB Audio OUT",
-      "device": "hw:UAC2Gadget",
-      "rate": 48000,
-      "period": 512,
-      "periods": 8,
-      "channels": 2,
-      "usb_gadget": true,
-      "enabled": true
-    },
     {
       "type": "audio_in",
       "name": "AES67_in",

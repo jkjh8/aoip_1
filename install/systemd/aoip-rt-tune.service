@@ -1,0 +1,12 @@
+[Unit]
+Description=AoIP RT Tuning (HRTICK, IRQ affinity, RT priority)
+After=aoip.service
+Wants=aoip.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/aoip-rt-tune.sh
+
+[Install]
+WantedBy=multi-user.target

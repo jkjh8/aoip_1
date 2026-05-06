@@ -185,6 +185,7 @@ SERVICES=(
     uac2-gadget.service
     aes67-daemon.service
     aoip.service
+    aoip-rt-tune.service
 )
 
 for svc in "${SERVICES[@]}"; do
@@ -205,6 +206,14 @@ for svc in "${SERVICES[@]}"; do
         info "${svc} 자동시작 활성화"
     fi
 done
+
+# aoip-rt-tune.sh 스크립트 배포
+RT_TUNE_SH="${SYSTEMD_SRC}/aoip-rt-tune.sh"
+if [ -f "${RT_TUNE_SH}" ]; then
+    cp "${RT_TUNE_SH}" /usr/local/sbin/aoip-rt-tune.sh
+    chmod +x /usr/local/sbin/aoip-rt-tune.sh
+    info "aoip-rt-tune.sh → /usr/local/sbin/"
+fi
 
 # =============================================================================
 # 8. 권한 설정

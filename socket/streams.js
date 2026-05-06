@@ -1,6 +1,6 @@
 import {
   getRtpStreamStatus, getRtpStreamDetail,
-  addRtpOutTarget, removeRtpOutTarget, setRtpOutCodec,
+  setRtpOutTarget, clearRtpOutTarget, setRtpOutCodec,
   updateRtpInConfig, updateRtpOutConfig, stopRtpStream, startRtpStream,
   setRtpInFormat, setRtpOutRate,
 } from '../lib/rtp/index.js';
@@ -47,7 +47,7 @@ export default function register(socket, { broadcastStatus, broadcastChannels })
 
   socket.on('rtp:stream:start', (data = {}, cb) => {
     try {
-      const { client, targets } = data;
+      const { client, host: targetHost, port: targetPort } = data;
       if (!client) return cb?.({ ok: false, error: 'client required' });
       const detail = getRtpStreamDetail(client);
       if (!detail) return cb?.({ ok: false, error: `stream ${client} not found` });
@@ -56,8 +56,8 @@ export default function register(socket, { broadcastStatus, broadcastChannels })
         if (detail.type === 'rtp_in')  updateRtpInConfig(client, updates);
         if (detail.type === 'rtp_out') updateRtpOutConfig(client, updates);
       }
-      if (detail.type === 'rtp_out' && Array.isArray(targets))
-        for (const { host, port } of targets) if (host && port) addRtpOutTarget(client, host, Number(port));
+      if (detail.type === 'rtp_out' && targetHost && targetPort)
+        setRtpOutTarget(client, targetHost, Number(targetPort));
       logger.info('[socket] rtp:stream:start client=%s sid=%s data=%j', client, socket.id, data);
       startRtpStream(client);
       _setRtpActive(client, true);
@@ -101,23 +101,24 @@ export default function register(socket, { broadcastStatus, broadcastChannels })
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 
-  socket.on('rtp:out:target:add', ({ client, host, port } = {}, cb) => {
+  socket.on('rtp:out:target:set', ({ client, host, port } = {}, cb) => {
     try {
       if (!client || !host || !port)
         return cb?.({ ok: false, error: 'client, host, port required' });
-      addRtpOutTarget(client, host, Number(port));
+      setRtpOutTarget(client, host, Number(port));
+      broadcastChannels();
       broadcastStatus();
       cb?.({ ok: true, stream: getRtpStreamDetail(client) });
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 
-  socket.on('rtp:out:target:remove', ({ client, host, port } = {}, cb) => {
+  socket.on('rtp:out:target:clear', ({ client } = {}, cb) => {
     try {
-      if (!client || !host || !port)
-        return cb?.({ ok: false, error: 'client, host, port required' });
-      removeRtpOutTarget(client, host, Number(port));
+      if (!client) return cb?.({ ok: false, error: 'client required' });
+      clearRtpOutTarget(client);
+      broadcastChannels();
       broadcastStatus();
-      cb?.({ ok: true, stream: getRtpStreamDetail(client) });
+      cb?.({ ok: true });
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 

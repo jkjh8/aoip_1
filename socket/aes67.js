@@ -6,7 +6,7 @@ import {
   getSinks, fetchSinks, addSink, removeSink, getSinkStatus,
   browseAll, browseMdns, browseSap, enrichSinks,
 } from '../lib/aes67daemon.js';
-import { syncAes67Active } from '../lib/channels/index.js';
+import { syncAes67Active, clearAes67StaleRoutes } from '../lib/channels/index.js';
 
 /**
  * socket events:
@@ -54,9 +54,20 @@ export default function register(socket, ctx) {
   }
 
   // 접속 시 초기 데이터 전송 — 항상 REST API 우선 (캐시 우회)
-  fetchSources().then(s => socket.emit('aes67:sources', s)).catch(() => {});
-  fetchSinks().then(s => socket.emit('aes67:sinks', enrichSinks(s))).catch(() => {});
+  fetchSources().then(s => { socket.emit('aes67:sources', s); syncAes67Active('output', s); broadcastChannels(); }).catch(() => {});
+  fetchSinks().then(s => { socket.emit('aes67:sinks', enrichSinks(s)); syncAes67Active('input', s); broadcastChannels(); }).catch(() => {});
   getPtpStatus().then(s => socket.emit('aes67:ptp:status', s)).catch(() => {});
+
+  // ── AES67 채널 강제 재동기화
+  socket.on('aes67:channels:sync', async (cb) => {
+    try {
+      const [sinks, sources] = await Promise.all([fetchSinks(), fetchSources()]);
+      syncAes67Active('input',  sinks);
+      syncAes67Active('output', sources);
+      broadcastChannels();
+      cb?.({ ok: true });
+    } catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
 
   // ── 상태 조회 ──────────────────────────────────────────
 
@@ -112,8 +123,12 @@ export default function register(socket, ctx) {
     try {
       if (id == null) return cb?.({ ok: false, error: 'id required' });
       await removeSource(id);
+      const remaining = await fetchSources().catch(() => []);
+      clearAes67StaleRoutes('output', remaining);
+      syncAes67Active('output', remaining);
+      broadcastChannels();
       cb?.({ ok: true });
-      broadcastSources();
+      io.emit('aes67:sources', remaining);
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 
@@ -140,8 +155,12 @@ export default function register(socket, ctx) {
     try {
       if (id == null) return cb?.({ ok: false, error: 'id required' });
       await removeSink(id);
+      const remaining = await fetchSinks().catch(() => []);
+      clearAes67StaleRoutes('input', remaining);
+      syncAes67Active('input', remaining);
+      broadcastChannels();
       cb?.({ ok: true });
-      broadcastSinks();
+      io.emit('aes67:sinks', enrichSinks(remaining));
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 

@@ -55,7 +55,7 @@
       "enabled": true,
       "sampleRate": 0,
       "address": "239.12.12.1",
-      "codec": null
+      "codec": ""
     },
     {
       "type": "rtp_in",
@@ -69,7 +69,7 @@
       "enabled": true,
       "sampleRate": 0,
       "address": "239.12.12.1",
-      "codec": null
+      "codec": ""
     },
     {
       "type": "rtp_in",
@@ -83,7 +83,7 @@
       "enabled": true,
       "sampleRate": 0,
       "address": "0.0.0.0",
-      "codec": null
+      "codec": ""
     },
     {
       "type": "rtp_in",
@@ -94,7 +94,7 @@
       "protocol": "rtp",
       "rtpEncoding": "MPA",
       "bufferMs": 100,
-      "enabled": true,
+      "enabled": false,
       "sampleRate": 0,
       "address": "0.0.0.0",
       "codec": null
@@ -108,7 +108,7 @@
       "protocol": "rtp",
       "rtpEncoding": "MPA",
       "bufferMs": 100,
-      "enabled": true,
+      "enabled": false,
       "sampleRate": 0,
       "address": "0.0.0.0",
       "codec": null
@@ -122,7 +122,7 @@
       "protocol": "rtp",
       "rtpEncoding": "MPA",
       "bufferMs": 100,
-      "enabled": true,
+      "enabled": false,
       "sampleRate": 0,
       "address": "0.0.0.0",
       "codec": null
@@ -136,7 +136,7 @@
       "protocol": "rtp",
       "rtpEncoding": "MPA",
       "bufferMs": 100,
-      "enabled": true,
+      "enabled": false,
       "sampleRate": 0,
       "address": "0.0.0.0",
       "codec": null
@@ -150,7 +150,7 @@
       "protocol": "rtp",
       "rtpEncoding": "MPA",
       "bufferMs": 100,
-      "enabled": true,
+      "enabled": false,
       "sampleRate": 0,
       "address": "0.0.0.0",
       "codec": null
@@ -170,7 +170,11 @@
         }
       ],
       "enabled": true,
-      "bitrate": 128
+      "bitrate": 320,
+      "target": {
+        "host": "192.168.10.146",
+        "port": 12345
+      }
     },
     {
       "type": "rtp_out",
@@ -180,9 +184,18 @@
       "protocol": "rtp",
       "codec": "mp3",
       "sampleRate": 44100,
-      "targets": [],
+      "targets": [
+        {
+          "host": "192.168.10.146",
+          "port": 5004
+        }
+      ],
       "enabled": true,
-      "bitrate": 128
+      "bitrate": 320,
+      "target": {
+        "host": "10.20.0.193",
+        "port": 5004
+      }
     },
     {
       "type": "rtp_out",
@@ -194,7 +207,11 @@
       "sampleRate": 44100,
       "targets": [],
       "enabled": true,
-      "bitrate": 128
+      "bitrate": 320,
+      "target": {
+        "host": "10.20.0.193",
+        "port": 5005
+      }
     },
     {
       "type": "rtp_out",
@@ -211,7 +228,7 @@
         }
       ],
       "enabled": true,
-      "bitrate": 128
+      "bitrate": 320
     },
     {
       "type": "rtp_out",

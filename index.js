@@ -44,7 +44,7 @@ app.get('*', (_req, res) => res.sendFile(join(SPA_DIR, 'index.html')));
 // ── HTTP + Socket.IO ──────────────────────────────────
 
 const httpServer = createServer(app);
-setupSocket(httpServer, config);
+const { broadcastChannels } = setupSocket(httpServer, config);
 httpServer.listen(PORT, () => logger.info(`[server] http://localhost:${PORT}`));
 
 // ── Startup ───────────────────────────────────────────
@@ -69,8 +69,11 @@ async function startup() {
   startDaemonLogForwarder();
 
   // 초기 동기화 — status.json에 기존 sinks/sources가 있으면 active 상태 반영
-  getSinks().then(sinks       => syncAes67Active('input',  sinks)).catch(() => {});
-  getSources().then(sources   => syncAes67Active('output', sources)).catch(() => {});
+  await Promise.allSettled([
+    getSinks().then(sinks     => syncAes67Active('input',  sinks)),
+    getSources().then(sources => syncAes67Active('output', sources)),
+  ]);
+  broadcastChannels();
 
   markStartupDone();
 

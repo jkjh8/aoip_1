@@ -3,13 +3,24 @@ import {
   getRtpStreamStatus, getRtpStreamDetail,
   startRtpStream, stopRtpStream,
   updateRtpInConfig, updateRtpOutConfig,
-  addRtpOutTarget, removeRtpOutTarget, setRtpOutCodec,
+  setRtpOutTarget, clearRtpOutTarget, setRtpOutCodec,
   setRtpInFormat, setRtpOutRate,
 } from '../../lib/rtp/index.js';
+import { getAllChannelDefs, setChannelActive } from '../../lib/channels/index.js';
+
+function _setRtpActive(client, active) {
+  const { inputs, outputs } = getAllChannelDefs();
+  for (const ch of inputs)
+    if (ch.source?.type === 'rtp' && ch.source.name === client)
+      { try { setChannelActive('input',  ch.id, active) } catch { } break }
+  for (const ch of outputs)
+    if (ch.source?.type === 'rtp' && ch.source.name === client)
+      { try { setChannelActive('output', ch.id, active) } catch { } break }
+}
 
 function parseBody(body = {}) {
   const updates = {};
-  const { port, protocol, address, sampleRate, codec, bitrate, bufferMs, channels, targets } = body;
+  const { port, protocol, address, sampleRate, codec, bitrate, bufferMs, channels } = body;
   if (port       != null) updates.port       = Number(port);
   if (protocol   != null) updates.protocol   = protocol;
   if (address    != null) updates.address    = address;
@@ -18,7 +29,6 @@ function parseBody(body = {}) {
   if (bitrate    != null) updates.bitrate    = Number(bitrate);
   if (bufferMs   != null) updates.bufferMs   = Number(bufferMs);
   if (channels   != null) updates.channels   = Number(channels);
-  if (targets    != null) updates.targets    = targets;
   return updates;
 }
 
@@ -55,6 +65,7 @@ router.post('/rtp/:client/start', async (req, res) => {
       if (detail.type === 'rtp_out') updateRtpOutConfig(client, updates);
     }
     await startRtpStream(client);
+    _setRtpActive(client, true);
     res.json({ ok: true, stream: getRtpStreamDetail(client) });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
@@ -78,29 +89,28 @@ router.put('/rtp/:client/config', (req, res) => {
 router.post('/rtp/:client/stop', (req, res) => {
   try {
     stopRtpStream(req.params.client);
+    _setRtpActive(req.params.client, false);
     res.json({ ok: true });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-// POST /streams/rtp/:client/targets
-router.post('/rtp/:client/targets', (req, res) => {
+// PUT /streams/rtp/:client/target — 단일 타겟 설정
+router.put('/rtp/:client/target', (req, res) => {
   const { client } = req.params;
   const { host, port } = req.body ?? {};
   if (!host || !port) return res.status(400).json({ error: 'host and port required' });
   try {
-    addRtpOutTarget(client, host, Number(port));
+    setRtpOutTarget(client, host, Number(port));
     res.json({ ok: true, stream: getRtpStreamDetail(client) });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-// DELETE /streams/rtp/:client/targets
-router.delete('/rtp/:client/targets', (req, res) => {
+// DELETE /streams/rtp/:client/target — 타겟 제거
+router.delete('/rtp/:client/target', (req, res) => {
   const { client } = req.params;
-  const { host, port } = req.body ?? {};
-  if (!host || !port) return res.status(400).json({ error: 'host and port required' });
   try {
-    removeRtpOutTarget(client, host, Number(port));
-    res.json({ ok: true, stream: getRtpStreamDetail(client) });
+    clearRtpOutTarget(client);
+    res.json({ ok: true });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 

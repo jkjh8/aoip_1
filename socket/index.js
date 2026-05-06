@@ -126,5 +126,5 @@ export function setupSocket(httpServer, config) {
     registerAes67(socket, ctx);
   });
 
-  return { io, broadcastStatus };
+  return { io, broadcastStatus, broadcastChannels };
 }

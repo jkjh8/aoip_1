@@ -64,6 +64,8 @@ struct RtpRecvCtx {
     char      key[64];
     int       sock_fd;   /* Unix socket to Node.js (stats output) */
     int       udp_sock;
+    int       is_multicast;
+    struct in_addr mcast_addr;
 
     /* ring buffer (owned by engine) */
     RingBuf  *ring;
@@ -107,6 +109,17 @@ struct RtpRecvCtx {
 };
 
 /* ── helpers ─────────────────────────────────────────── */
+static void _hip_nolog(const char *fmt, va_list ap) { (void)fmt; (void)ap; }
+
+static hip_t _hip_init(void) {
+    hip_t h = hip_decode_init();
+    if (h) {
+        hip_set_errorf(h, _hip_nolog);
+        hip_set_debugf(h, _hip_nolog);
+        hip_set_msgf  (h, _hip_nolog);
+    }
+    return h;
+}
 
 /* ── G.711 table init ────────────────────────────────── */
 static void build_g711_tables(RtpRecvCtx *ctx)
@@ -170,9 +183,10 @@ static void setup_resampler(RtpRecvCtx *ctx)
         fprintf(stderr, "[rtp_recv:%s] resampler: %d→%d\n", ctx->key, ctx->in_rate, OUT_RATE);
 }
 
-/* ── detect encoding from RTP PT ─────────────────────── */
-static void detect_rtp_pt(RtpRecvCtx *ctx, uint8_t pt, const uint8_t *payload, int plen)
+/* ── detect encoding from RTP PT — returns 1 if supported, 0 to drop ── */
+static int detect_rtp_pt(RtpRecvCtx *ctx, uint8_t pt, const uint8_t *payload, int plen)
 {
+    (void)payload; (void)plen;
     switch (pt) {
     case 0:  ctx->enc = ENC_PCMU; ctx->in_rate = 8000;
              snprintf(ctx->codec_str, sizeof(ctx->codec_str), "PCMU"); break;
@@ -185,7 +199,7 @@ static void detect_rtp_pt(RtpRecvCtx *ctx, uint8_t pt, const uint8_t *payload, i
     case 14: ctx->enc = ENC_MPA;  ctx->in_rate = 48000;
              snprintf(ctx->codec_str, sizeof(ctx->codec_str), "MPA");
              if (ctx->hip) { hip_decode_exit(ctx->hip); }
-             ctx->hip = hip_decode_init();
+             ctx->hip = _hip_init();
              break;
     case OPUS_PT: {
         ctx->enc = ENC_OPUS; ctx->in_rate = OUT_RATE;
@@ -198,28 +212,14 @@ static void detect_rtp_pt(RtpRecvCtx *ctx, uint8_t pt, const uint8_t *payload, i
         break;
     }
     default:
-        if (plen >= 6) {
-            const uint8_t *p = payload;
-            int off = (plen >= 4) ? 4 : 0;
-            if ((p[off] & 0xFF) == 0xFF && (p[off+1] & 0xE0) == 0xE0) {
-                ctx->enc = ENC_MPA; ctx->in_rate = 48000;
-                snprintf(ctx->codec_str, sizeof(ctx->codec_str), "MPA");
-                break;
-            }
-        }
-        if (plen > 4000) {
-            ctx->enc = ENC_L24;
-            snprintf(ctx->codec_str, sizeof(ctx->codec_str), "L24");
-        } else {
-            ctx->enc = ENC_L16;
-            snprintf(ctx->codec_str, sizeof(ctx->codec_str), "L16");
-        }
-        break;
+        fprintf(stderr, "[rtp_recv:%s] unsupported PT=%d — dropping\n", ctx->key, pt);
+        return 0;
     }
     fprintf(stderr, "[rtp_recv:%s] RTP PT=%d → enc=%s rate=%d\n",
             ctx->key, pt, ctx->codec_str, ctx->in_rate);
     setup_resampler(ctx);
     ctx->detected = 1;
+    return 1;
 }
 
 /* ── detect encoding from raw UDP payload ────────────── */
@@ -229,7 +229,7 @@ static void detect_raw(RtpRecvCtx *ctx, const uint8_t *payload, int len)
         ctx->enc = ENC_MPA;
         snprintf(ctx->codec_str, sizeof(ctx->codec_str), "mp3");
         if (ctx->hip) { hip_decode_exit(ctx->hip); }
-        ctx->hip = hip_decode_init();
+        ctx->hip = _hip_init();
         fprintf(stderr, "[rtp_recv:%s] raw: detected MP3\n", ctx->key);
     } else if (len > 0 && (len % (ctx->ch * 3)) == 0 && len > 4000) {
         ctx->enc = ENC_L24;
@@ -411,6 +411,7 @@ static void *decode_thread(void *arg)
         if (ctx->proto == PROTO_RTP) {
             if (dlen < RTP_HDR_MIN) continue;
             uint8_t pt      = data[1] & 0x7F;
+            if (pt >= 72 && pt <= 76) continue;  /* RTCP mux (RFC 5761) — ignore */
             int     cc      = data[0] & 0x0F;
             int     has_ext = (data[0] >> 4) & 0x1;
             int     hdr     = RTP_HDR_MIN + cc * 4;
@@ -422,13 +423,13 @@ static void *decode_thread(void *arg)
             payload = data + hdr;
             plen    = dlen - hdr;
 
-            if (!ctx->detected)
-                detect_rtp_pt(ctx, pt, payload, plen);
+            if (!ctx->detected) {
+                if (!detect_rtp_pt(ctx, pt, payload, plen)) continue;
+            }
 
             if (!ctx->force_codec && ctx->detected && pt != ctx->last_rtp_pt && ctx->last_rtp_pt != 0xFF) {
-                fprintf(stderr, "[rtp_recv:%s] PT changed %d→%d\n", ctx->key, ctx->last_rtp_pt, pt);
                 ctx->detected = 0;
-                detect_rtp_pt(ctx, pt, payload, plen);
+                if (!detect_rtp_pt(ctx, pt, payload, plen)) { ctx->last_rtp_pt = pt; continue; }
             }
             ctx->last_rtp_pt = pt;
         } else {
@@ -492,6 +493,7 @@ static void *stats_thread(void *arg)
 {
     RtpRecvCtx *ctx = (RtpRecvCtx *)arg;
     unsigned long prev_bytes = 0;
+    int no_data_count = 0;
     while (!ctx->quit) {
         sleep(2);
         unsigned long cur  = atomic_load(&ctx->udp_bytes);
@@ -501,6 +503,20 @@ static void *stats_thread(void *arg)
             pthread_mutex_lock(&ctx->addr_mtx);
             ctx->src_ip[0] = '\0'; ctx->src_port = 0;
             pthread_mutex_unlock(&ctx->addr_mtx);
+            /* multicast re-join every 6s of silence to recover from stale IGMP state after reboot */
+            if (ctx->is_multicast && ++no_data_count >= 3) {
+                no_data_count = 0;
+                struct ip_mreq mreq;
+                mreq.imr_multiaddr        = ctx->mcast_addr;
+                mreq.imr_interface.s_addr = INADDR_ANY;
+                setsockopt(ctx->udp_sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+                if (setsockopt(ctx->udp_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
+                    fprintf(stderr, "[rtp_recv:%s] multicast re-join failed: %s\n", ctx->key, strerror(errno));
+                else
+                    fprintf(stderr, "[rtp_recv:%s] multicast re-joined %s\n", ctx->key, ctx->bind_addr);
+            }
+        } else {
+            no_data_count = 0;
         }
         prev_bytes = cur;
 
@@ -580,7 +596,7 @@ RtpRecvCtx *rtp_recv_start(RingBuf *ring, const char *key, const char *sock_path
     if (ctx->in_rate <= 0) ctx->in_rate = 48000;
 
     build_g711_tables(ctx);
-    ctx->hip = hip_decode_init();
+    ctx->hip = _hip_init();
     if (ctx->enc == ENC_OPUS) {
         int err;
         ctx->opus_dec = opus_decoder_create(OUT_RATE, ctx->ch, &err);
@@ -629,6 +645,8 @@ RtpRecvCtx *rtp_recv_start(RingBuf *ring, const char *key, const char *sock_path
             fprintf(stderr, "[rtp_recv:%s] multicast join failed: %s\n", key, strerror(errno));
         else
             fprintf(stderr, "[rtp_recv:%s] multicast joined %s\n", key, ctx->bind_addr);
+        ctx->is_multicast = 1;
+        ctx->mcast_addr   = bind_in;
     }
     ctx->udp_sock = sock;
 

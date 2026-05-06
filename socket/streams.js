@@ -2,7 +2,7 @@ import {
   getRtpStreamStatus, getRtpStreamDetail,
   setRtpOutTarget, clearRtpOutTarget, setRtpOutCodec,
   updateRtpInConfig, updateRtpOutConfig, stopRtpStream, startRtpStream,
-  setRtpInFormat, setRtpOutRate,
+  setRtpInFormat, setRtpOutRate, createRtpStream, deleteRtpStream,
 } from '../lib/rtp/index.js';
 import { getAllChannelDefs, setChannelActive } from '../lib/channels/index.js';
 import logger from '../lib/logger.js';
@@ -31,6 +31,35 @@ function parseUpdates({ port, protocol, address, sampleRate, codec, bitrate, buf
 }
 
 export default function register(socket, { broadcastStatus, broadcastChannels }) {
+  socket.on('rtp:stream:create', async (data = {}, cb) => {
+    try {
+      const { type, client, name } = data;
+      if (!type || !client) return cb?.({ ok: false, error: 'type and client required' });
+      const updates = parseUpdates(data);
+      const cfg = { type, client, name: name ?? client, ...updates, enabled: data.enabled !== false };
+      await createRtpStream(cfg);
+      broadcastChannels();
+      broadcastStatus();
+      cb?.({ ok: true, stream: getRtpStreamDetail(client) });
+    } catch (e) {
+      logger.error('[socket] rtp:stream:create error: %s', e.message);
+      cb?.({ ok: false, error: e.message });
+    }
+  });
+
+  socket.on('rtp:stream:delete', ({ client } = {}, cb) => {
+    try {
+      if (!client) return cb?.({ ok: false, error: 'client required' });
+      deleteRtpStream(client);
+      broadcastChannels();
+      broadcastStatus();
+      cb?.({ ok: true });
+    } catch (e) {
+      logger.error('[socket] rtp:stream:delete error: %s', e.message);
+      cb?.({ ok: false, error: e.message });
+    }
+  });
+
   socket.on('rtp:streams:list', (cb) => {
     try { cb?.({ ok: true, streams: getRtpStreamStatus() }); }
     catch (e) { cb?.({ ok: false, error: e.message }); }
@@ -52,7 +81,9 @@ export default function register(socket, { broadcastStatus, broadcastChannels })
       const detail = getRtpStreamDetail(client);
       if (!detail) return cb?.({ ok: false, error: `stream ${client} not found` });
       const updates = parseUpdates(data);
-      if (Object.keys(updates).length > 0) {
+      const hasUpdates = Object.keys(updates).length > 0;
+      if (hasUpdates) {
+        stopRtpStream(client, { silent: true });
         if (detail.type === 'rtp_in')  updateRtpInConfig(client, updates);
         if (detail.type === 'rtp_out') updateRtpOutConfig(client, updates);
       }

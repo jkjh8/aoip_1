@@ -79,7 +79,7 @@
       "srcPort": "rtp_in_4:out_1",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 10,
@@ -88,7 +88,7 @@
       "srcPort": "rtp_in_4:out_2",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 11,
@@ -97,7 +97,7 @@
       "srcPort": "rtp_in_5:out_1",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 12,
@@ -106,7 +106,7 @@
       "srcPort": "rtp_in_5:out_2",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 13,
@@ -115,7 +115,7 @@
       "srcPort": "rtp_in_6:out_1",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 14,
@@ -124,7 +124,7 @@
       "srcPort": "rtp_in_6:out_2",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 15,
@@ -133,7 +133,7 @@
       "srcPort": "rtp_in_7:out_1",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 16,
@@ -142,7 +142,7 @@
       "srcPort": "rtp_in_7:out_2",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 17,
@@ -151,7 +151,7 @@
       "srcPort": "rtp_in_8:out_1",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 18,
@@ -160,7 +160,7 @@
       "srcPort": "rtp_in_8:out_2",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 19,
@@ -241,7 +241,7 @@
       "srcPort": "AES67_in:audio_in_9",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 28,
@@ -250,7 +250,7 @@
       "srcPort": "AES67_in:audio_in_10",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 29,
@@ -259,7 +259,7 @@
       "srcPort": "AES67_in:audio_in_11",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 30,
@@ -268,7 +268,7 @@
       "srcPort": "AES67_in:audio_in_12",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 31,
@@ -277,7 +277,7 @@
       "srcPort": "AES67_in:audio_in_13",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 32,
@@ -286,7 +286,7 @@
       "srcPort": "AES67_in:audio_in_14",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 33,
@@ -295,7 +295,7 @@
       "srcPort": "AES67_in:audio_in_15",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 34,
@@ -304,7 +304,7 @@
       "srcPort": "AES67_in:audio_in_16",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     }
   ],
   "outputs": [
@@ -387,7 +387,7 @@
       "sinkPort": "rtp_out_4:in_src_1",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 10,
@@ -396,7 +396,7 @@
       "sinkPort": "rtp_out_4:in_src_2",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 11,
@@ -405,7 +405,7 @@
       "sinkPort": "rtp_out_5:in_src_1",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 12,
@@ -414,7 +414,7 @@
       "sinkPort": "rtp_out_5:in_src_2",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 13,
@@ -423,7 +423,7 @@
       "sinkPort": "rtp_out_6:in_src_1",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 14,
@@ -432,7 +432,7 @@
       "sinkPort": "rtp_out_6:in_src_2",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 15,
@@ -441,7 +441,7 @@
       "sinkPort": "rtp_out_7:in_src_1",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 16,
@@ -450,7 +450,7 @@
       "sinkPort": "rtp_out_7:in_src_2",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 17,
@@ -459,7 +459,7 @@
       "sinkPort": "rtp_out_8:in_src_1",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 18,
@@ -468,7 +468,7 @@
       "sinkPort": "rtp_out_8:in_src_2",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 19,
@@ -549,7 +549,7 @@
       "sinkPort": "AES67_out:audio_out_9",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 28,
@@ -558,7 +558,7 @@
       "sinkPort": "AES67_out:audio_out_10",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 29,
@@ -567,7 +567,7 @@
       "sinkPort": "AES67_out:audio_out_11",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 30,
@@ -576,7 +576,7 @@
       "sinkPort": "AES67_out:audio_out_12",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 31,
@@ -585,7 +585,7 @@
       "sinkPort": "AES67_out:audio_out_13",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 32,
@@ -594,7 +594,7 @@
       "sinkPort": "AES67_out:audio_out_14",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 33,
@@ -603,7 +603,7 @@
       "sinkPort": "AES67_out:audio_out_15",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     },
     {
       "id": 34,
@@ -612,42 +612,10 @@
       "sinkPort": "AES67_out:audio_out_16",
       "gain": 100,
       "muted": false,
-      "active": false
+      "active": true
     }
   ],
   "routing": [
-    {
-      "src": "analog:out_1",
-      "dst": "stream:sin_1"
-    },
-    {
-      "src": "analog:out_2",
-      "dst": "stream:sin_2"
-    },
-    {
-      "src": "analog:out_1",
-      "dst": "stream:sin_7"
-    },
-    {
-      "src": "analog:out_2",
-      "dst": "stream:sin_8"
-    },
-    {
-      "src": "analog:out_1",
-      "dst": "stream:sin_3"
-    },
-    {
-      "src": "analog:out_2",
-      "dst": "stream:sin_4"
-    },
-    {
-      "src": "analog:out_1",
-      "dst": "stream:sin_5"
-    },
-    {
-      "src": "analog:out_2",
-      "dst": "stream:sin_6"
-    },
     {
       "src": "analog:out_1",
       "dst": "aes67:sin_1"
@@ -687,6 +655,102 @@
     {
       "src": "aes67:out_2",
       "dst": "analog:sin_2"
+    },
+    {
+      "src": "analog:out_1",
+      "dst": "aes67:sin_9"
+    },
+    {
+      "src": "analog:out_2",
+      "dst": "aes67:sin_10"
+    },
+    {
+      "src": "analog:out_1",
+      "dst": "aes67:sin_11"
+    },
+    {
+      "src": "analog:out_2",
+      "dst": "aes67:sin_12"
+    },
+    {
+      "src": "analog:out_1",
+      "dst": "aes67:sin_13"
+    },
+    {
+      "src": "analog:out_2",
+      "dst": "aes67:sin_14"
+    },
+    {
+      "src": "analog:out_2",
+      "dst": "aes67:sin_16"
+    },
+    {
+      "src": "aes67:out_1",
+      "dst": "stream:sin_1"
+    },
+    {
+      "src": "aes67:out_2",
+      "dst": "stream:sin_2"
+    },
+    {
+      "src": "aes67:out_3",
+      "dst": "stream:sin_3"
+    },
+    {
+      "src": "aes67:out_4",
+      "dst": "stream:sin_4"
+    },
+    {
+      "src": "aes67:out_5",
+      "dst": "stream:sin_5"
+    },
+    {
+      "src": "aes67:out_6",
+      "dst": "stream:sin_6"
+    },
+    {
+      "src": "aes67:out_7",
+      "dst": "stream:sin_7"
+    },
+    {
+      "src": "aes67:out_8",
+      "dst": "stream:sin_8"
+    },
+    {
+      "src": "analog:out_1",
+      "dst": "aes67:sin_15"
+    },
+    {
+      "src": "aes67:out_9",
+      "dst": "stream:sin_9"
+    },
+    {
+      "src": "aes67:out_10",
+      "dst": "stream:sin_10"
+    },
+    {
+      "src": "aes67:out_11",
+      "dst": "stream:sin_11"
+    },
+    {
+      "src": "aes67:out_12",
+      "dst": "stream:sin_12"
+    },
+    {
+      "src": "aes67:out_13",
+      "dst": "stream:sin_13"
+    },
+    {
+      "src": "aes67:out_14",
+      "dst": "stream:sin_14"
+    },
+    {
+      "src": "aes67:out_15",
+      "dst": "stream:sin_15"
+    },
+    {
+      "src": "aes67:out_16",
+      "dst": "stream:sin_16"
     }
   ]
 }

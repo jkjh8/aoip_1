@@ -6,7 +6,7 @@
 #define RING_FRAMES         16384
 #define MAX_CH          64
 #define MAX_DEVICES     8
-#define MAX_RTP         8
+#define MAX_RTP         16
 #define MAX_EQ_BANDS    4
 #define CMD_RING_SIZE   128
 #define GAIN_MAX        2.0f

@@ -71,6 +71,15 @@ export function setupSocket(httpServer, config) {
     io.emit('channels', getChannels());
   }
 
+  function broadcastStreams() {
+    if (io.engine.clientsCount === 0) return;
+    const all = getRtpStreamStatus();
+    io.emit('streams', {
+      inputs:  all.filter(s => s.type === 'rtp_in'),
+      outputs: all.filter(s => s.type === 'rtp_out'),
+    });
+  }
+
   // 레벨 미터 — 빠른 주기로 별도 emit
   setInterval(() => {
     if (io.engine.clientsCount === 0) return;
@@ -84,8 +93,8 @@ export function setupSocket(httpServer, config) {
   // 전체 상태 — 느린 주기
   setInterval(broadcastStatus, STATUS_INTERVAL);
 
-  // RTP 스트림 상태 변경 → 채널 + 상태 브로드캐스트
-  streamEvents.on('state:changed', () => { broadcastChannels(); broadcastStatus(); });
+  // RTP 스트림 상태 변경 → 채널 + 스트림 + 상태 브로드캐스트
+  streamEvents.on('state:changed', () => { broadcastChannels(); broadcastStreams(); broadcastStatus(); });
 
   // AES67 데몬 이벤트 → Socket.IO broadcast (클라이언트 없으면 스킵)
   daemonEvents.on('sources:changed', (sources) => {
@@ -115,6 +124,8 @@ export function setupSocket(httpServer, config) {
     await refreshAes67Status();
     try { socket.emit('status', await snapshot()); } catch { /* ignore */ }
     socket.emit('channels', getChannels());
+    const _allStreams = getRtpStreamStatus();
+    socket.emit('streams', { inputs: _allStreams.filter(s => s.type === 'rtp_in'), outputs: _allStreams.filter(s => s.type === 'rtp_out') });
 
     socket.on('disconnect', () => {
       logger.info('[io] disconnected:', socket.id);

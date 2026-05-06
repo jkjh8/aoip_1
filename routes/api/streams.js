@@ -60,7 +60,7 @@ router.post('/rtp/:client/start', async (req, res) => {
     if (!detail) return res.status(404).json({ error: `stream ${client} not found` });
     const hasUpdates = Object.keys(updates).length > 0;
     if (hasUpdates) {
-      stopRtpStream(client);
+      stopRtpStream(client, { silent: true });
       if (detail.type === 'rtp_in')  updateRtpInConfig(client, updates);
       if (detail.type === 'rtp_out') updateRtpOutConfig(client, updates);
     }

@@ -5,9 +5,9 @@ echo HRTICK_DL > /sys/kernel/debug/sched/features
 IRQ=$(grep -m1 "eth0" /proc/interrupts | cut -d: -f1 | tr -d " ")
 DMA_IRQ=$(grep -m1 "dw_axi_dma" /proc/interrupts | cut -d: -f1 | tr -d " ")
 
-# eth0/DMA IRQ → CPU1 smp_affinity
+# eth0 IRQ → CPU1, DMA IRQ → CPU2
 [ -n "$IRQ" ] && echo 2 > /proc/irq/$IRQ/smp_affinity
-[ -n "$DMA_IRQ" ] && echo 2 > /proc/irq/$DMA_IRQ/smp_affinity
+[ -n "$DMA_IRQ" ] && echo 4 > /proc/irq/$DMA_IRQ/smp_affinity
 
 sleep 5
 
@@ -23,8 +23,8 @@ fi
 DMA_TID=$(ps -eLo lwp,comm | awk "/irq\/${DMA_IRQ}-/{print \$1}")
 if [ -n "$DMA_TID" ]; then
     chrt -f -p 48 $DMA_TID
-    taskset -cp 1 $DMA_TID
-    echo "irq/dma → FF48, CPU1"
+    taskset -cp 2 $DMA_TID
+    echo "irq/dma → FF48, CPU2"
 fi
 
 for pid in $(pgrep ptp4l); do

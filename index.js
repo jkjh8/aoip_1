@@ -52,6 +52,9 @@ httpServer.listen(PORT, () => logger.info(`[server] http://localhost:${PORT}`));
 async function startup() {
   await refreshDaemonNetworkConf();
   const dspCounts = getDspChannelCounts();
+  // Reserve spare DSP channels for dynamic stream creation (8 streams × 2ch)
+  const sc = dspCounts.get('stream') ?? { n_in: 0, n_out: 0 };
+  dspCounts.set('stream', { n_in: sc.n_in + 16, n_out: sc.n_out + 16 });
   await startupDsp(dspCounts, config);
 
   const startupDelay = config.engine?.startupDelay ?? 0;

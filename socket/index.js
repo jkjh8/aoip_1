@@ -1,8 +1,8 @@
 import { Server as SocketIO } from 'socket.io';
 import { getBridgeStatus } from '../lib/bridges.js';
 import { getDaemonStatus, daemonEvents, enrichSinks } from '../lib/aes67daemon.js';
-import { getGstStatus, getRxStats, getRtpStreamStatus, streamEvents } from '../lib/rtp/index.js';
-import { getChannels, getSavedRoutes }              from '../lib/channels/index.js';
+import { getRtpStreamStatus, streamEvents } from '../lib/rtp/index.js';
+import { getChannels, getSavedRoutes, syncAes67Active } from '../lib/channels/index.js';
 import { isDspRunning, getDspUptime }               from '../lib/dsp/index.js';
 
 import logger from '../lib/logger.js';
@@ -29,11 +29,14 @@ async function snapshot() {
   const connections = _routesToConnections(getSavedRoutes());
   cachedConnections = connections;
 
+  const rtpStreams = getRtpStreamStatus();
   return {
     engine:   { running: isDspRunning(), uptime: getDspUptime() },
     bridges:  getBridgeStatus(),
-    streams:  { ...getGstStatus(), rtpStreams: getRtpStreamStatus() },
-    rxStats:  getRxStats(),
+    streams:  {
+      inputs:  rtpStreams.filter(s => s.type === 'rtp_in'),
+      outputs: rtpStreams.filter(s => s.type === 'rtp_out'),
+    },
     channels:    getChannels(),
     connections,
     aes67:    cachedAes67Status,
@@ -63,6 +66,11 @@ export function setupSocket(httpServer, config) {
     } catch { /* engine not ready */ }
   }
 
+  function broadcastChannels() {
+    if (io.engine.clientsCount === 0) return;
+    io.emit('channels', getChannels());
+  }
+
   // 레벨 미터 — 빠른 주기로 별도 emit
   setInterval(() => {
     if (io.engine.clientsCount === 0) return;
@@ -76,15 +84,19 @@ export function setupSocket(httpServer, config) {
   // 전체 상태 — 느린 주기
   setInterval(broadcastStatus, STATUS_INTERVAL);
 
-  // RTP 스트림 소켓 disconnect → 상태 브로드캐스트
-  streamEvents.on('state:changed', broadcastStatus);
+  // RTP 스트림 상태 변경 → 채널 + 상태 브로드캐스트
+  streamEvents.on('state:changed', () => { broadcastChannels(); broadcastStatus(); });
 
   // AES67 데몬 이벤트 → Socket.IO broadcast (클라이언트 없으면 스킵)
-  daemonEvents.on('sources:changed', (data) => {
-    if (io.engine.clientsCount > 0) io.emit('aes67:sources', data);
+  daemonEvents.on('sources:changed', (sources) => {
+    if (io.engine.clientsCount > 0) io.emit('aes67:sources', sources);
+    syncAes67Active('output', sources);
+    broadcastChannels();
   });
-  daemonEvents.on('sinks:changed', (data) => {
-    if (io.engine.clientsCount > 0) io.emit('aes67:sinks', enrichSinks(data));
+  daemonEvents.on('sinks:changed', (sinks) => {
+    if (io.engine.clientsCount > 0) io.emit('aes67:sinks', enrichSinks(sinks));
+    syncAes67Active('input', sinks);
+    broadcastChannels();
   });
   daemonEvents.on('ptp:changed', (data) => {
     if (io.engine.clientsCount > 0) io.emit('aes67:ptp:status', data);
@@ -93,6 +105,7 @@ export function setupSocket(httpServer, config) {
   const ctx = {
     io,
     broadcastStatus,
+    broadcastChannels,
     getCached: () => cachedConnections,
     config
   };
@@ -101,6 +114,7 @@ export function setupSocket(httpServer, config) {
     logger.info('[io] client connected:', socket.id);
     await refreshAes67Status();
     try { socket.emit('status', await snapshot()); } catch { /* ignore */ }
+    socket.emit('channels', getChannels());
 
     socket.on('disconnect', () => {
       logger.info('[io] disconnected:', socket.id);

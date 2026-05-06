@@ -4,7 +4,18 @@ import {
   updateRtpInConfig, updateRtpOutConfig, stopRtpStream, startRtpStream,
   setRtpInFormat, setRtpOutRate,
 } from '../lib/rtp/index.js';
+import { getAllChannelDefs, setChannelActive } from '../lib/channels/index.js';
 import logger from '../lib/logger.js';
+
+function _setRtpActive(client, active) {
+  const { inputs, outputs } = getAllChannelDefs()
+  for (const ch of inputs)
+    if (ch.source?.type === 'rtp' && ch.source.name === client)
+      { try { setChannelActive('input',  ch.id, active) } catch { } break }
+  for (const ch of outputs)
+    if (ch.source?.type === 'rtp' && ch.source.name === client)
+      { try { setChannelActive('output', ch.id, active) } catch { } break }
+}
 
 function parseUpdates({ port, protocol, address, sampleRate, codec, bitrate, bufferMs, channels } = {}) {
   const u = {};
@@ -19,7 +30,7 @@ function parseUpdates({ port, protocol, address, sampleRate, codec, bitrate, buf
   return u;
 }
 
-export default function register(socket, { broadcastStatus }) {
+export default function register(socket, { broadcastStatus, broadcastChannels }) {
   socket.on('rtp:streams:list', (cb) => {
     try { cb?.({ ok: true, streams: getRtpStreamStatus() }); }
     catch (e) { cb?.({ ok: false, error: e.message }); }
@@ -49,6 +60,8 @@ export default function register(socket, { broadcastStatus }) {
         for (const { host, port } of targets) if (host && port) addRtpOutTarget(client, host, Number(port));
       logger.info('[socket] rtp:stream:start client=%s sid=%s data=%j', client, socket.id, data);
       startRtpStream(client);
+      _setRtpActive(client, true);
+      broadcastChannels();
       broadcastStatus();
       cb?.({ ok: true, stream: getRtpStreamDetail(client) });
     } catch (e) {
@@ -62,6 +75,8 @@ export default function register(socket, { broadcastStatus }) {
       if (!client) return cb?.({ ok: false, error: 'client required' });
       logger.info('[socket] rtp:stream:stop client=%s sid=%s', client, socket.id);
       stopRtpStream(client);
+      _setRtpActive(client, false);
+      broadcastChannels();
       broadcastStatus();
       cb?.({ ok: true });
     } catch (e) {

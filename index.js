@@ -9,11 +9,11 @@ import apiRoutes from './routes/index.js';
 import { setupSocket } from './socket/index.js';
 import logger from './lib/logger.js';
 import { getConfig, reloadConfig } from './lib/config.js';
-import { getDspChannelCounts, restoreRoutes, restoreDspState } from './lib/channels/index.js';
+import { getDspChannelCounts, restoreRoutes, restoreDspState, syncAes67Active } from './lib/channels/index.js';
 import { startupDsp, registerAnalogBridge, waitForDspReady, addEngineRestartListener, sendToEngine, markStartupDone } from './lib/dsp/index.js';
 import { startupBridges, reregisterBridges } from './lib/bridges.js';
 import { startupRtp } from './lib/rtp/index.js';
-import { getDaemonStatus, startDaemonLogForwarder, startStatusFileWatcher, refreshDaemonNetworkConf } from './lib/aes67daemon.js';
+import { getDaemonStatus, getSinks, getSources, startDaemonLogForwarder, startStatusFileWatcher, refreshDaemonNetworkConf } from './lib/aes67daemon.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const config    = getConfig();
@@ -67,6 +67,11 @@ async function startup() {
   getDaemonStatus();
   startStatusFileWatcher();
   startDaemonLogForwarder();
+
+  // 초기 동기화 — status.json에 기존 sinks/sources가 있으면 active 상태 반영
+  getSinks().then(sinks       => syncAes67Active('input',  sinks)).catch(() => {});
+  getSources().then(sources   => syncAes67Active('output', sources)).catch(() => {});
+
   markStartupDone();
 
   addEngineRestartListener(async () => {

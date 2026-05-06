@@ -6,6 +6,7 @@ import {
   getSinks, fetchSinks, addSink, removeSink, getSinkStatus,
   browseAll, browseMdns, browseSap, enrichSinks,
 } from '../lib/aes67daemon.js';
+import { syncAes67Active } from '../lib/channels/index.js';
 
 /**
  * socket events:
@@ -32,14 +33,24 @@ import {
  *              aes67:sinks   → [ sink, ... ]
  */
 export default function register(socket, ctx) {
-  const { io } = ctx;
+  const { io, broadcastChannels } = ctx;
 
   async function broadcastSources() {
-    try { io.emit('aes67:sources', await fetchSources()); } catch { /* ignore */ }
+    try {
+      const sources = await fetchSources();
+      io.emit('aes67:sources', sources);
+      syncAes67Active('output', sources);
+      broadcastChannels();
+    } catch { /* ignore */ }
   }
 
   async function broadcastSinks() {
-    try { io.emit('aes67:sinks', enrichSinks(await fetchSinks())); } catch { /* ignore */ }
+    try {
+      const sinks = await fetchSinks();
+      io.emit('aes67:sinks', enrichSinks(sinks));
+      syncAes67Active('input', sinks);
+      broadcastChannels();
+    } catch { /* ignore */ }
   }
 
   // 접속 시 초기 데이터 전송 — 항상 REST API 우선 (캐시 우회)

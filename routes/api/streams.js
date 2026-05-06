@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import {
-  getGstStatus,
   getRtpStreamStatus, getRtpStreamDetail,
   startRtpStream, stopRtpStream,
   updateRtpInConfig, updateRtpOutConfig,
@@ -27,7 +26,8 @@ const router = Router();
 
 // GET /streams
 router.get('/', (_req, res) => {
-  res.json(getGstStatus());
+  const s = getRtpStreamStatus();
+  res.json({ inputs: s.filter(x => x.type === 'rtp_in'), outputs: s.filter(x => x.type === 'rtp_out') });
 });
 
 // GET /streams/rtp — 전체 목록

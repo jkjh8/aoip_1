@@ -26,7 +26,7 @@
       "rate": 48000,
       "period": 48,
       "periods": 3,
-      "channels": 8,
+      "channels": 16,
       "aes67": true,
       "enabled": true
     },
@@ -37,7 +37,7 @@
       "rate": 48000,
       "period": 48,
       "periods": 3,
-      "channels": 8,
+      "channels": 16,
       "aes67": true,
       "enabled": true
     }
@@ -90,6 +90,62 @@
       "name": "Stream IN 4",
       "client": "rtp_in_4",
       "port": 3033,
+      "channels": 2,
+      "protocol": "rtp",
+      "rtpEncoding": "MPA",
+      "bufferMs": 100,
+      "enabled": true,
+      "sampleRate": 0,
+      "address": "0.0.0.0",
+      "codec": null
+    },
+    {
+      "type": "rtp_in",
+      "name": "Stream IN 5",
+      "client": "rtp_in_5",
+      "port": 3034,
+      "channels": 2,
+      "protocol": "rtp",
+      "rtpEncoding": "MPA",
+      "bufferMs": 100,
+      "enabled": true,
+      "sampleRate": 0,
+      "address": "0.0.0.0",
+      "codec": null
+    },
+    {
+      "type": "rtp_in",
+      "name": "Stream IN 6",
+      "client": "rtp_in_6",
+      "port": 3035,
+      "channels": 2,
+      "protocol": "rtp",
+      "rtpEncoding": "MPA",
+      "bufferMs": 100,
+      "enabled": true,
+      "sampleRate": 0,
+      "address": "0.0.0.0",
+      "codec": null
+    },
+    {
+      "type": "rtp_in",
+      "name": "Stream IN 7",
+      "client": "rtp_in_7",
+      "port": 3036,
+      "channels": 2,
+      "protocol": "rtp",
+      "rtpEncoding": "MPA",
+      "bufferMs": 100,
+      "enabled": true,
+      "sampleRate": 0,
+      "address": "0.0.0.0",
+      "codec": null
+    },
+    {
+      "type": "rtp_in",
+      "name": "Stream IN 8",
+      "client": "rtp_in_8",
+      "port": 3037,
       "channels": 2,
       "protocol": "rtp",
       "rtpEncoding": "MPA",
@@ -154,6 +210,54 @@
           "port": 5004
         }
       ],
+      "enabled": true,
+      "bitrate": 128
+    },
+    {
+      "type": "rtp_out",
+      "name": "Stream OUT 5",
+      "client": "rtp_out_5",
+      "channels": 2,
+      "protocol": "rtp",
+      "codec": "mp3",
+      "sampleRate": 44100,
+      "targets": [],
+      "enabled": true,
+      "bitrate": 128
+    },
+    {
+      "type": "rtp_out",
+      "name": "Stream OUT 6",
+      "client": "rtp_out_6",
+      "channels": 2,
+      "protocol": "rtp",
+      "codec": "mp3",
+      "sampleRate": 44100,
+      "targets": [],
+      "enabled": true,
+      "bitrate": 128
+    },
+    {
+      "type": "rtp_out",
+      "name": "Stream OUT 7",
+      "client": "rtp_out_7",
+      "channels": 2,
+      "protocol": "rtp",
+      "codec": "mp3",
+      "sampleRate": 44100,
+      "targets": [],
+      "enabled": true,
+      "bitrate": 128
+    },
+    {
+      "type": "rtp_out",
+      "name": "Stream OUT 8",
+      "client": "rtp_out_8",
+      "channels": 2,
+      "protocol": "rtp",
+      "codec": "mp3",
+      "sampleRate": 44100,
+      "targets": [],
       "enabled": true,
       "bitrate": 128
     }

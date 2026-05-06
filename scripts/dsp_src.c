@@ -13,9 +13,7 @@ extern float *g_in_ptr[MAX_CH];
 extern float *g_out_ptr[MAX_CH];
 
 /* ── PI 드리프트 보정 ────────────────────────────────────────────── */
-/* hw:aoip 크리스탈 실측 drift 보정 초기값 (-10ppm).
- * integ를 미리 세팅하여 수렴 시간 없이 즉시 보정 적용. */
-#define RATIO_INIT_OFFSET  (-10e-6)
+#define RATIO_INIT_OFFSET  0.0
 
 void pi_reset(PiState *p) {
     double ki = p->ki > 0.0 ? p->ki : RATIO_KI;
@@ -55,16 +53,19 @@ long src_convert(SRC_STATE *src, PiState *pi,
     pi_update(pi, fill, target);
 
     if (is_capture) {
-        int need = (int)ceil((double)g_period_frames / pi->ratio) + 2;
-        if (need > fill || need > DEV_TMP_FRAMES) {
-            src_reset(src); pi_reset(pi);
+        /* actual_need: SRC가 실제로 소비하는 입력량. need는 src_process에 전달할 상한(+2 여유).
+         * 언더런 판정은 actual_need 기준 — +2를 포함하면 데이터가 충분해도 오판정. */
+        int actual_need = (int)ceil((double)g_period_frames / pi->ratio);
+        int need = actual_need + 2;
+        if (actual_need > fill || need > DEV_TMP_FRAMES) {
             for (int c = 0; c < channels && (ch_start+c) < MAX_CH; c++)
                 memset(g_in_ptr[ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
-            return 0;
+            return 0;  /* src/pi 리셋은 호출자(지속 언더런 감지 후)가 결정 */
         }
+        int input_size = (fill < need) ? fill : need;
         SRC_DATA sd = {
             .data_in = tmp_in, .data_out = tmp_out,
-            .input_frames = need, .output_frames = g_period_frames,
+            .input_frames = input_size, .output_frames = g_period_frames,
             .src_ratio = pi->ratio,
         };
         src_process(src, &sd);

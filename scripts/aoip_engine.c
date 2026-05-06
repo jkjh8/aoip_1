@@ -47,6 +47,9 @@ int g_dsp_clock_fd = -1;
 /* ── 처리 단위 프레임 수 (런타임 설정 가능, alsa_device.c extern 참조) */
 int g_period_frames = DEFAULT_PERIOD_FRAMES;
 
+/* ── RAVENNA 캡처 SRC 버퍼 타겟 (audio.json ravennaFillFrames 설정 가능) */
+static int g_ravenna_fill_target = RAVENNA_FILL_TARGET;
+
 /* ── RT 우선순위 (CLI로 재정의 가능) ─────────────────────────────── */
 static int g_prio_dsp     = 59;
 static int g_prio_alsa    = 58;
@@ -307,10 +310,11 @@ static void read_alsa_device(Device *d)
             d->cap_prebuf_ready = 0;
             return;
         }
-        /* PTP 잠금 직후 in_ring이 비어있음 — RAVENNA_FILL_TARGET/2 충전까지 zeros 출력.
+        /* PTP 잠금 직후 in_ring이 비어있음 — fill_target 충전까지 zeros 출력.
+         * fill_target/2 조기 시작 금지: SRC 최소 필요량(period+2)보다 작으면 즉시 언더런.
          * 충전 완료 시점에 SRC/PI 리셋하여 cold-start 아티팩트 없이 시작. */
         if (!d->cap_prebuf_ready) {
-            if (rb_avail(&d->in_ring) < RAVENNA_FILL_TARGET / 2) {
+            if (rb_avail(&d->in_ring) < g_ravenna_fill_target) {
                 for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
                     memset(g_in_ptr[d->ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
                 return;
@@ -321,9 +325,21 @@ static void read_alsa_device(Device *d)
             fprintf(stderr, "[aoip_engine] ravenna '%s': cap prebuffer done (fill=%d), SRC ready\n",
                     d->name, rb_avail(&d->in_ring));
         }
-        ring_capture_src(d->cap_src, &d->cap_pi, &d->in_ring,
-                         d->tmp_cap_in, d->tmp_cap_out,
-                         RAVENNA_FILL_TARGET, d->channels, d->ch_start);
+        if (ring_capture_src(d->cap_src, &d->cap_pi, &d->in_ring,
+                             d->tmp_cap_in, d->tmp_cap_out,
+                             g_ravenna_fill_target, d->channels, d->ch_start) == 0) {
+            d->cap_underrun++;
+            /* 일시적 언더런(지터): SRC/PI 상태 유지, 그 틱만 zeros 출력.
+             * 지속 언더런(10틱): SRC/PI 리셋 후 재충전 대기. */
+            if (d->cap_underrun >= 10) {
+                src_reset(d->cap_src);
+                pi_reset(&d->cap_pi);
+                d->cap_prebuf_ready = 0;
+                d->cap_underrun = 0;
+            }
+        } else {
+            d->cap_underrun = 0;
+        }
     } else {
         read_alsa_master(d);
     }
@@ -902,9 +918,20 @@ static void load_config_prios(const char *path)
         g_period_frames = v;
     g_lvl_report = json_bool(section, "lvlReport", 1);
     g_clk2_report = g_lvl_report;
+    if ((v = json_int(section, "ravennaFillFrames", 0)) > 0)
+        g_ravenna_fill_target = v;
+    /* SRC 최소 입력량: ceil(period / RATIO_MIN) + 2 ≈ period + 3.
+     * fill_target이 이보다 작으면 PI가 avail을 target으로 수렴시킬 때 구조적 언더런 발생. */
+    int min_fill = g_period_frames + 4;
+    if (g_ravenna_fill_target < min_fill) {
+        fprintf(stderr, "[aoip_engine] ravennaFillFrames %d < minimum %d, clamping\n",
+                g_ravenna_fill_target, min_fill);
+        g_ravenna_fill_target = min_fill;
+    }
 
-    fprintf(stderr, "[aoip_engine] config: dsp=%d alsa=%d ravenna=%d rtp=%d period=%d lvl=%d clk2=%d\n",
-            g_prio_dsp, g_prio_alsa, g_prio_ravenna, g_prio_rtp, g_period_frames, g_lvl_report, g_clk2_report);
+    fprintf(stderr, "[aoip_engine] config: dsp=%d alsa=%d ravenna=%d rtp=%d period=%d lvl=%d clk2=%d ravennaFillFrames=%d\n",
+            g_prio_dsp, g_prio_alsa, g_prio_ravenna, g_prio_rtp, g_period_frames, g_lvl_report, g_clk2_report,
+            g_ravenna_fill_target);
 }
 
 /* ── main ────────────────────────────────────────────────────────── */

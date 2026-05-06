@@ -7,7 +7,8 @@
     "rtpPrio": 82,
     "periodFrames": 48,
     "lvlReport": true,
-    "startupDelay": 0
+    "startupDelay": 0,
+    "ravennaFillFrames": 96
   },
   "jack": {
     "device": "hw:aoip",
@@ -25,7 +26,7 @@
       "rate": 48000,
       "period": 48,
       "periods": 3,
-      "channels": 2,
+      "channels": 8,
       "aes67": true,
       "enabled": true
     },
@@ -36,7 +37,7 @@
       "rate": 48000,
       "period": 48,
       "periods": 3,
-      "channels": 2,
+      "channels": 8,
       "aes67": true,
       "enabled": true
     }
@@ -44,9 +45,51 @@
   "rtp_streams": [
     {
       "type": "rtp_in",
-      "name": "Stream IN",
+      "name": "Stream IN 1",
       "client": "rtp_in_1",
       "port": 3030,
+      "channels": 2,
+      "protocol": "rtp",
+      "rtpEncoding": "MPA",
+      "bufferMs": 100,
+      "enabled": true,
+      "sampleRate": 0,
+      "address": "239.12.12.1",
+      "codec": null
+    },
+    {
+      "type": "rtp_in",
+      "name": "Stream IN 2",
+      "client": "rtp_in_2",
+      "port": 3030,
+      "channels": 2,
+      "protocol": "rtp",
+      "rtpEncoding": "MPA",
+      "bufferMs": 100,
+      "enabled": true,
+      "sampleRate": 0,
+      "address": "239.12.12.1",
+      "codec": null
+    },
+    {
+      "type": "rtp_in",
+      "name": "Stream IN 3",
+      "client": "rtp_in_3",
+      "port": 3032,
+      "channels": 2,
+      "protocol": "rtp",
+      "rtpEncoding": "MPA",
+      "bufferMs": 100,
+      "enabled": true,
+      "sampleRate": 0,
+      "address": "0.0.0.0",
+      "codec": null
+    },
+    {
+      "type": "rtp_in",
+      "name": "Stream IN 4",
+      "client": "rtp_in_4",
+      "port": 3033,
       "channels": 2,
       "protocol": "rtp",
       "rtpEncoding": "MPA",
@@ -58,7 +101,7 @@
     },
     {
       "type": "rtp_out",
-      "name": "Stream OUT",
+      "name": "Stream OUT 1",
       "client": "rtp_out_1",
       "channels": 2,
       "protocol": "rtp",
@@ -68,6 +111,47 @@
         {
           "host": "192.168.10.146",
           "port": 12345
+        }
+      ],
+      "enabled": true,
+      "bitrate": 128
+    },
+    {
+      "type": "rtp_out",
+      "name": "Stream OUT 2",
+      "client": "rtp_out_2",
+      "channels": 2,
+      "protocol": "rtp",
+      "codec": "mp3",
+      "sampleRate": 44100,
+      "targets": [],
+      "enabled": true,
+      "bitrate": 128
+    },
+    {
+      "type": "rtp_out",
+      "name": "Stream OUT 3",
+      "client": "rtp_out_3",
+      "channels": 2,
+      "protocol": "rtp",
+      "codec": "mp3",
+      "sampleRate": 44100,
+      "targets": [],
+      "enabled": true,
+      "bitrate": 128
+    },
+    {
+      "type": "rtp_out",
+      "name": "Stream OUT 4",
+      "client": "rtp_out_4",
+      "channels": 2,
+      "protocol": "rtp",
+      "codec": "mp3",
+      "sampleRate": 44100,
+      "targets": [
+        {
+          "host": "10.20.0.193",
+          "port": 5004
         }
       ],
       "enabled": true,

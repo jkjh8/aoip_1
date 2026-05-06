@@ -19,8 +19,8 @@
 #define RTP_RING_FRAMES 65536
 #define RTP_FILL_TARGET 24000
 
-/* RAVENNA 캡처 SRC 버퍼 타겟 (5ms @ 48kHz) */
-#define RAVENNA_FILL_TARGET (SAMPLE_RATE * 5 / 1000)
+/* RAVENNA 캡처 SRC 버퍼 타겟 (1ms @ 48kHz) */
+#define RAVENNA_FILL_TARGET (SAMPLE_RATE * 1 / 1000)
 
 /* RTP 전용 PI 상수 — ALSA PI보다 20x 빠른 응답, ±1000ppm 보정 범위 */
 #define RTP_RATIO_KP   0.001

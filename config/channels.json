@@ -709,47 +709,15 @@
       "dst": "aes67:sin_15"
     },
     {
-      "src": "aes67:out_9",
-      "dst": "stream:sin_9"
-    },
-    {
-      "src": "aes67:out_10",
-      "dst": "stream:sin_10"
-    },
-    {
-      "src": "aes67:out_11",
-      "dst": "stream:sin_11"
-    },
-    {
-      "src": "aes67:out_12",
-      "dst": "stream:sin_12"
-    },
-    {
-      "src": "aes67:out_13",
-      "dst": "stream:sin_13"
-    },
-    {
-      "src": "aes67:out_14",
-      "dst": "stream:sin_14"
-    },
-    {
-      "src": "aes67:out_15",
-      "dst": "stream:sin_15"
-    },
-    {
-      "src": "aes67:out_16",
-      "dst": "stream:sin_16"
-    },
-    {
       "src": "aes67:out_1",
       "dst": "stream:sin_1"
     },
     {
-      "src": "aes67:out_1",
+      "src": "aes67:out_9",
       "dst": "analog:sin_1"
     },
     {
-      "src": "aes67:out_2",
+      "src": "aes67:out_10",
       "dst": "analog:sin_2"
     }
   ]

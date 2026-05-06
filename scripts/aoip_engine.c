@@ -330,8 +330,10 @@ static void read_alsa_device(Device *d)
                              g_ravenna_fill_target, d->channels, d->ch_start) == 0) {
             d->cap_underrun++;
             /* 일시적 언더런(지터): SRC/PI 상태 유지, 그 틱만 zeros 출력.
-             * 지속 언더런(10틱): SRC/PI 리셋 후 재충전 대기. */
-            if (d->cap_underrun >= 10) {
+             * 지속 언더런(100틱 ≈ 50ms): SRC/PI 리셋 후 재충전 대기.
+             * 임계값을 10→100으로 올림: LAN 재연결 후 PI 수렴 중 brief drain으로
+             * 인한 리셋 루프 방지. */
+            if (d->cap_underrun >= 100) {
                 src_reset(d->cap_src);
                 pi_reset(&d->cap_pi);
                 d->cap_prebuf_ready = 0;

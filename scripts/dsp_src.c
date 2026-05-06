@@ -101,12 +101,14 @@ int ring_capture_src(SRC_STATE *src, PiState *pi,
 {
     int avail = rb_avail(ring);
 
-    /* 오버플로우 감지: fill_target 2배 초과 시 오래된 데이터 스킵 (SRC 상태 유지) */
+    /* 오버플로우 감지: fill_target 2배 초과 시 오래된 데이터 스킵.
+     * pi_reset 금지 — 리셋하면 ratio=1.0으로 돌아가 즉시 재오버플로우 루프 발생.
+     * 대신 pi_update로 실제 overflow 크기를 PI에 반영하여 수렴 유도. */
     if (avail > fill_target * 2) {
         unsigned rp0 = atomic_load_explicit(&ring->rp, memory_order_relaxed);
         unsigned skip = (unsigned)(avail - fill_target);
         atomic_store_explicit(&ring->rp, rp0 + skip, memory_order_release);
-        pi_reset(pi);
+        pi_update(pi, avail, fill_target);
         avail = fill_target;
     }
 

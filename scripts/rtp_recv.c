@@ -387,6 +387,11 @@ static void decode_payload(RtpRecvCtx *ctx, const uint8_t *payload, int len)
 static void *decode_thread(void *arg)
 {
     RtpRecvCtx *ctx = (RtpRecvCtx *)arg;
+    if (ctx->prio > 0) {
+        struct sched_param sp = { .sched_priority = ctx->prio };
+        pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    }
+    rtp_pin_to_cpu(2);
 
     while (!ctx->quit) {
         pthread_mutex_lock(&ctx->pkt_mtx);
@@ -445,6 +450,7 @@ static void *recv_thread(void *arg)
         struct sched_param sp = { .sched_priority = ctx->prio };
         pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
     }
+    rtp_pin_to_cpu(2);
     uint8_t buf[MAX_PKT_LEN];
     struct sockaddr_in from;
     socklen_t fromlen = sizeof(from);

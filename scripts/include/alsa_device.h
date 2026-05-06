@@ -106,9 +106,10 @@ typedef struct {
     int              cap_prebuf_ready;
 } Device;
 
-/* ── RT 스레드 CPU 어피니티 (CPU 2-3 고정) ──────────────────────── */
-static inline void pin_to_rt_cores(void) {
-    cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(2, &cs); CPU_SET(3, &cs);
+/* ── RT 스레드 CPU 어피니티 ──────────────────────────────────────── */
+/* CPU 레이아웃: CPU1=ptp4l, CPU2=DSP/ALSA/rtp_recv, CPU3=rtp_send  */
+static inline void pin_to_cpu(int cpu) {
+    cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(cpu, &cs);
     pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
 }
 

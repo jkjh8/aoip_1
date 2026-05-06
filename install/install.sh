@@ -211,6 +211,7 @@ SYSTEMD_DST="/etc/systemd/system"
 SERVICES=(
     ravenna-module.service
     ptp4l.service
+    ptp-irq-affinity.service
     uac2-gadget.service
     aes67-daemon.service
     aoip-soundcard.service
@@ -248,6 +249,14 @@ if [ -f "${RT_TUNE_SH}" ]; then
     cp "${RT_TUNE_SH}" /usr/local/sbin/aoip-rt-tune.sh
     chmod +x /usr/local/sbin/aoip-rt-tune.sh
     info "aoip-rt-tune.sh → /usr/local/sbin/"
+fi
+
+# ptp-irq-affinity.sh 스크립트 배포
+PTP_IRQ_SH="${SYSTEMD_SRC}/ptp-irq-affinity.sh"
+if [ -f "${PTP_IRQ_SH}" ]; then
+    cp "${PTP_IRQ_SH}" /usr/local/sbin/ptp-irq-affinity.sh
+    chmod +x /usr/local/sbin/ptp-irq-affinity.sh
+    info "ptp-irq-affinity.sh → /usr/local/sbin/"
 fi
 
 # =============================================================================

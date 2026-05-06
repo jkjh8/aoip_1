@@ -1,9 +1,17 @@
 #pragma once
+#define _GNU_SOURCE
+#include <sched.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
+
+static inline void rtp_pin_to_cpu(int cpu) {
+    cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(cpu, &cs);
+    pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
+}
 
 static inline int rtp_unix_connect(const char *path, int retries, int ms)
 {

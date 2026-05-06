@@ -323,6 +323,7 @@ static void *shm_reader_thread(void *arg)
         struct sched_param sp = { .sched_priority = ctx->prio };
         pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
     }
+    rtp_pin_to_cpu(3);
     int out_rate  = ctx->out_rate;
     int need_src  = (out_rate != RS_SAMPLE_RATE) && (ctx->src != NULL);
 

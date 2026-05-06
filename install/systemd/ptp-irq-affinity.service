@@ -1,5 +1,5 @@
 [Unit]
-Description=Set eth0 IRQ affinity to CPU 0 for PTP
+Description=Set eth0 IRQ affinity to CPU 3 for PTP
 After=network-online.target
 
 [Service]

@@ -226,7 +226,7 @@ static void *dsp_worker_thread(void *arg)
 
     struct sched_param sp = { .sched_priority = g_prio_dsp };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
-    pin_to_rt_cores();
+    pin_to_cpu(2);
 
     /* RT 스택 page-fault 방지 */
     volatile char stack_touch[4096];
@@ -474,7 +474,7 @@ static void *dsp_thread(void *arg)
 
     struct sched_param sp = { .sched_priority = g_prio_dsp };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
-    pin_to_rt_cores();
+    pin_to_cpu(2);
 
     int64_t clk2_pa_fr = 0, clk2_pa_hts = 0;
     int64_t clk2_pr_fr = 0, clk2_pr_hts = 0;

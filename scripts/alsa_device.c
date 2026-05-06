@@ -137,7 +137,7 @@ static void *alsa_capture_thread(void *arg)
 
     struct sched_param sp = { .sched_priority = d->thread_priority };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
-    pin_to_rt_cores();
+    pin_to_cpu(2);
 
     snd_pcm_t *pcm = NULL;
     while (!d->quit_cap && !g_quit) {
@@ -368,7 +368,7 @@ static void *alsa_playback_thread(void *arg)
 
     struct sched_param sp = { .sched_priority = d->thread_priority };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
-    pin_to_rt_cores();
+    pin_to_cpu(2);
 
     /* RAVENNA는 hw 주기 48 고정; 일반 장치는 설정값 그대로 */
     int hw_period = d->is_ravenna ? RAVENNA_HW_PERIOD : d->period;

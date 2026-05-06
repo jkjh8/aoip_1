@@ -1,6 +1,6 @@
 import express from 'express';
 import { createServer } from 'http';
-import { createSocket } from 'dgram';
+import { execFile } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import httpLogger from 'morgan';
@@ -8,10 +8,8 @@ import cookieParser from 'cookie-parser';
 
 // systemd watchdog: notify every 10s so WatchdogSec=30 kills us if event loop hangs
 function _sdNotify(msg) {
-  const sock = process.env.NOTIFY_SOCKET;
-  if (!sock) return;
-  const c = createSocket('unix_dgram');
-  c.send(Buffer.from(msg), 0, msg.length, sock, () => c.close());
+  if (!process.env.NOTIFY_SOCKET) return;
+  execFile('systemd-notify', [msg], () => {});
 }
 setInterval(() => _sdNotify('WATCHDOG=1'), 10_000).unref();
 

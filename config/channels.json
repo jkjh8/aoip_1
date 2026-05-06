@@ -714,14 +714,6 @@
     },
     {
       "src": "aes67:out_9",
-      "dst": "analog:sin_1"
-    },
-    {
-      "src": "aes67:out_10",
-      "dst": "analog:sin_2"
-    },
-    {
-      "src": "aes67:out_9",
       "dst": "stream:sin_9"
     },
     {
@@ -751,6 +743,14 @@
     {
       "src": "aes67:out_16",
       "dst": "stream:sin_16"
+    },
+    {
+      "src": "aes67:out_1",
+      "dst": "analog:sin_1"
+    },
+    {
+      "src": "aes67:out_2",
+      "dst": "analog:sin_2"
     }
   ]
 }

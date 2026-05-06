@@ -1,6 +1,6 @@
 import { Server as SocketIO } from 'socket.io';
 import { getBridgeStatus } from '../lib/bridges.js';
-import { getDaemonStatus }                          from '../lib/aes67daemon.js';
+import { getDaemonStatus, daemonEvents }             from '../lib/aes67daemon.js';
 import { getGstStatus, getRxStats, getRtpStreamStatus } from '../lib/rtp/index.js';
 import { getChannels, getSavedRoutes }              from '../lib/channels/index.js';
 import { isDspRunning, getLimiterMeters }           from '../lib/dsp/index.js';
@@ -14,7 +14,6 @@ import registerSystem   from './system.js';
 import registerAes67    from './aes67.js';
 
 const STATUS_INTERVAL = 2000;
-const AES67_INTERVAL  = 10000;
 const LEVEL_INTERVAL  = 80;   // ~12 fps
 
 let cachedConnections = [];
@@ -54,8 +53,6 @@ async function snapshot() {
 async function refreshAes67Status() {
   try { cachedAes67Status = await getDaemonStatus(); } catch { /* ignore */ }
 }
-refreshAes67Status();
-setInterval(refreshAes67Status, AES67_INTERVAL);
 
 /**
  * Socket.IO 서버를 초기화하고 이벤트 핸들러를 등록합니다.
@@ -96,6 +93,17 @@ export function setupSocket(httpServer, config) {
   // 전체 상태 — 느린 주기
   setInterval(broadcastStatus, STATUS_INTERVAL);
 
+  // AES67 데몬 이벤트 → Socket.IO broadcast (클라이언트 없으면 스킵)
+  daemonEvents.on('sources:changed', (data) => {
+    if (io.engine.clientsCount > 0) io.emit('aes67:sources', data);
+  });
+  daemonEvents.on('sinks:changed', (data) => {
+    if (io.engine.clientsCount > 0) io.emit('aes67:sinks', data);
+  });
+  daemonEvents.on('ptp:changed', (data) => {
+    if (io.engine.clientsCount > 0) io.emit('aes67:ptp:status', data);
+  });
+
   const ctx = {
     io,
     broadcastStatus,
@@ -106,6 +114,7 @@ export function setupSocket(httpServer, config) {
 
   io.on('connection', async (socket) => {
     logger.info('[io] client connected:', socket.id);
+    await refreshAes67Status();
     try { socket.emit('status', await snapshot()); } catch { /* ignore */ }
 
     socket.on('disconnect', () => {

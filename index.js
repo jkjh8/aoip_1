@@ -13,7 +13,7 @@ import { getDspChannelCounts, restoreRoutes, restoreDspState } from './lib/chann
 import { startupDsp, registerAnalogBridge, waitForDspReady, addEngineRestartListener, sendToEngine, markStartupDone } from './lib/dsp/index.js';
 import { startupBridges, reregisterBridges } from './lib/bridges.js';
 import { startupRtp } from './lib/rtp/index.js';
-import { getDaemonStatus, startDaemonLogForwarder } from './lib/aes67daemon.js';
+import { getDaemonStatus, startDaemonLogForwarder, startStatusFileWatcher } from './lib/aes67daemon.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const config    = getConfig();
@@ -63,6 +63,7 @@ async function startup() {
   await restoreRoutes();
   restoreDspState();
   getDaemonStatus();
+  startStatusFileWatcher();
   startDaemonLogForwarder();
   markStartupDone();
 

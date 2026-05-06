@@ -2,8 +2,8 @@ import {
   getDaemonStatus,
   getConfig, setConfig,
   getPtpConfig, setPtpConfig, getPtpStatus,
-  getSources, addSource, removeSource, getSourceSdp,
-  getSinks, addSink, removeSink, getSinkStatus,
+  getSources, addSource, removeSource, getSourceSdp, invalidateSources,
+  getSinks, addSink, removeSink, getSinkStatus, invalidateSinks,
   browseAll, browseMdns, browseSap,
 } from '../lib/aes67daemon.js';
 
@@ -35,10 +35,12 @@ export default function register(socket, ctx) {
   const { io } = ctx;
 
   async function broadcastSources() {
+    invalidateSources();
     try { io.emit('aes67:sources', await getSources()); } catch { /* ignore */ }
   }
 
   async function broadcastSinks() {
+    invalidateSinks();
     try { io.emit('aes67:sinks', await getSinks()); } catch { /* ignore */ }
   }
 

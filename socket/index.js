@@ -1,9 +1,9 @@
 import { Server as SocketIO } from 'socket.io';
 import { getBridgeStatus, getUsbGadgetEnabled, isUdcConnected } from '../lib/bridges.js';
+import { getDaemonStatus }                          from '../lib/aes67daemon.js';
 import { getGstStatus, getRxStats, getRtpStreamStatus } from '../lib/rtp/index.js';
 import { getChannels, getSavedRoutes }              from '../lib/channels/index.js';
 import { isDspRunning, getLimiterMeters }           from '../lib/dsp/index.js';
-import { getDaemonStatus }                          from '../lib/aes67daemon.js';
 
 import logger from '../lib/logger.js';
 import registerBridges  from './bridges.js';

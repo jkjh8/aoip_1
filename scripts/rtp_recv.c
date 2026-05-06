@@ -156,6 +156,9 @@ static void shm_write(const float *buf, int frames)
     if (!g_shm || frames <= 0) return;
     for (int f = 0; f < frames; f++) {
         uint32_t wp  = atomic_load_explicit(&g_shm->wp, memory_order_relaxed);
+        uint32_t rp  = atomic_load_explicit(&g_shm->rp, memory_order_acquire);
+        if ((int32_t)(wp - rp) >= SHM_RING_FRAMES - 1)
+            break;  /* ring full: burst overflow 방지 */
         uint32_t idx = wp % (uint32_t)SHM_RING_FRAMES;
         for (int c = 0; c < g_ch && c < SHM_MAX_CH; c++)
             g_shm->buf[idx * SHM_MAX_CH + c] = buf[f * g_ch + c];
@@ -556,7 +559,7 @@ int main(int argc, char *argv[])
     if (g_buf_ms > 0) {
         int pre = (int)((long long)g_buf_ms * OUT_RATE / 1000);
         /* 링 버퍼 크기를 초과하지 않도록 안전 마진(1024프레임) 확보 */
-        int max_pre = SHM_RING_FRAMES - 1024;
+        int max_pre = SHM_RING_FRAMES * 3 / 4;  /* 75%: 나머지 25%는 burst 여유 */
         if (pre > max_pre) pre = max_pre;
         uint32_t wp0 = atomic_load_explicit(&g_shm->wp, memory_order_relaxed);
         atomic_store_explicit(&g_shm->wp, wp0 + (uint32_t)pre, memory_order_release);

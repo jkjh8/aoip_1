@@ -4,7 +4,7 @@
 #include <stddef.h>
 
 /* POSIX 공유 메모리 링버퍼 — aoip_engine(owner), rtp_recv/rtp_send(attach) 공통 레이아웃 */
-#define SHM_RING_FRAMES  16384
+#define SHM_RING_FRAMES  32768
 #define SHM_MAX_CH       8
 
 typedef struct {

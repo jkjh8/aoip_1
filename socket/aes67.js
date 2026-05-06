@@ -17,21 +17,35 @@ import {
  *
  *   aes67:ptp:config:get  → { domain, dscp }
  *   aes67:ptp:config:set  { domain?, dscp? }  → { ok }
- *   aes67:ptp:status      → { locked, jitter, masterId, ... }
  *
- *   aes67:sources:list    → [ source, ... ]
- *   aes67:source:add      { id, ...fields }  → { ok }
- *   aes67:source:remove   { id }  → { ok }
+ *   aes67:source:add      { id, ...fields }  → { ok }  → broadcast aes67:sources
+ *   aes67:source:remove   { id }  → { ok }            → broadcast aes67:sources
  *   aes67:source:sdp      { id }  → { ok, sdp }
  *
- *   aes67:sinks:list      → [ sink, ... ]
- *   aes67:sink:add        { id, ...fields }  → { ok }
- *   aes67:sink:remove     { id }  → { ok }
+ *   aes67:sink:add        { id, ...fields }  → { ok }  → broadcast aes67:sinks
+ *   aes67:sink:remove     { id }  → { ok }             → broadcast aes67:sinks
  *   aes67:sink:status     { id }  → { ok, status }
  *
  *   aes67:browse          { type?: 'mdns'|'sap'|'all' }  → [ remote source, ... ]
+ *
+ *  on connect: aes67:sources → [ source, ... ]
+ *              aes67:sinks   → [ sink, ... ]
  */
 export default function register(socket, ctx) {
+  const { io } = ctx;
+
+  async function broadcastSources() {
+    try { io.emit('aes67:sources', await getSources()); } catch { /* ignore */ }
+  }
+
+  async function broadcastSinks() {
+    try { io.emit('aes67:sinks', await getSinks()); } catch { /* ignore */ }
+  }
+
+  // 접속 시 초기 데이터 전송
+  getSources().then(s => socket.emit('aes67:sources', s)).catch(() => {});
+  getSinks().then(s => socket.emit('aes67:sinks', s)).catch(() => {});
+
   // ── 상태 조회 ──────────────────────────────────────────
 
   socket.on('aes67:status', async (cb) => {
@@ -73,16 +87,12 @@ export default function register(socket, ctx) {
 
   // ── Sources ────────────────────────────────────────────
 
-  socket.on('aes67:sources:list', async (cb) => {
-    try { cb?.({ ok: true, sources: await getSources() }); }
-    catch (e) { cb?.({ ok: false, error: e.message }); }
-  });
-
   socket.on('aes67:source:add', async ({ id, ...fields } = {}, cb) => {
     try {
       if (id == null) return cb?.({ ok: false, error: 'id required' });
       await addSource(id, fields);
       cb?.({ ok: true });
+      broadcastSources();
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 
@@ -91,6 +101,7 @@ export default function register(socket, ctx) {
       if (id == null) return cb?.({ ok: false, error: 'id required' });
       await removeSource(id);
       cb?.({ ok: true });
+      broadcastSources();
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 
@@ -104,16 +115,12 @@ export default function register(socket, ctx) {
 
   // ── Sinks ──────────────────────────────────────────────
 
-  socket.on('aes67:sinks:list', async (cb) => {
-    try { cb?.({ ok: true, sinks: await getSinks() }); }
-    catch (e) { cb?.({ ok: false, error: e.message }); }
-  });
-
   socket.on('aes67:sink:add', async ({ id, ...fields } = {}, cb) => {
     try {
       if (id == null) return cb?.({ ok: false, error: 'id required' });
       await addSink(id, fields);
       cb?.({ ok: true });
+      broadcastSinks();
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 
@@ -122,6 +129,7 @@ export default function register(socket, ctx) {
       if (id == null) return cb?.({ ok: false, error: 'id required' });
       await removeSink(id);
       cb?.({ ok: true });
+      broadcastSinks();
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 

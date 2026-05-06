@@ -103,106 +103,6 @@
       }
     },
     {
-      "id": 3,
-      "label": "USB AUDIO IN 1",
-      "jackPort": "usb:out_1",
-      "srcPort": "USB Audio IN:audio_in_1",
-      "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80
-        },
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ]
-      }
-    },
-    {
-      "id": 4,
-      "label": "USB AUDIO IN 2",
-      "jackPort": "usb:out_2",
-      "srcPort": "USB Audio IN:audio_in_2",
-      "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "hpf": {
-          "enabled": false,
-          "freq": 80
-        },
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ]
-      }
-    },
-    {
       "id": 5,
       "label": "Stream IN 1",
       "jackPort": "stream:out_1",
@@ -519,112 +419,6 @@
       }
     },
     {
-      "id": 3,
-      "label": "USB AUDIO OUT 1",
-      "jackPort": "usb:sin_1",
-      "sinkPort": "USB Audio OUT:audio_out_1",
-      "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 100,
-          "makeup": 0
-        }
-      }
-    },
-    {
-      "id": 4,
-      "label": "USB AUDIO OUT 2",
-      "jackPort": "usb:sin_2",
-      "sinkPort": "USB Audio OUT:audio_out_2",
-      "gain": 100,
-      "muted": false,
-      "bypassDsp": true,
-      "dsp": {
-        "eqEnabled": true,
-        "eq": [
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          },
-          {
-            "enabled": false,
-            "b0": 1,
-            "b1": 0,
-            "b2": 0,
-            "a1": 0,
-            "a2": 0
-          }
-        ],
-        "limiter": {
-          "enabled": false,
-          "threshold": -6,
-          "attack": 5,
-          "release": 100,
-          "makeup": 0
-        }
-      }
-    },
-    {
       "id": 5,
       "label": "Stream OUT 1",
       "jackPort": "stream:sin_1",
@@ -839,35 +633,27 @@
   ],
   "routing": [
     {
-      "src": "usb:out_1",
+      "src": "analog:out_1",
       "dst": "stream:sin_1"
     },
     {
-      "src": "usb:out_2",
+      "src": "analog:out_2",
       "dst": "stream:sin_2"
     },
     {
-      "src": "aes67:out_1",
-      "dst": "usb:sin_1"
-    },
-    {
-      "src": "aes67:out_2",
-      "dst": "usb:sin_2"
-    },
-    {
-      "src": "usb:out_1",
+      "src": "analog:out_1",
       "dst": "aes67:sin_1"
     },
     {
-      "src": "usb:out_2",
+      "src": "analog:out_2",
       "dst": "aes67:sin_2"
     },
     {
-      "src": "aes67:out_1",
+      "src": "stream:out_1",
       "dst": "analog:sin_1"
     },
     {
-      "src": "aes67:out_2",
+      "src": "stream:out_2",
       "dst": "analog:sin_2"
     }
   ]

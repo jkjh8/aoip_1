@@ -520,6 +520,53 @@ static void *stdin_thread(void *arg)
     return NULL;
 }
 
+/* ── Unix socket helpers ─────────────────────────────── */
+#include <sys/un.h>
+
+static int unix_connect(const char *path, int retries, int ms)
+{
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    for (int i = 0; i <= retries; i++) {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) return -1;
+        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) return fd;
+        close(fd);
+        if (i < retries) usleep(ms * 1000);
+    }
+    return -1;
+}
+
+static int read_line_fd(int fd, char *buf, int maxlen)
+{
+    int n = 0; char c;
+    while (n < maxlen - 1) {
+        if (read(fd, &c, 1) <= 0) break;
+        if (c == '\n') break;
+        if (c != '\r') buf[n++] = c;
+    }
+    buf[n] = '\0';
+    return n;
+}
+
+static int cfg_int(const char *s, const char *key, int def)
+{
+    char pat[64]; int v = def;
+    snprintf(pat, sizeof(pat), "%s=%%d", key);
+    const char *p = strstr(s, key);
+    if (p) sscanf(p, pat, &v);
+    return v;
+}
+
+static void cfg_str(const char *s, const char *key, char *buf, size_t n, const char *def)
+{
+    strncpy(buf, def, n); buf[n-1] = '\0';
+    char pat[64]; snprintf(pat, sizeof(pat), "%s=%%%zus", key, n-1);
+    const char *p = strstr(s, key);
+    if (p) sscanf(p, pat, buf);
+}
+
 /* ── signal ──────────────────────────────────────────── */
 static void on_signal(int sig) { (void)sig; g_quit = 1; }
 
@@ -545,19 +592,38 @@ int main(int argc, char *argv[])
     if (mlockall(MCL_CURRENT) != 0)
         fprintf(stderr, "[rtp_send] mlockall failed: %s\n", strerror(errno));
 
-    g_ch       = argc > 1 ? atoi(argv[1]) : 2;
-    if (argc > 2) snprintf(g_client_name, sizeof(g_client_name), "%s", argv[2]);
-    g_use_rtp  = (argc > 3 && strcmp(argv[3], "rtp") == 0) ? 1 : 0;
-    g_out_rate = (argc > 4 && atoi(argv[4]) > 0) ? atoi(argv[4]) : SAMPLE_RATE;
-    if (argc > 5 && strcmp(argv[5], "shm") == 0 && argc > 6)
-        snprintf(g_shm_name, sizeof(g_shm_name), "%s", argv[6]);
-    if (argc > 7) g_codec   = (strcmp(argv[7], "raw") == 0) ? CODEC_RAW : CODEC_MP3;
-    if (argc > 8 && atoi(argv[8]) > 0) g_bitrate = atoi(argv[8]);
+    const char *key = argc > 1 ? argv[1] : "rtp_out";
+    snprintf(g_client_name, sizeof(g_client_name), "%s", key);
 
-    if (!g_shm_name[0]) {
-        fprintf(stderr, "[rtp_send] shm name required\n");
+    char sock_path[256];
+    snprintf(sock_path, sizeof(sock_path), "/run/aoip/rtp_send_%s.sock", key);
+    int sfd = unix_connect(sock_path, 30, 100);
+    if (sfd < 0) {
+        fprintf(stderr, "[rtp_send] cannot connect to %s\n", sock_path);
         return 1;
     }
+
+    char cfg[512] = "";
+    read_line_fd(sfd, cfg, sizeof(cfg));
+
+    g_ch = cfg_int(cfg, "channels", 2);
+    char proto_str[16], codec_str[16];
+    cfg_str(cfg, "proto",  proto_str, sizeof(proto_str), "rtp");
+    cfg_str(cfg, "codec",  codec_str, sizeof(codec_str), "raw");
+    cfg_str(cfg, "shm",    g_shm_name, sizeof(g_shm_name), "");
+    g_use_rtp  = (strcmp(proto_str, "rtp") == 0) ? 1 : 0;
+    g_codec    = (strcmp(codec_str, "raw") == 0) ? CODEC_RAW : CODEC_MP3;
+    g_out_rate = cfg_int(cfg, "rate",    SAMPLE_RATE);
+    g_bitrate  = cfg_int(cfg, "bitrate", 320);
+    if (g_out_rate <= 0) g_out_rate = SAMPLE_RATE;
+    if (g_bitrate  <= 0) g_bitrate  = 320;
+    if (!g_shm_name[0])
+        snprintf(g_shm_name, sizeof(g_shm_name), "/%s", key);
+
+    /* socket → stdin (명령 수신) + stdout (ready/stats 송신) */
+    dup2(sfd, STDIN_FILENO);
+    dup2(sfd, STDOUT_FILENO);
+    close(sfd);
 
     /* SSRC: 클라이언트 이름 해시 (재시작 후에도 동일) */
     for (int i = 0; g_client_name[i]; i++)

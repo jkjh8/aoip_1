@@ -1,6 +1,3 @@
-import { setPriority } from 'os';
-try { setPriority(-20); } catch { /* CAP_SYS_NICE 없으면 무시 */ }
-
 import express from 'express';
 import { createServer } from 'http';
 import { fileURLToPath } from 'url';

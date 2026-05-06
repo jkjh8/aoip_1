@@ -776,6 +776,46 @@ static void cmd_loop(void)
     }
 }
 
+/* ── Unix socket helpers ─────────────────────────────────────────── */
+#include <sys/socket.h>
+#include <sys/un.h>
+
+static int unix_connect(const char *path, int retries, int ms)
+{
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    for (int i = 0; i <= retries; i++) {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) return -1;
+        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) return fd;
+        close(fd);
+        if (i < retries) usleep(ms * 1000);
+    }
+    return -1;
+}
+
+static int read_line_fd(int fd, char *buf, int maxlen)
+{
+    int n = 0; char c;
+    while (n < maxlen - 1) {
+        if (read(fd, &c, 1) <= 0) break;
+        if (c == '\n') break;
+        if (c != '\r') buf[n++] = c;
+    }
+    buf[n] = '\0';
+    return n;
+}
+
+static int cfg_int(const char *s, const char *key, int def)
+{
+    char pat[64]; int v = def;
+    snprintf(pat, sizeof(pat), "%s=%%d", key);
+    const char *p = strstr(s, key);
+    if (p) sscanf(p, pat, &v);
+    return v;
+}
+
 /* ── main ────────────────────────────────────────────────────────── */
 int main(int argc, char *argv[])
 {
@@ -783,25 +823,38 @@ int main(int argc, char *argv[])
     if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
         fprintf(stderr, "[aoip_engine] mlockall failed: %s\n", strerror(errno));
 
-    if (argc < 3) {
-        fprintf(stderr, "Usage: aoip_engine <n_in> <n_out> [--name <name>]\n");
-        return 1;
-    }
-    g_n_in  = atoi(argv[1]);
-    g_n_out = atoi(argv[2]);
-    if (g_n_in < 0 || g_n_in > MAX_CH || g_n_out < 0 || g_n_out > MAX_CH) {
-        fprintf(stderr, "[aoip_engine] channel count out of range (max %d)\n", MAX_CH);
-        return 1;
-    }
-
     const char *name = "aoip_engine";
-    for (int i = 3; i < argc; i++) {
+    for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--name")         && i+1 < argc) name             = argv[++i];
         else if (!strcmp(argv[i], "--dsp-prio")     && i+1 < argc) g_prio_dsp     = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--alsa-prio")    && i+1 < argc) g_prio_alsa    = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ravenna-prio") && i+1 < argc) g_prio_ravenna = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bypass-dsp"))                 g_bypass_all_dsp = 1;
     }
+
+    /* Node.js 소켓 서버에 연결, init 라인 수신 */
+    int sfd = unix_connect("/run/aoip/engine.sock", 30, 100);
+    if (sfd < 0) {
+        fprintf(stderr, "[aoip_engine] cannot connect to /run/aoip/engine.sock\n");
+        return 1;
+    }
+
+    char init_line[128] = "";
+    read_line_fd(sfd, init_line, sizeof(init_line));
+    g_n_in  = cfg_int(init_line, "n_in",  0);
+    g_n_out = cfg_int(init_line, "n_out", 0);
+
+    if (g_n_in < 0 || g_n_in > MAX_CH || g_n_out < 0 || g_n_out > MAX_CH) {
+        fprintf(stderr, "[aoip_engine] channel count out of range (in=%d out=%d max=%d)\n",
+                g_n_in, g_n_out, MAX_CH);
+        close(sfd);
+        return 1;
+    }
+
+    /* socket → stdin (명령) + stdout (ready/lvl/lm) */
+    dup2(sfd, STDIN_FILENO);
+    dup2(sfd, STDOUT_FILENO);
+    close(sfd);
 
     /* 채널 초기 상태 */
     for (int i = 0; i < g_n_in; i++) {

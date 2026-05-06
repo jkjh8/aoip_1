@@ -504,14 +504,62 @@ static void *stats_thread(void *arg)
         src_port = g_src_port;
         pthread_mutex_unlock(&g_addr_mtx);
 
-        fprintf(stderr,
+        int r = fprintf(stderr,
             "stats codec=%s bufMs=%d packets=%lu drops=%lu srcIp=%s srcPort=%d bitrateKbps=%d\n",
             g_codec, g_buf_ms,
             atomic_load(&g_packets), atomic_load(&g_drops),
             src_ip, src_port, kbps);
         fflush(stderr);
+        if (r < 0) { g_quit = 1; break; }  /* socket 닫힘(Node.js 재시작) → 종료 */
     }
     return NULL;
+}
+
+/* ── Unix socket helpers ─────────────────────────────── */
+#include <sys/un.h>
+
+static int unix_connect(const char *path, int retries, int ms)
+{
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    for (int i = 0; i <= retries; i++) {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) return -1;
+        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) return fd;
+        close(fd);
+        if (i < retries) usleep(ms * 1000);
+    }
+    return -1;
+}
+
+static int read_line_fd(int fd, char *buf, int maxlen)
+{
+    int n = 0; char c;
+    while (n < maxlen - 1) {
+        if (read(fd, &c, 1) <= 0) break;
+        if (c == '\n') break;
+        if (c != '\r') buf[n++] = c;
+    }
+    buf[n] = '\0';
+    return n;
+}
+
+static int cfg_int(const char *s, const char *key, int def)
+{
+    char pat[64]; int v = def;
+    snprintf(pat, sizeof(pat), "%s=%%d", key);
+    const char *p = strstr(s, key);
+    if (p) sscanf(p, pat, &v);
+    return v;
+}
+
+static void cfg_str(const char *s, const char *key, char *buf, size_t n, const char *def)
+{
+    strncpy(buf, def, n); buf[n-1] = '\0';
+    char pat[64]; snprintf(pat, sizeof(pat), "%s=%%%zus", key, n-1);
+    const char *p = strstr(s, key);
+    if (p) sscanf(p, pat, buf);
 }
 
 /* ── signal ──────────────────────────────────────────── */
@@ -527,32 +575,41 @@ int main(int argc, char *argv[])
     if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
         fprintf(stderr, "[rtp_recv] mlockall: %s\n", strerror(errno));
 
-    int port  = argc > 1 ? atoi(argv[1]) : 5004;
-    g_ch      = argc > 2 ? atoi(argv[2]) : 2;
-    if (g_ch < 1) g_ch = 1;
-    if (g_ch > SHM_MAX_CH) g_ch = SHM_MAX_CH;
+    const char *key = argc > 1 ? argv[1] : "rtp_in";
 
-    const char *proto_arg = argc > 3 ? argv[3] : "rtp";
-    g_proto = (strcmp(proto_arg, "raw") == 0) ? PROTO_RAW : PROTO_RTP;
-
-    /* argv[4] = client name (unused, for compatibility) */
-    g_buf_ms  = argc > 5 ? atoi(argv[5]) : 100;
-    if (g_buf_ms < 10)   g_buf_ms = 10;
-    if (g_buf_ms > 2000) g_buf_ms = 2000;
-
-    g_in_rate = argc > 6 && atoi(argv[6]) > 0 ? atoi(argv[6]) : 48000;
-    /* argv[7] = encoding hint (ignored: always auto-detect) */
-
-    if (argc > 8 && argv[8][0] != '\0')
-        snprintf(g_bind_addr, sizeof(g_bind_addr), "%s", argv[8]);
-
-    if (argc > 9 && strcmp(argv[9], "shm") == 0 && argc > 10)
-        snprintf(g_shm_name, sizeof(g_shm_name), "%s", argv[10]);
-
-    if (!g_shm_name[0]) {
-        fprintf(stderr, "[rtp_recv] shm name required (argv[9]=shm argv[10]=<name>)\n");
+    char sock_path[256];
+    snprintf(sock_path, sizeof(sock_path), "/run/aoip/rtp_recv_%s.sock", key);
+    int sfd = unix_connect(sock_path, 30, 100);
+    if (sfd < 0) {
+        fprintf(stderr, "[rtp_recv] cannot connect to %s\n", sock_path);
         return 1;
     }
+
+    char cfg[512] = "";
+    read_line_fd(sfd, cfg, sizeof(cfg));
+
+    int port  = cfg_int(cfg, "port", 5004);
+    g_ch      = cfg_int(cfg, "channels", 2);
+    if (g_ch < 1) g_ch = 1;
+    if (g_ch > SHM_MAX_CH) g_ch = SHM_MAX_CH;
+    g_buf_ms  = cfg_int(cfg, "bufMs", 100);
+    if (g_buf_ms < 10)   g_buf_ms = 10;
+    if (g_buf_ms > 2000) g_buf_ms = 2000;
+    g_in_rate = cfg_int(cfg, "rate", 48000);
+    if (g_in_rate <= 0)  g_in_rate = 48000;
+
+    char proto_str[16];
+    cfg_str(cfg, "proto", proto_str, sizeof(proto_str), "rtp");
+    g_proto = (strcmp(proto_str, "raw") == 0) ? PROTO_RAW : PROTO_RTP;
+    cfg_str(cfg, "addr", g_bind_addr, sizeof(g_bind_addr), "0.0.0.0");
+    cfg_str(cfg, "shm",  g_shm_name,  sizeof(g_shm_name),  "");
+    if (!g_shm_name[0])
+        snprintf(g_shm_name, sizeof(g_shm_name), "/%s", key);
+
+    /* socket → stderr (stats, ready 등 모든 출력) */
+    dup2(sfd, STDERR_FILENO);
+    close(sfd);
+
     if (!shm_attach()) return 1;
 
     /* jitter buffer: wp를 bufMs만큼 선행 이동 → MP3 같은 대형 패킷에도 무음 없음 */
@@ -618,7 +675,7 @@ int main(int argc, char *argv[])
     }
 
     fprintf(stderr, "[rtp_recv] mode=%s port=%d ch=%d bufMs=%d addr=%s\n",
-            proto_arg, port, g_ch, g_buf_ms, g_bind_addr);
+            proto_str, port, g_ch, g_buf_ms, g_bind_addr);
 
     pthread_t recv_tid, decode_tid, stats_tid;
     pthread_create(&recv_tid,   NULL, recv_thread,   &sock);

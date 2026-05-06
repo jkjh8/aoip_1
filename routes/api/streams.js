@@ -72,7 +72,7 @@ router.get('/rtp/:client', (req, res) => {
   res.json({ ok: true, stream: detail });
 });
 
-router.post('/rtp/:client/start', (req, res) => {
+router.post('/rtp/:client/start', async (req, res) => {
   const { client } = req.params;
   try {
     const updates    = parseBody(req.body);
@@ -85,7 +85,7 @@ router.post('/rtp/:client/start', (req, res) => {
       if (detail.type === 'rtp_in')  updateRtpInConfig(client, updates);
       if (detail.type === 'rtp_out') updateRtpOutConfig(client, updates);
     }
-    startRtpStream(client);
+    await startRtpStream(client);
     res.json({ ok: true, stream: getRtpStreamDetail(client) });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });

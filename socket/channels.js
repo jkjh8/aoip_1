@@ -46,12 +46,11 @@ export default function register(socket, { broadcastStatus, config }) {
     catch (e) { cb?.({ ok: false, error: e.message }); }
   });
 
-  socket.on('dsp:bypass', async (cb) => {
+  socket.on('dsp:bypass', (cb) => {
     try {
       const { inputs, outputs } = getChannels();
       for (const ch of inputs)  sendBypass('in',  ch.id, true);
       for (const ch of outputs) sendBypass('out', ch.id, true);
-      await broadcastStatus();
       cb?.({ ok: true });
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });
@@ -111,12 +110,11 @@ export default function register(socket, { broadcastStatus, config }) {
     } catch (e) { cb?.({ ok: false, error: e.message }) }
   });
 
-  socket.on('dsp:restore', async (cb) => {
+  socket.on('dsp:restore', (cb) => {
     try {
       const { inputs, outputs } = getChannels();
       for (const ch of inputs)  { sendBypass('in',  ch.id, false); sendGain('in',  ch.id, ch.gain); if (ch.muted) sendMute('in',  ch.id, true); }
       for (const ch of outputs) { sendBypass('out', ch.id, false); sendGain('out', ch.id, ch.gain); if (ch.muted) sendMute('out', ch.id, true); }
-      await broadcastStatus();
       cb?.({ ok: true });
     } catch (e) { cb?.({ ok: false, error: e.message }); }
   });

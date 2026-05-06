@@ -7,7 +7,66 @@
       "srcPort": "system:capture_1",
       "gain": 100,
       "muted": false,
-      "active": true
+      "active": true,
+      "dsp": {
+        "trim": 0,
+        "hpf": {
+          "enabled": false,
+          "slope": 48,
+          "fc": 57
+        },
+        "eq": [
+          {
+            "band": 1,
+            "enabled": false,
+            "type": "low_shelf",
+            "fc": 180,
+            "q": 0.7,
+            "gainDb": -6.8
+          },
+          {
+            "band": 2,
+            "enabled": false,
+            "type": "peak",
+            "fc": 500,
+            "q": 0.7,
+            "gainDb": 0
+          },
+          {
+            "band": 3,
+            "enabled": false,
+            "type": "peak",
+            "fc": 2000,
+            "q": 0.7,
+            "gainDb": 0
+          },
+          {
+            "band": 4,
+            "enabled": false,
+            "type": "high_shelf",
+            "fc": 2088,
+            "q": 0.7,
+            "gainDb": 6.3
+          }
+        ],
+        "gate": {
+          "enabled": false,
+          "threshold": -14,
+          "attackMs": 5,
+          "releaseMs": 10,
+          "holdMs": 5,
+          "rangeDb": -36
+        },
+        "comp": {
+          "enabled": false,
+          "threshold": -6,
+          "ratio": 10,
+          "knee": 6,
+          "attackMs": 10,
+          "releaseMs": 200,
+          "makeupDb": 0
+        }
+      }
     },
     {
       "id": 2,
@@ -16,7 +75,66 @@
       "srcPort": "system:capture_2",
       "gain": 100,
       "muted": false,
-      "active": true
+      "active": true,
+      "dsp": {
+        "trim": 0,
+        "hpf": {
+          "enabled": false,
+          "slope": 12,
+          "fc": 80
+        },
+        "eq": [
+          {
+            "band": 1,
+            "enabled": false,
+            "type": "peak",
+            "fc": 100,
+            "q": 0.707,
+            "gainDb": 0
+          },
+          {
+            "band": 2,
+            "enabled": false,
+            "type": "peak",
+            "fc": 500,
+            "q": 0.707,
+            "gainDb": 0
+          },
+          {
+            "band": 3,
+            "enabled": false,
+            "type": "peak",
+            "fc": 2000,
+            "q": 0.707,
+            "gainDb": 0
+          },
+          {
+            "band": 4,
+            "enabled": false,
+            "type": "high_shelf",
+            "fc": 8000,
+            "q": 0.707,
+            "gainDb": 0
+          }
+        ],
+        "gate": {
+          "enabled": false,
+          "threshold": -16,
+          "attackMs": 5,
+          "releaseMs": 100,
+          "holdMs": 5,
+          "rangeDb": -16
+        },
+        "comp": {
+          "enabled": false,
+          "threshold": -20,
+          "ratio": 4,
+          "knee": 6,
+          "attackMs": 10,
+          "releaseMs": 100,
+          "makeupDb": 0
+        }
+      }
     },
     {
       "id": 3,
@@ -315,7 +433,65 @@
       "sinkPort": "system:playback_1",
       "gain": 100,
       "muted": false,
-      "active": true
+      "active": true,
+      "dsp": {
+        "eq": [
+          {
+            "band": 1,
+            "enabled": false,
+            "type": "peak",
+            "fc": 100,
+            "q": 0.7,
+            "gainDb": 0
+          },
+          {
+            "band": 2,
+            "enabled": false,
+            "type": "peak",
+            "fc": 500,
+            "q": 0.707,
+            "gainDb": 0
+          },
+          {
+            "band": 3,
+            "enabled": false,
+            "type": "peak",
+            "fc": 2000,
+            "q": 0.707,
+            "gainDb": 0
+          },
+          {
+            "band": 4,
+            "enabled": false,
+            "type": "high_shelf",
+            "fc": 8000,
+            "q": 0.707,
+            "gainDb": 0
+          }
+        ],
+        "comp": {
+          "enabled": false,
+          "threshold": -24,
+          "ratio": 4,
+          "knee": 6,
+          "attackMs": 10,
+          "releaseMs": 200,
+          "makeupDb": 0
+        },
+        "lim": {
+          "enabled": false,
+          "threshold": -16,
+          "releaseMs": 100
+        },
+        "gate": {
+          "enabled": false,
+          "threshold": -27,
+          "attackMs": 5,
+          "holdMs": 5,
+          "releaseMs": 10,
+          "rangeDb": -36
+        }
+      }
     },
     {
       "id": 2,
@@ -324,7 +500,65 @@
       "sinkPort": "system:playback_2",
       "gain": 100,
       "muted": false,
-      "active": true
+      "active": true,
+      "dsp": {
+        "eq": [
+          {
+            "band": 1,
+            "enabled": false,
+            "type": "low_shelf",
+            "fc": 180,
+            "q": 0.707,
+            "gainDb": 0
+          },
+          {
+            "band": 2,
+            "enabled": false,
+            "type": "peak",
+            "fc": 500,
+            "q": 0.707,
+            "gainDb": 0
+          },
+          {
+            "band": 3,
+            "enabled": false,
+            "type": "peak",
+            "fc": 2000,
+            "q": 0.707,
+            "gainDb": 0
+          },
+          {
+            "band": 4,
+            "enabled": false,
+            "type": "high_shelf",
+            "fc": 8000,
+            "q": 0.68,
+            "gainDb": 0
+          }
+        ],
+        "comp": {
+          "enabled": false,
+          "threshold": -20,
+          "ratio": 4,
+          "knee": 6,
+          "attackMs": 10,
+          "releaseMs": 200,
+          "makeupDb": 0
+        },
+        "lim": {
+          "enabled": false,
+          "threshold": -14.5,
+          "releaseMs": 200
+        },
+        "gate": {
+          "enabled": false,
+          "threshold": -27,
+          "attackMs": 5,
+          "holdMs": 5,
+          "releaseMs": 100,
+          "rangeDb": -16
+        }
+      }
     },
     {
       "id": 3,
@@ -711,38 +945,6 @@
     {
       "src": "aes67:out_1",
       "dst": "stream:sin_1"
-    },
-    {
-      "src": "aes67:out_9",
-      "dst": "stream:sin_9"
-    },
-    {
-      "src": "aes67:out_10",
-      "dst": "stream:sin_10"
-    },
-    {
-      "src": "aes67:out_11",
-      "dst": "stream:sin_11"
-    },
-    {
-      "src": "aes67:out_12",
-      "dst": "stream:sin_12"
-    },
-    {
-      "src": "aes67:out_13",
-      "dst": "stream:sin_13"
-    },
-    {
-      "src": "aes67:out_14",
-      "dst": "stream:sin_14"
-    },
-    {
-      "src": "aes67:out_15",
-      "dst": "stream:sin_15"
-    },
-    {
-      "src": "aes67:out_16",
-      "dst": "stream:sin_16"
     },
     {
       "src": "aes67:out_1",

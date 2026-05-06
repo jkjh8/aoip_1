@@ -3,16 +3,18 @@ import { getBridgeStatus } from '../lib/bridges.js';
 import { getDaemonStatus, daemonEvents, enrichSinks } from '../lib/aes67daemon.js';
 import { getRtpStreamStatus, streamEvents } from '../lib/rtp/index.js';
 import { getChannels, getSavedRoutes, syncAes67Active } from '../lib/channels/index.js';
-import { isDspRunning, getDspUptime }               from '../lib/dsp/index.js';
+import { isDspRunning, getDspUptime, getGrSnapshot } from '../lib/dsp/index.js';
 
 import logger from '../lib/logger.js';
 import registerStreams   from './streams.js';
 import registerChannels from './channels.js';
 import registerSystem   from './system.js';
 import registerAes67    from './aes67.js';
+import registerDspEq    from './dsp_eq.js';
+import registerDspDyn   from './dsp_dynamics.js';
 
 const STATUS_INTERVAL = 2000;
-const LEVEL_INTERVAL  = 80;   // ~12 fps
+const LEVEL_INTERVAL  = 100;  // 10 fps
 
 let cachedConnections = [];
 let cachedAes67Status = { running: false, ready: false, url: 'http://127.0.0.1:8080' };
@@ -55,15 +57,27 @@ async function refreshAes67Status() {
  */
 export function setupSocket(httpServer, config) {
   const io = new SocketIO(httpServer, {
-    cors: { origin: '*', methods: ['GET', 'POST'] }
+    cors: { origin: '*', methods: ['GET', 'POST'] },
+    transports:   ['websocket'],
+    pingInterval: 25000,
+    pingTimeout:  60000,
   });
 
+  let _dspBusyUntil = 0;
+  function markDspBusy(ms = 400) { _dspBusyUntil = Date.now() + ms; }
+
+  let _statusPending = false;
   async function broadcastStatus() {
     if (io.engine.clientsCount === 0) return;
+    if (_statusPending) return;
+    if (Date.now() < _dspBusyUntil) return;
+    _statusPending = true;
     try {
       const s = await snapshot();
       io.emit('status', s);
-    } catch { /* engine not ready */ }
+    } catch { /* engine not ready */ } finally {
+      _statusPending = false;
+    }
   }
 
   function broadcastChannels() {
@@ -80,14 +94,17 @@ export function setupSocket(httpServer, config) {
     });
   }
 
-  // 레벨 미터 — 빠른 주기로 별도 emit
+  // 레벨 미터 — 빠른 주기로 별도 emit (DSP 커맨드 처리 중엔 억제)
   setInterval(() => {
     if (io.engine.clientsCount === 0) return;
+    if (Date.now() < _dspBusyUntil) return;
     const ch = getChannels();
     io.emit('levels', {
       inputs:  ch.inputs.map(c  => ({ id: c.id, level: c.level })),
       outputs: ch.outputs.map(c => ({ id: c.id, level: c.level })),
     });
+    const gr = getGrSnapshot();
+    if (gr.inputs.length || gr.outputs.length) io.emit('gr', gr);
   }, LEVEL_INTERVAL);
 
   // 전체 상태 — 느린 주기
@@ -115,6 +132,7 @@ export function setupSocket(httpServer, config) {
     io,
     broadcastStatus,
     broadcastChannels,
+    markDspBusy,
     getCached: () => cachedConnections,
     config
   };
@@ -135,6 +153,8 @@ export function setupSocket(httpServer, config) {
     registerChannels(socket, ctx);
     registerSystem(socket);
     registerAes67(socket, ctx);
+    registerDspEq(socket, ctx);
+    registerDspDyn(socket, ctx);
   });
 
   return { io, broadcastStatus, broadcastChannels };

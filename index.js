@@ -1,9 +1,19 @@
 import express from 'express';
 import { createServer } from 'http';
+import { createSocket } from 'dgram';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import httpLogger from 'morgan';
 import cookieParser from 'cookie-parser';
+
+// systemd watchdog: notify every 10s so WatchdogSec=30 kills us if event loop hangs
+function _sdNotify(msg) {
+  const sock = process.env.NOTIFY_SOCKET;
+  if (!sock) return;
+  const c = createSocket('unix_dgram');
+  c.send(Buffer.from(msg), 0, msg.length, sock, () => c.close());
+}
+setInterval(() => _sdNotify('WATCHDOG=1'), 10_000).unref();
 
 import apiRoutes from './routes/index.js';
 import { setupSocket } from './socket/index.js';
@@ -13,7 +23,8 @@ import { getDspChannelCounts, restoreRoutes, restoreDspState, syncAes67Active } 
 import { startupDsp, registerAnalogBridge, waitForDspReady, addEngineRestartListener, sendToEngine, markStartupDone } from './lib/dsp/index.js';
 import { startupBridges, reregisterBridges } from './lib/bridges.js';
 import { startupRtp } from './lib/rtp/index.js';
-import { getDaemonStatus, getSinks, getSources, startDaemonLogForwarder, startStatusFileWatcher, refreshDaemonNetworkConf } from './lib/aes67daemon.js';
+import { getDaemonStatus, getSinks, getSources, startDaemonLogForwarder, startStatusFileWatcher, refreshDaemonNetworkConf } from './lib/aes67daemon.js'
+import { startSerial } from './lib/serial/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const config    = getConfig();
@@ -78,6 +89,7 @@ async function startup() {
   ]);
   broadcastChannels();
 
+  startSerial(config)
   markStartupDone();
 
   addEngineRestartListener(async () => {

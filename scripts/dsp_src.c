@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
 #include <samplerate.h>
 
 #include "include/engine_constants.h"
@@ -12,6 +13,20 @@ extern int    g_period_frames;
 extern float *g_in_ptr[MAX_CH];
 extern float *g_out_ptr[MAX_CH];
 
+/* DEBUG_SRC=1 이면 stderr에 SRC 상세 로그 출력 (빌드 시 -DDEBUG_SRC=1) */
+#ifndef DEBUG_SRC
+#define DEBUG_SRC 0
+#endif
+
+/* PI 로그는 매 N번 호출마다 한 번만 출력 (hot-path 부하 최소화) */
+#define SRC_LOG_INTERVAL 500
+
+#if DEBUG_SRC
+#define SRC_DBG(fmt, ...) fprintf(stderr, "[SRC] " fmt "\n", ##__VA_ARGS__)
+#else
+#define SRC_DBG(fmt, ...) (void)0
+#endif
+
 /* ── PI 드리프트 보정 ────────────────────────────────────────────── */
 #define RATIO_INIT_OFFSET  0.0
 
@@ -20,15 +35,28 @@ void pi_reset(PiState *p) {
     p->smooth = 0.0;
     p->integ  = RATIO_INIT_OFFSET / ki;
     p->ratio  = 1.0 + RATIO_INIT_OFFSET;
+    SRC_DBG("pi_reset → ratio=%.6f integ=%.6f", p->ratio, p->integ);
 }
 
 void pi_update(PiState *p, int avail, int target) {
+    static uint64_t _pi_tick = 0;
     double err  = ((double)target - avail) / (double)target;
     p->smooth  += 0.2 * (err - p->smooth);
     p->integ   += p->smooth;
+    double prev_ratio = p->ratio;
     p->ratio    = 1.0 + p->smooth * p->kp + p->integ * p->ki;
-    if (p->ratio < p->min) { p->ratio = p->min; p->integ = (p->min - 1.0 - p->smooth * p->kp) / p->ki; }
-    if (p->ratio > p->max) { p->ratio = p->max; p->integ = (p->max - 1.0 - p->smooth * p->kp) / p->ki; }
+
+    int clamped = 0;
+    if (p->ratio < p->min) { p->ratio = p->min; p->integ = (p->min - 1.0 - p->smooth * p->kp) / p->ki; clamped = -1; }
+    if (p->ratio > p->max) { p->ratio = p->max; p->integ = (p->max - 1.0 - p->smooth * p->kp) / p->ki; clamped =  1; }
+
+    if (++_pi_tick % SRC_LOG_INTERVAL == 0) {
+        SRC_DBG("pi_update [%6llu] avail=%d target=%d err=%+.4f smooth=%+.6f "
+                "ratio=%+.7f (Δ%+.7f)%s",
+                (unsigned long long)_pi_tick, avail, target, err, p->smooth,
+                p->ratio, p->ratio - prev_ratio,
+                clamped < 0 ? " [CLAMP MIN]" : clamped > 0 ? " [CLAMP MAX]" : "");
+    }
 }
 
 /*
@@ -58,6 +86,8 @@ long src_convert(SRC_STATE *src, PiState *pi,
         int actual_need = (int)ceil((double)g_period_frames / pi->ratio);
         int need = actual_need + 2;
         if (actual_need > fill || need > DEV_TMP_FRAMES) {
+            SRC_DBG("UNDERRUN ch_start=%d fill=%d actual_need=%d need=%d ratio=%.7f → zeroing %d frames",
+                    ch_start, fill, actual_need, need, pi->ratio, g_period_frames);
             for (int c = 0; c < channels && (ch_start+c) < MAX_CH; c++)
                 memset(g_in_ptr[ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
             return 0;  /* src/pi 리셋은 호출자(지속 언더런 감지 후)가 결정 */
@@ -70,6 +100,12 @@ long src_convert(SRC_STATE *src, PiState *pi,
         };
         src_process(src, &sd);
         long gen = sd.output_frames_gen;
+        SRC_DBG("cap  ch=%d+%d ratio=%.7f fill=%d need=%d input=%d used=%ld gen=%ld period=%d",
+                ch_start, channels, pi->ratio,
+                fill, need, input_size, sd.input_frames_used, gen, g_period_frames);
+        if (gen < g_period_frames)
+            SRC_DBG("cap  SHORT OUTPUT: gen=%ld < period=%d (zeroing %ld tail frames)",
+                    gen, g_period_frames, (long)g_period_frames - gen);
         for (int c = 0; c < channels && (ch_start+c) < MAX_CH; c++) {
             float *dst = g_in_ptr[ch_start+c];
             for (long f = 0; f < gen; f++) dst[f] = tmp_out[f*channels+c];
@@ -79,7 +115,11 @@ long src_convert(SRC_STATE *src, PiState *pi,
     } else {
         long out_max = (long)ceil((double)g_period_frames * pi->ratio) + 4;
         if (out_max > DEV_TMP_FRAMES) out_max = DEV_TMP_FRAMES;
-        if (ring_space < (int)out_max) return 0;
+        if (ring_space < (int)out_max) {
+            SRC_DBG("play SKIP ch=%d+%d ring_space=%d out_max=%ld ratio=%.7f",
+                    ch_start, channels, ring_space, out_max, pi->ratio);
+            return 0;
+        }
         for (int f = 0; f < g_period_frames; f++)
             for (int c = 0; c < channels && (ch_start+c) < MAX_CH; c++)
                 tmp_in[f*channels+c] = g_out_ptr[ch_start+c][f];
@@ -89,6 +129,9 @@ long src_convert(SRC_STATE *src, PiState *pi,
             .src_ratio = pi->ratio,
         };
         src_process(src, &sd);
+        SRC_DBG("play ch=%d+%d ratio=%.7f period=%d out_max=%ld gen=%ld ring_space=%d",
+                ch_start, channels, pi->ratio,
+                g_period_frames, out_max, sd.output_frames_gen, ring_space);
         return sd.output_frames_gen;
     }
 }
@@ -107,6 +150,8 @@ int ring_capture_src(SRC_STATE *src, PiState *pi,
     if (avail > fill_target * 2) {
         unsigned rp0 = atomic_load_explicit(&ring->rp, memory_order_relaxed);
         unsigned skip = (unsigned)(avail - fill_target);
+        SRC_DBG("OVERFLOW ch=%d+%d avail=%d target=%d → skip=%u frames (rp %u→%u)",
+                ch_start, channels, avail, fill_target, skip, rp0, rp0 + skip);
         atomic_store_explicit(&ring->rp, rp0 + skip, memory_order_release);
         pi_update(pi, avail, fill_target);
         avail = fill_target;
@@ -130,9 +175,13 @@ int ring_capture_src(SRC_STATE *src, PiState *pi,
 /* ── RAVENNA 재생 SRC ────────────────────────────────────────────── */
 void alsa_playback_src(Device *d)
 {
+    int play_avail = rb_avail(&d->out_ring);
+    int play_free  = rb_free(&d->out_ring);
     long gen = src_convert(d->play_src, &d->play_pi, d->tmp_play_in, d->tmp_play_out,
-                           rb_avail(&d->out_ring), FILL_TARGET, rb_free(&d->out_ring),
+                           play_avail, FILL_TARGET, play_free,
                            d->channels, d->ch_start, 0);
+    SRC_DBG("alsa_play ch=%d+%d ring_avail=%d ring_free=%d gen=%ld ratio=%.7f",
+            d->ch_start, d->channels, play_avail, play_free, gen, d->play_pi.ratio);
     if (gen > 0)
         rb_write(&d->out_ring, d->tmp_play_out, (int)gen);
 }

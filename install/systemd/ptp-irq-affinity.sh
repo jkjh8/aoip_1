@@ -1,6 +1,6 @@
 #!/bin/bash
-# eth0 IRQ를 CPU 3에 고정, RT 우선순위 설정 (RT 커널 PTP 안정화)
-# CPU 레이아웃: CPU2=DSP/ALSA/rtp_recv, CPU3=eth0 IRQ/ptp4l/rtp_send
+# eth0 IRQ를 CPU 1에 고정, RT 우선순위 설정 (RT 커널 PTP 안정화)
+# CPU 레이아웃: CPU1=eth0 IRQ/ptp4l, CPU2=DSP/ALSA/rtp_recv, CPU3=rtp_send
 #
 # 우선순위 설계 (linuxptp 권장 기준):
 #   FIFO 85 : eth0 IRQ, PHC IRQ  — 패킷/타임스탬프 수신
@@ -25,13 +25,13 @@ set_irq() {
     fi
 }
 
-# eth0 IRQ → CPU3(0x8), FIFO 85
+# eth0 IRQ → CPU1(0x2), FIFO 85
 ETH_IRQ=$(grep -m1 'eth0' /proc/interrupts | awk -F: '{print $1}' | tr -d ' ')
-set_irq "$ETH_IRQ" 85 8
+set_irq "$ETH_IRQ" 85 2
 
-# PHC IRQ → CPU3(0x8), FIFO 85
+# PHC IRQ → CPU1(0x2), FIFO 85
 PHC_IRQ=$(grep -m1 '1f00100000.ethernet' /proc/interrupts | awk -F: '{print $1}' | tr -d ' ')
-set_irq "$PHC_IRQ" 85 8
+set_irq "$PHC_IRQ" 85 2
 
 # backlog_napi → FIFO 70
 for pid in $(pgrep -f 'backlog_napi' 2>/dev/null); do

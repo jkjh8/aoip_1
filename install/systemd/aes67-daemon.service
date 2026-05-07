@@ -11,7 +11,7 @@ WorkingDirectory=/home/kjh/aes67
 
 # 우선순위 설정
 CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=91
+CPUSchedulingPriority=75
 Nice=-10
 
 # CPU 격리: JACK(CPU3)과 분리

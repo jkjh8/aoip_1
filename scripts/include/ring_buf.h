@@ -36,8 +36,9 @@ static inline int rb_write(RingBuf *r, const float *src, int n) {
     unsigned rp        = atomic_load_explicit(&r->rp, memory_order_acquire);
     int      free_frm  = (int)((unsigned)r->ring_frames - (wp - rp));
     if (n > free_frm) n = free_frm;
+    unsigned mask = (unsigned)r->ring_frames - 1u;
     for (int i = 0; i < n; i++) {
-        unsigned idx = (wp + (unsigned)i) % (unsigned)r->ring_frames;
+        unsigned idx = (wp + (unsigned)i) & mask;
         memcpy(&r->buf[idx * r->channels], &src[i * r->channels],
                (size_t)r->channels * sizeof(float));
     }
@@ -49,8 +50,9 @@ static inline int rb_read(RingBuf *r, float *dst, int n) {
     unsigned rp = atomic_load_explicit(&r->rp, memory_order_relaxed);
     unsigned wp = atomic_load_explicit(&r->wp, memory_order_acquire);
     if ((int)(wp - rp) < n) return 0;
+    unsigned mask = (unsigned)r->ring_frames - 1u;
     for (int i = 0; i < n; i++) {
-        unsigned idx = (rp + (unsigned)i) % (unsigned)r->ring_frames;
+        unsigned idx = (rp + (unsigned)i) & mask;
         memcpy(&dst[i * r->channels], &r->buf[idx * r->channels],
                (size_t)r->channels * sizeof(float));
     }

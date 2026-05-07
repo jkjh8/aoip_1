@@ -32,6 +32,7 @@
 #include "include/engine_constants.h"
 #include "include/ring_buf.h"
 #include "include/rtp_recv.h"
+#include "include/rtp_utils.h"
 
 /* ── constants ───────────────────────────────────────── */
 #define RTP_HDR_MIN      12
@@ -58,6 +59,7 @@ struct RtpRecvCtx {
     int       ch, buf_ms, in_rate;
     ProtoMode proto;
     EncMode   enc;
+    int       force_codec;   /* 1 = cfg로 codec/rate 고정, PT 자동감지 무시 */
     char      bind_addr[64];
     char      key[64];
     int       sock_fd;   /* Unix socket to Node.js (stats output) */
@@ -72,6 +74,10 @@ struct RtpRecvCtx {
     volatile int detected;
     uint8_t   last_rtp_pt;
     char      codec_str[32];
+
+    /* decode error suppression */
+    int          dec_err_count;
+    int          dec_err_logged;
 
     /* stats */
     atomic_ulong packets, drops, udp_bytes;
@@ -101,49 +107,6 @@ struct RtpRecvCtx {
 };
 
 /* ── helpers ─────────────────────────────────────────── */
-static int rr_unix_connect(const char *path, int retries, int ms)
-{
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-    for (int i = 0; i <= retries; i++) {
-        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (fd < 0) return -1;
-        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) return fd;
-        close(fd);
-        if (i < retries) usleep(ms * 1000);
-    }
-    return -1;
-}
-
-static int rr_read_line(int fd, char *buf, int maxlen)
-{
-    int n = 0; char c;
-    while (n < maxlen - 1) {
-        if (read(fd, &c, 1) <= 0) break;
-        if (c == '\n') break;
-        if (c != '\r') buf[n++] = c;
-    }
-    buf[n] = '\0';
-    return n;
-}
-
-static int rr_cfg_int(const char *s, const char *key, int def)
-{
-    char pat[64]; int v = def;
-    snprintf(pat, sizeof(pat), "%s=%%d", key);
-    const char *p = strstr(s, key);
-    if (p) sscanf(p, pat, &v);
-    return v;
-}
-
-static void rr_cfg_str(const char *s, const char *key, char *buf, size_t n, const char *def)
-{
-    strncpy(buf, def, n); buf[n-1] = '\0';
-    char pat[64]; snprintf(pat, sizeof(pat), "%s=%%%zus", key, n-1);
-    const char *p = strstr(s, key);
-    if (p) sscanf(p, pat, buf);
-}
 
 /* ── G.711 table init ────────────────────────────────── */
 static void build_g711_tables(RtpRecvCtx *ctx)
@@ -341,11 +304,13 @@ static void decode_payload(RtpRecvCtx *ctx, const uint8_t *payload, int len)
         unsigned char *feed_buf = (unsigned char *)mp3data;
         size_t         feed_len = (size_t)mp3len;
         int samples;
+        int mpa_ok = 0;
         while ((samples = hip_decode1_headers(ctx->hip, feed_buf, feed_len,
-                                              pcm_l, pcm_r, &mp3info)) >= 0) {
+                                              pcm_l, pcm_r, &mp3info)) != -1) {
             feed_buf = s_empty;
             feed_len = 0;
-            if (samples == 0) break;
+            if (samples == 0) break;  /* sync 탐색 중, 아직 데이터 없음 */
+            mpa_ok = 1;
             if (mp3info.header_parsed) {
                 int hz = mp3info.samplerate;
                 if (hz > 0 && hz != ctx->in_rate) {
@@ -379,6 +344,18 @@ static void decode_payload(RtpRecvCtx *ctx, const uint8_t *payload, int len)
             }
             resample_and_write(ctx, out, samples);
         }
+        if (mpa_ok) {
+            ctx->dec_err_count = 0;
+        } else if (samples == -1) {
+            /* -1: 실제 디코드 오류 */
+            ctx->dec_err_count++;
+            if (!ctx->dec_err_logged || ctx->dec_err_count % 1000 == 0) {
+                fprintf(stderr, "[rtp_recv:%s] MPA decode error (x%d) — wrong format?\n",
+                        ctx->key, ctx->dec_err_count);
+                ctx->dec_err_logged = 1;
+            }
+        }
+        /* samples==0: sync 탐색 중 — 정상, 로그 없음 */
         break;
     }
 
@@ -388,10 +365,15 @@ static void decode_payload(RtpRecvCtx *ctx, const uint8_t *payload, int len)
         int frames = opus_decode_float(ctx->opus_dec, payload, len,
                                        ctx->dec_buf, OPUS_DEC_FRAMES, 0);
         if (frames < 0) {
-            fprintf(stderr, "[rtp_recv:%s] opus_decode_float: %s\n",
-                    ctx->key, opus_strerror(frames));
+            ctx->dec_err_count++;
+            if (!ctx->dec_err_logged || ctx->dec_err_count % 1000 == 0) {
+                fprintf(stderr, "[rtp_recv:%s] opus_decode_float: %s (x%d)\n",
+                        ctx->key, opus_strerror(frames), ctx->dec_err_count);
+                ctx->dec_err_logged = 1;
+            }
             break;
         }
+        ctx->dec_err_count = 0;
         /* Opus always outputs at OUT_RATE, no resampling needed */
         ring_write(ctx, ctx->dec_buf, frames);
         break;
@@ -438,7 +420,7 @@ static void *decode_thread(void *arg)
             if (!ctx->detected)
                 detect_rtp_pt(ctx, pt, payload, plen);
 
-            if (ctx->detected && pt != ctx->last_rtp_pt && ctx->last_rtp_pt != 0xFF) {
+            if (!ctx->force_codec && ctx->detected && pt != ctx->last_rtp_pt && ctx->last_rtp_pt != 0xFF) {
                 fprintf(stderr, "[rtp_recv:%s] PT changed %d→%d\n", ctx->key, ctx->last_rtp_pt, pt);
                 ctx->detected = 0;
                 detect_rtp_pt(ctx, pt, payload, plen);
@@ -535,7 +517,7 @@ static void *stats_thread(void *arg)
 /* ── public API ──────────────────────────────────────── */
 RtpRecvCtx *rtp_recv_start(RingBuf *ring, const char *key, const char *sock_path, int prio)
 {
-    int sfd = rr_unix_connect(sock_path, 50, 200);
+    int sfd = rtp_unix_connect(sock_path, 50, 200);
     if (sfd < 0) {
         fprintf(stderr, "[rtp_recv:%s] cannot connect to %s\n", key, sock_path);
         return NULL;
@@ -560,22 +542,45 @@ RtpRecvCtx *rtp_recv_start(RingBuf *ring, const char *key, const char *sock_path
 
     /* Read config line from Node.js */
     char cfg[512] = "";
-    rr_read_line(sfd, cfg, sizeof(cfg));
-    ctx->ch      = rr_cfg_int(cfg, "channels", 2);
+    rtp_read_line(sfd, cfg, sizeof(cfg));
+    ctx->ch      = rtp_cfg_int(cfg, "channels", 2);
     if (ctx->ch < 1) ctx->ch = 1;
     if (ctx->ch > MAX_CH) ctx->ch = MAX_CH;
-    ctx->buf_ms  = rr_cfg_int(cfg, "bufMs", 100);
+    ctx->buf_ms  = rtp_cfg_int(cfg, "bufMs", 100);
     if (ctx->buf_ms < 10)   ctx->buf_ms = 10;
     if (ctx->buf_ms > 2000) ctx->buf_ms = 2000;
-    ctx->in_rate = rr_cfg_int(cfg, "rate", 48000);
-    if (ctx->in_rate <= 0)  ctx->in_rate = 48000;
-    char proto_str[16];
-    rr_cfg_str(cfg, "proto", proto_str, sizeof(proto_str), "rtp");
+    ctx->in_rate = rtp_cfg_int(cfg, "rate", 0);
+    char proto_str[16], codec_str[16];
+    rtp_cfg_str(cfg, "proto", proto_str, sizeof(proto_str), "rtp");
+    rtp_cfg_str(cfg, "codec", codec_str, sizeof(codec_str), "");
     ctx->proto = (strcmp(proto_str, "raw") == 0) ? PROTO_RAW : PROTO_RTP;
-    rr_cfg_str(cfg, "addr", ctx->bind_addr, sizeof(ctx->bind_addr), "0.0.0.0");
+    rtp_cfg_str(cfg, "addr", ctx->bind_addr, sizeof(ctx->bind_addr), "0.0.0.0");
+
+    /* 수동 codec/rate 설정 */
+    if (codec_str[0]) {
+        if      (strcmp(codec_str, "l16")  == 0) { ctx->enc = ENC_L16;  snprintf(ctx->codec_str, sizeof(ctx->codec_str), "L16");  if (!ctx->in_rate) ctx->in_rate = 48000; }
+        else if (strcmp(codec_str, "l24")  == 0) { ctx->enc = ENC_L24;  snprintf(ctx->codec_str, sizeof(ctx->codec_str), "L24");  if (!ctx->in_rate) ctx->in_rate = 48000; }
+        else if (strcmp(codec_str, "mpa")  == 0) { ctx->enc = ENC_MPA;  snprintf(ctx->codec_str, sizeof(ctx->codec_str), "MPA");  if (!ctx->in_rate) ctx->in_rate = 48000; }
+        else if (strcmp(codec_str, "pcmu") == 0) { ctx->enc = ENC_PCMU; snprintf(ctx->codec_str, sizeof(ctx->codec_str), "PCMU"); if (!ctx->in_rate) ctx->in_rate = 8000;  }
+        else if (strcmp(codec_str, "pcma") == 0) { ctx->enc = ENC_PCMA; snprintf(ctx->codec_str, sizeof(ctx->codec_str), "PCMA"); if (!ctx->in_rate) ctx->in_rate = 8000;  }
+        else if (strcmp(codec_str, "opus") == 0) { ctx->enc = ENC_OPUS; snprintf(ctx->codec_str, sizeof(ctx->codec_str), "Opus"); if (!ctx->in_rate) ctx->in_rate = 48000; }
+        if (ctx->enc != ENC_UNKNOWN) {
+            ctx->force_codec = 1;
+            ctx->detected    = 1;
+            ctx->last_rtp_pt = 0xFF;
+            fprintf(stderr, "[rtp_recv:%s] forced codec=%s rate=%d\n", key, ctx->codec_str, ctx->in_rate);
+        }
+    }
+    if (ctx->in_rate <= 0) ctx->in_rate = 48000;
 
     build_g711_tables(ctx);
     ctx->hip = hip_decode_init();
+    if (ctx->enc == ENC_OPUS) {
+        int err;
+        ctx->opus_dec = opus_decoder_create(OUT_RATE, ctx->ch, &err);
+        if (!ctx->opus_dec)
+            fprintf(stderr, "[rtp_recv:%s] opus_decoder_create: %s\n", key, opus_strerror(err));
+    }
     setup_resampler(ctx);
 
     /* UDP socket */
@@ -593,7 +598,7 @@ RtpRecvCtx *rtp_recv_start(RingBuf *ring, const char *key, const char *sock_path
     int rcvbuf = 2 * 1024 * 1024;
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
-    int port = rr_cfg_int(cfg, "port", 5004);
+    int port = rtp_cfg_int(cfg, "port", 5004);
     struct in_addr bind_in = { .s_addr = INADDR_ANY };
     int is_multicast = 0;
     if (ctx->bind_addr[0] && inet_aton(ctx->bind_addr, &bind_in)) {

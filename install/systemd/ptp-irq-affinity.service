@@ -1,0 +1,11 @@
+[Unit]
+Description=Set eth0 IRQ affinity to CPU 0 for PTP
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ptp-irq-affinity.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

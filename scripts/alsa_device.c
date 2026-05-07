@@ -68,11 +68,6 @@ static inline void update_htstamp(snd_pcm_t *pcm, _Atomic int64_t *target)
             (int64_t)hts.tv_sec * 1000000000LL + hts.tv_nsec, memory_order_release);
 }
 
-/* ── RT 스레드 CPU 어피니티 (CPU 2-3 고정) ──────────────────────── */
-static inline void pin_to_rt_cores(void) {
-    cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(2, &cs); CPU_SET(3, &cs);
-    pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
-}
 
 /* ── ALSA 오픈 헬퍼 ──────────────────────────────────────────────── */
 snd_pcm_t *alsa_open(const char *dev, int stream, int rate,

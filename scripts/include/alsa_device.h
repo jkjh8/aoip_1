@@ -106,6 +106,12 @@ typedef struct {
     int              cap_prebuf_ready;
 } Device;
 
+/* ── RT 스레드 CPU 어피니티 (CPU 2-3 고정) ──────────────────────── */
+static inline void pin_to_rt_cores(void) {
+    cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(2, &cs); CPU_SET(3, &cs);
+    pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
+}
+
 /* ── 함수 선언 ───────────────────────────────────────────────────── */
 snd_pcm_t *alsa_open(const char *dev, int stream, int rate,
                      int period, int nperiods, int ch);

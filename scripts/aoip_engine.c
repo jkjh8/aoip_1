@@ -37,6 +37,7 @@
 #include "include/rtp_recv.h"
 #include "include/rtp_send.h"
 #include "include/clk2.h"
+#include "include/rtp_utils.h"
 #include "include/rtp_stream.h"
 #include "include/dsp_src.h"
 
@@ -140,12 +141,6 @@ static pthread_barrier_t g_barrier_routing_done; /* 라우팅 완료 후 출력 
 static pthread_barrier_t g_barrier_work_done;
 static volatile int      g_worker_quit = 0;
 
-
-/* ── RT 스레드 CPU 어피니티 (CPU 2-3 고정) ──────────────────────── */
-static inline void pin_to_rt_cores(void) {
-    cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(2, &cs); CPU_SET(3, &cs);
-    pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
-}
 
 /* ── 시그널 핸들러 ───────────────────────────────────────────────── */
 static void sig_handler(int s) { (void)s; atomic_store_explicit(&g_quit, 1, memory_order_relaxed); close(STDIN_FILENO); }
@@ -845,45 +840,6 @@ static void cmd_loop(void)
     }
 }
 
-/* ── Unix socket helpers ─────────────────────────────────────────── */
-#include <sys/socket.h>
-#include <sys/un.h>
-
-static int unix_connect(const char *path, int retries, int ms)
-{
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-    for (int i = 0; i <= retries; i++) {
-        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (fd < 0) return -1;
-        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) return fd;
-        close(fd);
-        if (i < retries) usleep(ms * 1000);
-    }
-    return -1;
-}
-
-static int read_line_fd(int fd, char *buf, int maxlen)
-{
-    int n = 0; char c;
-    while (n < maxlen - 1) {
-        if (read(fd, &c, 1) <= 0) break;
-        if (c == '\n') break;
-        if (c != '\r') buf[n++] = c;
-    }
-    buf[n] = '\0';
-    return n;
-}
-
-static int cfg_int(const char *s, const char *key, int def)
-{
-    char pat[64]; int v = def;
-    snprintf(pat, sizeof(pat), "%s=%%d", key);
-    const char *p = strstr(s, key);
-    if (p) sscanf(p, pat, &v);
-    return v;
-}
 
 /* ── audio.json 간단 파서 ────────────────────────────────────────── */
 static int json_bool(const char *json, const char *key, int def)
@@ -972,16 +928,16 @@ int main(int argc, char *argv[])
     }
 
     /* Node.js 소켓 서버에 연결, init 라인 수신 */
-    int sfd = unix_connect("/run/aoip/engine.sock", 30, 100);
+    int sfd = rtp_unix_connect("/run/aoip/engine.sock", 30, 100);
     if (sfd < 0) {
         fprintf(stderr, "[aoip_engine] cannot connect to /run/aoip/engine.sock\n");
         return 1;
     }
 
     char init_line[128] = "";
-    read_line_fd(sfd, init_line, sizeof(init_line));
-    g_n_in  = cfg_int(init_line, "n_in",  0);
-    g_n_out = cfg_int(init_line, "n_out", 0);
+    rtp_read_line(sfd, init_line, sizeof(init_line));
+    g_n_in  = rtp_cfg_int(init_line, "n_in",  0);
+    g_n_out = rtp_cfg_int(init_line, "n_out", 0);
 
     if (g_n_in < 0 || g_n_in > MAX_CH || g_n_out < 0 || g_n_out > MAX_CH) {
         fprintf(stderr, "[aoip_engine] channel count out of range (in=%d out=%d max=%d)\n",

@@ -52,8 +52,9 @@
       "rtpEncoding": "MPA",
       "bufferMs": 100,
       "enabled": true,
-      "sampleRate": 44100,
-      "address": "0.0.0.0"
+      "sampleRate": 0,
+      "address": "0.0.0.0",
+      "codec": null
     },
     {
       "type": "rtp_out",

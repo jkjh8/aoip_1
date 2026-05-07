@@ -32,6 +32,7 @@
 
 #include "include/ring_buf.h"
 #include "include/rtp_send.h"
+#include "include/rtp_utils.h"
 
 /* ── constants ───────────────────────────────────────── */
 #define RS_MAX_TARGETS   16
@@ -116,49 +117,6 @@ struct RtpSendCtx {
 };
 
 /* ── helpers ─────────────────────────────────────────── */
-static int rs_unix_connect(const char *path, int retries, int ms)
-{
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-    for (int i = 0; i <= retries; i++) {
-        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (fd < 0) return -1;
-        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) return fd;
-        close(fd);
-        if (i < retries) usleep(ms * 1000);
-    }
-    return -1;
-}
-
-static int rs_read_line(int fd, char *buf, int maxlen)
-{
-    int n = 0; char c;
-    while (n < maxlen - 1) {
-        if (read(fd, &c, 1) <= 0) break;
-        if (c == '\n') break;
-        if (c != '\r') buf[n++] = c;
-    }
-    buf[n] = '\0';
-    return n;
-}
-
-static int rs_cfg_int(const char *s, const char *key, int def)
-{
-    char pat[64]; int v = def;
-    snprintf(pat, sizeof(pat), "%s=%%d", key);
-    const char *p = strstr(s, key);
-    if (p) sscanf(p, pat, &v);
-    return v;
-}
-
-static void rs_cfg_str(const char *s, const char *key, char *buf, size_t n, const char *def)
-{
-    strncpy(buf, def, n); buf[n-1] = '\0';
-    char pat[64]; snprintf(pat, sizeof(pat), "%s=%%%zus", key, n-1);
-    const char *p = strstr(s, key);
-    if (p) sscanf(p, pat, buf);
-}
 
 /* ── lame init ───────────────────────────────────────── */
 static int lame_reinit(RtpSendCtx *ctx)
@@ -400,7 +358,8 @@ static void *shm_reader_thread(void *arg)
                 opus_reinit(ctx);
             }
             fprintf(stderr, "[rtp_send:%s] codec=%s bitrate=%d\n", ctx->key,
-                    ctx->codec == CODEC_MP3 ? "mp3" : "raw", ctx->bitrate);
+                    ctx->codec == CODEC_MP3 ? "mp3" : ctx->codec == CODEC_OPUS ? "opus" : "raw",
+                    ctx->bitrate);
         }
 
         if (!ctx->ring) { usleep(10000); continue; }
@@ -541,7 +500,7 @@ static void *rs_stdin_thread(void *arg)
 /* ── public API ──────────────────────────────────────── */
 RtpSendCtx *rtp_send_start(RingBuf *ring, const char *key, const char *sock_path, int prio)
 {
-    int sfd = rs_unix_connect(sock_path, 50, 200);
+    int sfd = rtp_unix_connect(sock_path, 50, 200);
     if (sfd < 0) {
         fprintf(stderr, "[rtp_send:%s] cannot connect to %s\n", key, sock_path);
         return NULL;
@@ -562,15 +521,16 @@ RtpSendCtx *rtp_send_start(RingBuf *ring, const char *key, const char *sock_path
 
     /* Read config from Node.js */
     char cfg[512] = "";
-    rs_read_line(sfd, cfg, sizeof(cfg));
-    ctx->ch = rs_cfg_int(cfg, "channels", 2);
+    rtp_read_line(sfd, cfg, sizeof(cfg));
+    ctx->ch = rtp_cfg_int(cfg, "channels", 2);
     char proto_str[16], codec_str[16];
-    rs_cfg_str(cfg, "proto",  proto_str,  sizeof(proto_str),  "rtp");
-    rs_cfg_str(cfg, "codec",  codec_str,  sizeof(codec_str),  "raw");
+    rtp_cfg_str(cfg, "proto",  proto_str,  sizeof(proto_str),  "rtp");
+    rtp_cfg_str(cfg, "codec",  codec_str,  sizeof(codec_str),  "raw");
     ctx->use_rtp  = (strcmp(proto_str, "rtp") == 0) ? 1 : 0;
-    ctx->codec    = (strcmp(codec_str, "raw") == 0) ? CODEC_RAW : CODEC_MP3;
-    ctx->out_rate = rs_cfg_int(cfg, "rate",    RS_SAMPLE_RATE);
-    ctx->bitrate  = rs_cfg_int(cfg, "bitrate", 320);
+    ctx->codec    = (strcmp(codec_str, "opus") == 0) ? CODEC_OPUS :
+                    (strcmp(codec_str, "raw")  == 0) ? CODEC_RAW  : CODEC_MP3;
+    ctx->out_rate = rtp_cfg_int(cfg, "rate",    RS_SAMPLE_RATE);
+    ctx->bitrate  = rtp_cfg_int(cfg, "bitrate", 320);
     if (ctx->out_rate <= 0) ctx->out_rate = RS_SAMPLE_RATE;
     if (ctx->bitrate  <= 0) ctx->bitrate  = 320;
 

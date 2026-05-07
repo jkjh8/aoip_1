@@ -14,6 +14,8 @@
 #include <errno.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <stdbool.h>
+#include <stdatomic.h>
 #include <math.h>
 #include <poll.h>
 #include <sched.h>
@@ -25,7 +27,7 @@
 #define RAVENNA_LOCK_PREBUF (g_period_frames * 3)
 
 /* aoip_engine.c 가 소유하는 전역 플래그 */
-extern volatile int g_quit;
+extern _Atomic int  g_quit;
 extern int          g_period_frames;
 
 /* RAVENNA 클럭 마스터용 eventfd — aoip_engine.c 에서 생성, 여기서 신호 */
@@ -36,6 +38,35 @@ extern _Atomic int64_t g_aoip_frames;
 extern _Atomic int64_t g_aoip_hts_ns;
 extern _Atomic int64_t g_ravenna_frames;
 extern _Atomic int64_t g_ravenna_hts_ns;
+
+/* ── 변환 헬퍼 (-march=armv8-a+simd -ftree-vectorize 로 NEON 자동 벡터화) ── */
+#define SLEEP_INTERRUPTIBLE(ms, quit_flag) \
+    do { for (int _s = 0; _s < (ms)/100 && !(quit_flag) && !g_quit; _s++) usleep(100000); } while(0)
+
+static inline void i32_to_f32_block(const int32_t *src, float *dst, int n)
+{
+    for (int i = 0; i < n; i++)
+        dst[i] = (float)src[i] * (1.0f / 2147483648.0f);
+}
+
+static inline void f32_clamp_to_i32_block(const float *src, int32_t *dst, int n)
+{
+    for (int i = 0; i < n; i++) {
+        float v = src[i];
+        if (v >  1.0f) v =  1.0f;
+        if (v < -1.0f) v = -1.0f;
+        dst[i] = (int32_t)(v * 2147483647.0f);
+    }
+}
+
+static inline void update_htstamp(snd_pcm_t *pcm, _Atomic int64_t *target)
+{
+    snd_pcm_uframes_t avail;
+    struct timespec   hts;
+    if (snd_pcm_htimestamp(pcm, &avail, &hts) == 0 && hts.tv_sec > 0)
+        atomic_store_explicit(target,
+            (int64_t)hts.tv_sec * 1000000000LL + hts.tv_nsec, memory_order_release);
+}
 
 /* ── RT 스레드 CPU 어피니티 (CPU 2-3 고정) ──────────────────────── */
 static inline void pin_to_rt_cores(void) {
@@ -58,13 +89,21 @@ snd_pcm_t *alsa_open(const char *dev, int stream, int rate,
     snd_pcm_hw_params_t *hw;
     snd_pcm_hw_params_alloca(&hw);
     snd_pcm_hw_params_any(pcm, hw);
-    snd_pcm_hw_params_set_access(pcm, hw, SND_PCM_ACCESS_RW_INTERLEAVED);
+    if ((err = snd_pcm_hw_params_set_access(pcm, hw, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) {
+        fprintf(stderr, "[aoip_engine] alsa_open %s: RW_INTERLEAVED not supported: %s\n",
+                dev, snd_strerror(err));
+        snd_pcm_close(pcm); return NULL;
+    }
     if ((err = snd_pcm_hw_params_set_format(pcm, hw, SND_PCM_FORMAT_S32_LE)) < 0) {
         fprintf(stderr, "[aoip_engine] alsa_open %s: S32_LE not supported: %s\n",
                 dev, snd_strerror(err));
         snd_pcm_close(pcm); return NULL;
     }
-    snd_pcm_hw_params_set_channels(pcm, hw, (unsigned)ch);
+    if ((err = snd_pcm_hw_params_set_channels(pcm, hw, (unsigned)ch)) < 0) {
+        fprintf(stderr, "[aoip_engine] alsa_open %s: %dch not supported: %s\n",
+                dev, ch, snd_strerror(err));
+        snd_pcm_close(pcm); return NULL;
+    }
     unsigned r = (unsigned)rate;
     snd_pcm_hw_params_set_rate_near(pcm, hw, &r, 0);
     snd_pcm_uframes_t p = (snd_pcm_uframes_t)period;
@@ -87,7 +126,9 @@ snd_pcm_t *alsa_open(const char *dev, int stream, int rate,
     snd_pcm_sw_params_current(pcm, sw);
     snd_pcm_sw_params_set_tstamp_mode(pcm, sw, SND_PCM_TSTAMP_ENABLE);
     snd_pcm_sw_params_set_tstamp_type(pcm, sw, SND_PCM_TSTAMP_TYPE_MONOTONIC);
-    snd_pcm_sw_params(pcm, sw);
+    if ((err = snd_pcm_sw_params(pcm, sw)) < 0)
+        fprintf(stderr, "[aoip_engine] alsa_open %s: sw_params failed: %s\n",
+                dev, snd_strerror(err));
 
     snd_pcm_prepare(pcm);
     return pcm;
@@ -109,7 +150,7 @@ static void *alsa_capture_thread(void *arg)
                         d->rate, d->period, d->nperiods, d->channels);
         if (pcm) break;
         fprintf(stderr, "[aoip_engine] cap %s: open failed, retry in 2s\n", d->name);
-        for (int _i = 0; _i < 20 && !d->quit_cap && !g_quit; _i++) usleep(100000);
+        SLEEP_INTERRUPTIBLE(2000, d->quit_cap);
     }
     if (!pcm) return NULL;
 
@@ -225,7 +266,7 @@ static void *alsa_capture_thread(void *arg)
             rb_reset(&d->in_ring);
             if (d->is_ravenna) d->ravenna_accum = 0;
             while (!d->quit_cap && !g_quit) {
-                for (int _i = 0; _i < 5 && !d->quit_cap && !g_quit; _i++) usleep(100000);
+                SLEEP_INTERRUPTIBLE(500, d->quit_cap);
                 if (d->quit_cap || g_quit) break;
                 pcm = alsa_open(d->dev, SND_PCM_STREAM_CAPTURE,
                                 d->rate, d->period, d->nperiods, d->channels);
@@ -254,47 +295,41 @@ static void *alsa_capture_thread(void *arg)
         int written;
         if (d->is_i2s) {
             /* I2S zero-copy: SlotRing에 직접 int32→float + deinterleave */
+            bool i2s_do_fill = true;
             if (!d->i2s_cap_ptrs[0]) {
-                if (!slot_ring_acquire_write(&d->i2s_in_ring, d->i2s_cap_ptrs)) {
+                if (slot_ring_acquire_write(&d->i2s_in_ring, d->i2s_cap_ptrs)) {
+                    d->i2s_cap_fill = 0;
+                } else {
                     /* 링 풀: DSP가 너무 느림 — 이 ALSA period 드롭 */
-                    written = (int)n;
-                    goto i2s_cap_tick;
+                    i2s_do_fill = false;
                 }
-                d->i2s_cap_fill = 0;
             }
-            int frames = (int)n;
-            if (d->i2s_cap_fill + frames > g_period_frames)
-                frames = g_period_frames - d->i2s_cap_fill;
-            for (int f = 0; f < frames; f++)
-                for (int c = 0; c < d->channels; c++)
-                    d->i2s_cap_ptrs[c][d->i2s_cap_fill + f] =
-                        (float)ibuf[f * d->channels + c] * (1.0f / 2147483648.0f);
-            d->i2s_cap_fill += frames;
-            if (d->i2s_cap_fill >= g_period_frames) {
-                slot_ring_commit_write(&d->i2s_in_ring);
-                d->i2s_cap_ptrs[0] = NULL;
-                d->i2s_cap_fill = 0;
+            if (i2s_do_fill) {
+                int frames = (int)n;
+                if (d->i2s_cap_fill + frames > g_period_frames)
+                    frames = g_period_frames - d->i2s_cap_fill;
+                for (int f = 0; f < frames; f++)
+                    for (int c = 0; c < d->channels; c++)
+                        d->i2s_cap_ptrs[c][d->i2s_cap_fill + f] =
+                            (float)ibuf[f * d->channels + c] * (1.0f / 2147483648.0f);
+                d->i2s_cap_fill += frames;
+                if (d->i2s_cap_fill >= g_period_frames) {
+                    slot_ring_commit_write(&d->i2s_in_ring);
+                    d->i2s_cap_ptrs[0] = NULL;
+                    d->i2s_cap_fill = 0;
+                }
             }
             written = (int)n;
         } else {
-            for (int i = 0; i < (int)n * d->channels; i++)
-                fbuf[i] = (float)ibuf[i] * (1.0f / 2147483648.0f);
+            i32_to_f32_block(ibuf, fbuf, (int)n * d->channels);
             /* RAVENNA/기타: 기존 RingBuf에 기록 */
             written = rb_write(&d->in_ring, fbuf, (int)n);
         }
-i2s_cap_tick:;
 
         /* RAVENNA: htstamp 갱신 (DSP 클럭 신호 없음 — hw:aoip가 DSP 마스터) */
         if (d->is_ravenna) {
             atomic_fetch_add_explicit(&g_ravenna_frames, (int64_t)written, memory_order_relaxed);
-            {
-                snd_pcm_uframes_t _avail;
-                struct timespec   _hts;
-                if (snd_pcm_htimestamp(pcm, &_avail, &_hts) == 0 && _hts.tv_sec > 0) {
-                    int64_t _ns = (int64_t)_hts.tv_sec * 1000000000LL + _hts.tv_nsec;
-                    atomic_store_explicit(&g_ravenna_hts_ns, _ns, memory_order_release);
-                }
-            }
+            update_htstamp(pcm, &g_ravenna_hts_ns);
         }
 
         /* hw:aoip (is_i2s=1): DSP 틱 신호 + htstamp 갱신 */
@@ -316,14 +351,7 @@ i2s_cap_tick:;
                 }
             }
             atomic_fetch_add_explicit(&g_aoip_frames, (int64_t)written, memory_order_relaxed);
-            {
-                snd_pcm_uframes_t _avail;
-                struct timespec   _hts;
-                if (snd_pcm_htimestamp(pcm, &_avail, &_hts) == 0 && _hts.tv_sec > 0) {
-                    int64_t _ns = (int64_t)_hts.tv_sec * 1000000000LL + _hts.tv_nsec;
-                    atomic_store_explicit(&g_aoip_hts_ns, _ns, memory_order_release);
-                }
-            }
+            update_htstamp(pcm, &g_aoip_hts_ns);
         }
     }
 
@@ -356,7 +384,7 @@ static void *alsa_playback_thread(void *arg)
                         d->rate, hw_period, d->nperiods, d->channels);
         if (pcm) break;
         fprintf(stderr, "[aoip_engine] play %s: open failed, retry in 2s\n", d->name);
-        for (int _i = 0; _i < 20 && !d->quit_play && !g_quit; _i++) usleep(100000);
+        SLEEP_INTERRUPTIBLE(2000, d->quit_play);
     }
     if (!pcm) return NULL;
 
@@ -421,12 +449,7 @@ static void *alsa_playback_thread(void *arg)
             if (!rb_read(&d->out_ring, fbuf, d->period)) {
                 memset(fbuf, 0, (size_t)(d->period * d->channels) * sizeof(float));
             }
-            for (int i = 0; i < d->period * d->channels; i++) {
-                float v = fbuf[i];
-                if (v >  1.0f) v =  1.0f;
-                if (v < -1.0f) v = -1.0f;
-                ibuf[i] = (int32_t)(v * 2147483647.0f);
-            }
+            f32_clamp_to_i32_block(fbuf, ibuf, d->period * d->channels);
             n = 0;
             for (int off = 0; off < d->period && n >= 0; off += hw_period) {
                 snd_pcm_sframes_t r = snd_pcm_writei(
@@ -439,12 +462,7 @@ static void *alsa_playback_thread(void *arg)
             if (!rb_read(&d->out_ring, fbuf, d->period)) {
                 memset(fbuf, 0, (size_t)(d->period * d->channels) * sizeof(float));
             }
-            for (int i = 0; i < d->period * d->channels; i++) {
-                float v = fbuf[i];
-                if (v >  1.0f) v =  1.0f;
-                if (v < -1.0f) v = -1.0f;
-                ibuf[i] = (int32_t)(v * 2147483647.0f);
-            }
+            f32_clamp_to_i32_block(fbuf, ibuf, d->period * d->channels);
             n = snd_pcm_writei(pcm, ibuf, (snd_pcm_uframes_t)d->period);
         }
 
@@ -505,7 +523,7 @@ static void *alsa_playback_thread(void *arg)
             snd_pcm_close(pcm); pcm = NULL;
             rb_reset(&d->out_ring);
             while (!d->quit_play && !g_quit) {
-                for (int _i = 0; _i < 5 && !d->quit_play && !g_quit; _i++) usleep(100000);
+                SLEEP_INTERRUPTIBLE(500, d->quit_play);
                 if (d->quit_play || g_quit) break;
                 pcm = alsa_open(d->dev, SND_PCM_STREAM_PLAYBACK,
                                 d->rate, hw_period, d->nperiods, d->channels);
@@ -527,7 +545,6 @@ static void *alsa_playback_thread(void *arg)
 /* ── device_start ────────────────────────────────────────────────── */
 void device_start(Device *d)
 {
-    d->enabled = 1;
     d->quit_cap = d->quit_play = 0;
 
     if (d->mode != 2) {  /* capture */
@@ -551,6 +568,10 @@ void device_start(Device *d)
         }
         pthread_create(&d->play_tid, NULL, alsa_playback_thread, d);
     }
+    /* 링/슬롯 초기화 및 스레드 시작 완료 후에 enabled=1 설정
+     * DSP 스레드가 미초기화 링에 접근하는 레이스를 방지 */
+    atomic_thread_fence(memory_order_release);
+    d->enabled = 1;
     printf("bridge:%s:ready\n", d->name);
     fflush(stdout);
 }
@@ -561,7 +582,7 @@ void device_stop(Device *d)
     /* DSP 스레드가 이 장치를 건너뛰도록 먼저 비활성화.
      * DSP 루프 최대 1주기(~11ms)가 끝날 때까지 대기 후 메모리 해제. */
     d->enabled = 0;
-    __sync_synchronize();
+    atomic_thread_fence(memory_order_seq_cst);
     usleep(25000);  /* ≥2 DSP 주기 (~21ms) */
 
     if (d->mode != 2) {

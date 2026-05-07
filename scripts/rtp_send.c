@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 #include <samplerate.h>
 #include <lame/lame.h>
+#include <opus/opus.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,9 +44,14 @@
 #define MPA_HDR_SIZE     4
 #define MAX_PKT_SIZE     1472
 #define L16_FRAMES_PER_PKT 256
+/* Opus: 20ms frame @48kHz, dynamic PT 96+2 */
+#define OPUS_FRAME_FRAMES 960
+#define OPUS_ACC_MAX      (OPUS_FRAME_FRAMES * 4)
+#define OPUS_PKT_MAX      4000
+#define OPUS_PT           98
 
 /* ── types ───────────────────────────────────────────── */
-typedef enum { CODEC_MP3, CODEC_RAW } RsCodec;
+typedef enum { CODEC_MP3, CODEC_RAW, CODEC_OPUS } RsCodec;
 
 typedef struct {
     char             host[128];
@@ -74,8 +80,13 @@ struct RtpSendCtx {
     lame_t          lame;
     pthread_mutex_t lame_mtx;
 
+    /* opus */
+    OpusEncoder    *opus_enc;
+    float           opus_acc[OPUS_ACC_MAX * 2];
+    int             opus_acc_frames;
+
     /* codec change flag */
-    volatile int    codec_changed;
+    atomic_int      codec_changed;
     RsCodec         new_codec;
     int             new_bitrate;
     pthread_mutex_t codec_mtx;
@@ -193,6 +204,8 @@ static void rtp_send_packet(RtpSendCtx *ctx, const uint8_t *payload, int payload
     uint8_t pt;
     if (ctx->codec == CODEC_MP3) {
         pt = 14;
+    } else if (ctx->codec == CODEC_OPUS) {
+        pt = OPUS_PT;
     } else {
         pt = (ctx->ch == 1) ? 11 : 10;
         if (ctx->out_rate != 44100) pt = 96;
@@ -256,11 +269,64 @@ static void send_raw_l16(RtpSendCtx *ctx, const float *buf, int frames)
     }
 }
 
+/* ── opus init ───────────────────────────────────────── */
+static int opus_reinit(RtpSendCtx *ctx)
+{
+    if (ctx->opus_enc) { opus_encoder_destroy(ctx->opus_enc); ctx->opus_enc = NULL; }
+    int err;
+    ctx->opus_enc = opus_encoder_create(RS_SAMPLE_RATE, ctx->ch, OPUS_APPLICATION_AUDIO, &err);
+    if (!ctx->opus_enc) {
+        fprintf(stderr, "[rtp_send:%s] opus_encoder_create: %s\n", ctx->key, opus_strerror(err));
+        return 0;
+    }
+    int bps = ctx->bitrate * 1000;
+    opus_encoder_ctl(ctx->opus_enc, OPUS_SET_BITRATE(bps));
+    opus_encoder_ctl(ctx->opus_enc, OPUS_SET_COMPLEXITY(5));
+    opus_encoder_ctl(ctx->opus_enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+    fprintf(stderr, "[rtp_send:%s] opus: %dHz %dch %dkbps\n",
+            ctx->key, RS_SAMPLE_RATE, ctx->ch, ctx->bitrate);
+    return 1;
+}
+
+/* ── send Opus ───────────────────────────────────────── */
+static void send_opus(RtpSendCtx *ctx, const float *buf, int frames)
+{
+    int space = OPUS_ACC_MAX - ctx->opus_acc_frames;
+    if (frames > space) {
+        fprintf(stderr, "[rtp_send:%s] opus acc overflow, dropping %d frames\n",
+                ctx->key, frames - space);
+        frames = space;
+    }
+    memcpy(ctx->opus_acc + ctx->opus_acc_frames * ctx->ch, buf,
+           (size_t)(frames * ctx->ch) * sizeof(float));
+    ctx->opus_acc_frames += frames;
+
+    while (ctx->opus_acc_frames >= OPUS_FRAME_FRAMES) {
+        uint8_t pktbuf[OPUS_PKT_MAX];
+        int len = opus_encode_float(ctx->opus_enc, ctx->opus_acc,
+                                    OPUS_FRAME_FRAMES, pktbuf, sizeof(pktbuf));
+        ctx->opus_acc_frames -= OPUS_FRAME_FRAMES;
+        if (ctx->opus_acc_frames > 0)
+            memmove(ctx->opus_acc, ctx->opus_acc + OPUS_FRAME_FRAMES * ctx->ch,
+                    (size_t)(ctx->opus_acc_frames * ctx->ch) * sizeof(float));
+        if (len <= 0) {
+            fprintf(stderr, "[rtp_send:%s] opus_encode_float: %s\n", ctx->key, opus_strerror(len));
+            continue;
+        }
+        rtp_send_packet(ctx, pktbuf, len, 1);
+        ctx->rtp_ts += (uint32_t)OPUS_FRAME_FRAMES;
+    }
+}
+
 /* ── send MP3 ────────────────────────────────────────── */
 static void send_mp3(RtpSendCtx *ctx, const float *buf, int frames)
 {
     int space = MP3_ACC_MAX - ctx->mp3_acc_frames;
-    if (frames > space) frames = space;
+    if (frames > space) {
+        fprintf(stderr, "[rtp_send:%s] mp3 acc overflow, dropping %d frames\n",
+                ctx->key, frames - space);
+        frames = space;
+    }
     memcpy(ctx->mp3_acc + ctx->mp3_acc_frames * ctx->ch, buf,
            (size_t)(frames * ctx->ch) * sizeof(float));
     ctx->mp3_acc_frames += frames;
@@ -316,19 +382,22 @@ static void *shm_reader_thread(void *arg)
     }
 
     while (ctx->reader_run) {
-        if (ctx->codec_changed) {
+        if (atomic_load_explicit(&ctx->codec_changed, memory_order_acquire)) {
             pthread_mutex_lock(&ctx->codec_mtx);
             RsCodec nc = ctx->new_codec;
             int     nb = ctx->new_bitrate;
-            ctx->codec_changed = 0;
+            atomic_store_explicit(&ctx->codec_changed, 0, memory_order_relaxed);
             pthread_mutex_unlock(&ctx->codec_mtx);
             ctx->codec   = nc;
             ctx->bitrate = nb;
-            ctx->mp3_acc_frames = 0;
+            ctx->mp3_acc_frames  = 0;
+            ctx->opus_acc_frames = 0;
             if (ctx->codec == CODEC_MP3) {
                 pthread_mutex_lock(&ctx->lame_mtx);
                 lame_reinit(ctx);
                 pthread_mutex_unlock(&ctx->lame_mtx);
+            } else if (ctx->codec == CODEC_OPUS) {
+                opus_reinit(ctx);
             }
             fprintf(stderr, "[rtp_send:%s] codec=%s bitrate=%d\n", ctx->key,
                     ctx->codec == CODEC_MP3 ? "mp3" : "raw", ctx->bitrate);
@@ -365,6 +434,8 @@ static void *shm_reader_thread(void *arg)
 
         if (ctx->codec == CODEC_MP3)
             send_mp3(ctx, send_buf, send_frames);
+        else if (ctx->codec == CODEC_OPUS)
+            send_opus(ctx, send_buf, send_frames);
         else
             send_raw_l16(ctx, send_buf, send_frames);
     }
@@ -387,9 +458,11 @@ static void *rs_stats_thread(void *arg)
         pthread_mutex_lock(&ctx->target_mtx);
         int nt = ctx->n_targets;
         pthread_mutex_unlock(&ctx->target_mtx);
+        const char *codec_name = ctx->codec == CODEC_MP3  ? "mp3"
+                               : ctx->codec == CODEC_OPUS ? "opus" : "raw";
         dprintf(ctx->sock_fd,
                 "stats targets=%d codec=%s bitrateKbps=%d bytesSent=%lu\n",
-                nt, ctx->codec == CODEC_MP3 ? "mp3" : "raw", kbps, cur);
+                nt, codec_name, kbps, cur);
     }
     return NULL;
 }
@@ -449,11 +522,13 @@ static void *rs_stdin_thread(void *arg)
         if (strcmp(cmd, "codec") == 0) {
             char cs[32] = "mp3"; int br = ctx->bitrate;
             sscanf(line, "%*s %31s %d", cs, &br);
-            RsCodec nc = (strcmp(cs, "raw") == 0) ? CODEC_RAW : CODEC_MP3;
+            RsCodec nc = (strcmp(cs, "raw") == 0) ? CODEC_RAW
+                       : (strcmp(cs, "opus") == 0) ? CODEC_OPUS
+                       : CODEC_MP3;
             pthread_mutex_lock(&ctx->codec_mtx);
-            ctx->new_codec     = nc;
-            ctx->new_bitrate   = br;
-            ctx->codec_changed = 1;
+            ctx->new_codec   = nc;
+            ctx->new_bitrate = br;
+            atomic_store_explicit(&ctx->codec_changed, 1, memory_order_release);
             pthread_mutex_unlock(&ctx->codec_mtx);
             continue;
         }
@@ -524,6 +599,13 @@ RtpSendCtx *rtp_send_start(RingBuf *ring, const char *key, const char *sock_path
             free(ctx); close(sfd);
             return NULL;
         }
+    } else if (ctx->codec == CODEC_OPUS) {
+        if (!opus_reinit(ctx)) {
+            fprintf(stderr, "[rtp_send:%s] opus init failed\n", key);
+            if (ctx->src) src_delete(ctx->src);
+            free(ctx); close(sfd);
+            return NULL;
+        }
     }
 
     if (!udp_init(ctx)) {
@@ -558,6 +640,7 @@ void rtp_send_stop(RtpSendCtx *ctx)
     if (ctx->lame) { lame_close(ctx->lame); ctx->lame = NULL; }
     pthread_mutex_unlock(&ctx->lame_mtx);
 
+    if (ctx->opus_enc) { opus_encoder_destroy(ctx->opus_enc); ctx->opus_enc = NULL; }
     if (ctx->src)      { src_delete(ctx->src); ctx->src = NULL; }
     if (ctx->udp_sock >= 0) { close(ctx->udp_sock); ctx->udp_sock = -1; }
     if (ctx->sock_fd  >= 0) { close(ctx->sock_fd);  ctx->sock_fd  = -1; }

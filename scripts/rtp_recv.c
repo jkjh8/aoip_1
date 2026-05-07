@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 #include <lame/lame.h>
 #include <samplerate.h>
+#include <opus/opus.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,11 +41,14 @@
 #define OUT_RATE         48000
 #define RESAMPLE_OUT_MAX 8192
 #define DECODE_BUF_MAX   8192
+/* Opus dynamic PT (must match rtp_send.c OPUS_PT) */
+#define OPUS_PT          98
+#define OPUS_DEC_FRAMES  5760  /* max 120ms @48kHz */
 
 /* ── types ───────────────────────────────────────────── */
 typedef enum { PROTO_RTP = 0, PROTO_RAW } ProtoMode;
 typedef enum {
-    ENC_UNKNOWN = 0, ENC_L16, ENC_L24, ENC_MPA, ENC_PCMU, ENC_PCMA
+    ENC_UNKNOWN = 0, ENC_L16, ENC_L24, ENC_MPA, ENC_PCMU, ENC_PCMA, ENC_OPUS
 } EncMode;
 
 typedef struct { uint8_t data[MAX_PKT_LEN]; int len; } RtpPkt;
@@ -76,10 +80,11 @@ struct RtpRecvCtx {
     pthread_mutex_t addr_mtx;
 
     /* decoders */
-    hip_t      hip;
-    SRC_STATE *src_state;
-    int16_t    ulaw_table[256];
-    int16_t    alaw_table[256];
+    hip_t        hip;
+    SRC_STATE   *src_state;
+    OpusDecoder *opus_dec;
+    int16_t      ulaw_table[256];
+    int16_t      alaw_table[256];
 
     /* decode/resample buffers */
     float rs_out[RESAMPLE_OUT_MAX * MAX_CH];
@@ -219,6 +224,16 @@ static void detect_rtp_pt(RtpRecvCtx *ctx, uint8_t pt, const uint8_t *payload, i
              if (ctx->hip) { hip_decode_exit(ctx->hip); }
              ctx->hip = hip_decode_init();
              break;
+    case OPUS_PT: {
+        ctx->enc = ENC_OPUS; ctx->in_rate = OUT_RATE;
+        snprintf(ctx->codec_str, sizeof(ctx->codec_str), "Opus");
+        if (ctx->opus_dec) { opus_decoder_destroy(ctx->opus_dec); ctx->opus_dec = NULL; }
+        int err;
+        ctx->opus_dec = opus_decoder_create(OUT_RATE, ctx->ch, &err);
+        if (!ctx->opus_dec)
+            fprintf(stderr, "[rtp_recv:%s] opus_decoder_create: %s\n", ctx->key, opus_strerror(err));
+        break;
+    }
     default:
         if (plen >= 6) {
             const uint8_t *p = payload;
@@ -335,6 +350,19 @@ static void decode_payload(RtpRecvCtx *ctx, const uint8_t *payload, int len)
                 int hz = mp3info.samplerate;
                 if (hz > 0 && hz != ctx->in_rate) {
                     fprintf(stderr, "[rtp_recv:%s] MP3 rate: %d→%d\n", ctx->key, ctx->in_rate, hz);
+                    /* flush resampler internal buffer before reinitializing to avoid audio artifacts */
+                    if (ctx->src_state) {
+                        SRC_DATA flush_sd = {
+                            .data_in       = ctx->dec_buf,
+                            .data_out      = ctx->rs_out,
+                            .input_frames  = 0,
+                            .output_frames = RESAMPLE_OUT_MAX,
+                            .src_ratio     = (double)OUT_RATE / ctx->in_rate,
+                            .end_of_input  = 1,
+                        };
+                        src_process(ctx->src_state, &flush_sd);
+                        ring_write(ctx, ctx->rs_out, (int)flush_sd.output_frames_gen);
+                    }
                     ctx->in_rate = hz;
                     setup_resampler(ctx);
                 }
@@ -351,6 +379,21 @@ static void decode_payload(RtpRecvCtx *ctx, const uint8_t *payload, int len)
             }
             resample_and_write(ctx, out, samples);
         }
+        break;
+    }
+
+    case ENC_OPUS: {
+        if (!ctx->opus_dec) break;
+        /* dec_buf holds float, max OPUS_DEC_FRAMES * ch samples */
+        int frames = opus_decode_float(ctx->opus_dec, payload, len,
+                                       ctx->dec_buf, OPUS_DEC_FRAMES, 0);
+        if (frames < 0) {
+            fprintf(stderr, "[rtp_recv:%s] opus_decode_float: %s\n",
+                    ctx->key, opus_strerror(frames));
+            break;
+        }
+        /* Opus always outputs at OUT_RATE, no resampling needed */
+        ring_write(ctx, ctx->dec_buf, frames);
         break;
     }
 
@@ -600,6 +643,7 @@ void rtp_recv_stop(RtpRecvCtx *ctx)
     pthread_join(ctx->stats_tid,  NULL);
 
     if (ctx->hip)       { hip_decode_exit(ctx->hip); ctx->hip = NULL; }
+    if (ctx->opus_dec)  { opus_decoder_destroy(ctx->opus_dec); ctx->opus_dec = NULL; }
     if (ctx->src_state) { src_delete(ctx->src_state); ctx->src_state = NULL; }
     if (ctx->udp_sock >= 0) { close(ctx->udp_sock); ctx->udp_sock = -1; }
     if (ctx->sock_fd  >= 0) { close(ctx->sock_fd);  ctx->sock_fd  = -1; }

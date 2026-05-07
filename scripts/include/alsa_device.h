@@ -1,5 +1,6 @@
 #pragma once
 #define _GNU_SOURCE
+#include <stdint.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <alsa/asoundlib.h>
@@ -63,8 +64,8 @@ typedef struct {
 
     int          is_i2s;
     int          clk_accum;
-    int          cap_underrun;   /* 연속 캡처 언더런 틱 카운터 */
-    int          play_overflow;  /* 연속 재생 오버플로우 틱 카운터 */
+    uint32_t     cap_underrun;   /* 연속 캡처 언더런 틱 카운터 */
+    uint32_t     play_overflow;  /* 연속 재생 오버플로우 틱 카운터 */
 
     /* ── Ravenna 직결 ───────────────────────────────────────────────── */
     int              is_ravenna;

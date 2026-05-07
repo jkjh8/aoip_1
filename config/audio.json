@@ -46,7 +46,7 @@
       "channels": 2,
       "protocol": "rtp",
       "rtpEncoding": "MPA",
-      "bufferMs": 120,
+      "bufferMs": 300,
       "enabled": true,
       "sampleRate": 44100,
       "address": "0.0.0.0"
@@ -70,7 +70,7 @@
         }
       ],
       "enabled": true,
-      "bitrate": 192
+      "bitrate": 320
     }
   ]
 }

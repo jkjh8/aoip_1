@@ -1,22 +1,16 @@
 /*
- * rtp_recv.c — Lightweight UDP/RTP receiver (GStreamer-free)
+ * rtp_recv.c — Lightweight UDP/RTP receiver (context-based, no main)
  *
- * Dependencies: libsamplerate, minimp3.h (header-only)
+ * Compiled into aoip_engine. Entry points:
+ *   rtp_recv_start(ring, key, sock_path) → RtpRecvCtx *
+ *   rtp_recv_stop(ctx)
  *
  * Flow:
  *   UDP socket → packet queue → decode thread → ShmRing(F32LE@48kHz)
  *
- * Usage:
- *   rtp_recv <port> <channels> <proto> <name> <bufMs> <rate> <enc> <addr> shm <shm_name>
- *
- * Proto: rtp | raw
- * Auto-detect: RTP PT field / raw UDP payload sniff (MP3 sync word)
- *
- * Stderr:
- *   [rtp_recv] ready
- *   stats codec=... bufMs=N packets=N drops=N srcIp=... srcPort=N bitrateKbps=N
+ * Connects to Node.js Unix socket for initial config and periodic stats.
  */
-
+#define _GNU_SOURCE
 #include <lame/lame.h>
 #include <samplerate.h>
 
@@ -26,499 +20,83 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <pthread.h>
-#include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
 
 #include "include/shm_ring.h"
+#include "include/rtp_recv.h"
 
 /* ── constants ───────────────────────────────────────── */
 #define RTP_HDR_MIN      12
 #define MAX_PKT_LEN      8192
-#define PKT_QUEUE        512     /* power of 2 */
+#define PKT_QUEUE        512
 #define PKT_QUEUE_MASK   (PKT_QUEUE - 1)
 #define OUT_RATE         48000
 #define RESAMPLE_OUT_MAX 8192
+#define DECODE_BUF_MAX   8192
 
-/* ── packet queue ────────────────────────────────────── */
-typedef struct {
-    uint8_t data[MAX_PKT_LEN];
-    int     len;
-} Pkt;
-
-static Pkt             g_pkts[PKT_QUEUE];
-static int             g_pkt_wp = 0;
-static int             g_pkt_rp = 0;
-static pthread_mutex_t g_pkt_mtx  = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  g_pkt_cond = PTHREAD_COND_INITIALIZER;
-
-/* ── mode/encoding ───────────────────────────────────── */
+/* ── types ───────────────────────────────────────────── */
 typedef enum { PROTO_RTP = 0, PROTO_RAW } ProtoMode;
 typedef enum {
-    ENC_UNKNOWN = 0,
-    ENC_L16,
-    ENC_L24,
-    ENC_MPA,   /* MPEG Audio (MP3) */
-    ENC_PCMU,  /* G.711 μ-law */
-    ENC_PCMA   /* G.711 A-law */
+    ENC_UNKNOWN = 0, ENC_L16, ENC_L24, ENC_MPA, ENC_PCMU, ENC_PCMA
 } EncMode;
 
-static ProtoMode g_proto    = PROTO_RTP;
-static EncMode   g_enc      = ENC_UNKNOWN;
-static int       g_in_rate  = 48000;
-static int       g_ch       = 2;
-static int       g_buf_ms   = 100;
-static char      g_bind_addr[64] = "0.0.0.0";
+typedef struct { uint8_t data[MAX_PKT_LEN]; int len; } RtpPkt;
 
-/* ── globals ─────────────────────────────────────────── */
-static volatile int g_quit      = 0;
-static volatile int g_exit_code = 0;
-static volatile int g_detected  = 0;
+struct RtpRecvCtx {
+    /* config */
+    int       ch, buf_ms, in_rate;
+    ProtoMode proto;
+    EncMode   enc;
+    char      bind_addr[64];
+    char      key[64];
+    int       sock_fd;   /* Unix socket to Node.js (stats output) */
+    int       udp_sock;
 
-/* stats */
-static char            g_codec[32]   = "unknown";
-static atomic_ulong    g_packets     = 0;
-static atomic_ulong    g_drops       = 0;
-static atomic_ulong    g_udp_bytes   = 0;
-static char            g_src_ip[64]  = "";
-static int             g_src_port    = 0;
-static pthread_mutex_t g_addr_mtx    = PTHREAD_MUTEX_INITIALIZER;
+    /* SHM ring (owned by engine) */
+    ShmRing  *ring;
 
-/* ── SHM ─────────────────────────────────────────────── */
-static char     g_shm_name[256] = "";
-static int      g_shm_fd        = -1;
-static ShmRing *g_shm           = NULL;
+    /* state */
+    volatile int quit;
+    volatile int detected;
+    uint8_t   last_rtp_pt;
+    char      codec_str[32];
 
-/* ── decoders ────────────────────────────────────────── */
-static hip_t      g_hip       = NULL;   /* LAME MP3 decoder */
-static SRC_STATE *g_src_state = NULL;
+    /* stats */
+    atomic_ulong packets, drops, udp_bytes;
+    char         src_ip[64];
+    int          src_port;
+    pthread_mutex_t addr_mtx;
 
-/* G.711 decode tables */
-static int16_t g_ulaw_table[256];
-static int16_t g_alaw_table[256];
+    /* decoders */
+    hip_t      hip;
+    SRC_STATE *src_state;
+    int16_t    ulaw_table[256];
+    int16_t    alaw_table[256];
 
-/* ── G.711 table init ────────────────────────────────── */
-static void build_g711_tables(void)
-{
-    /* μ-law (ITU-T G.711) */
-    for (int i = 0; i < 256; i++) {
-        int u        = ~i & 0xFF;
-        int sign     = (u & 0x80) ? -1 : 1;
-        int exponent = (u >> 4) & 0x07;
-        int mantissa = u & 0x0F;
-        int sample   = ((mantissa << 1) | 1) << (exponent + 2);
-        g_ulaw_table[i] = (int16_t)(sign * (sample - 33));
-    }
-    /* A-law (ITU-T G.711) */
-    for (int i = 0; i < 256; i++) {
-        int a        = i ^ 0x55;
-        int sign     = (a & 0x80) ? 1 : -1;
-        int exponent = (a >> 4) & 0x07;
-        int mantissa = a & 0x0F;
-        int sample   = (exponent == 0)
-                       ? ((mantissa << 1) | 1)
-                       : ((mantissa | 0x10) << exponent);
-        g_alaw_table[i] = (int16_t)(sign * sample * 8);
-    }
-}
+    /* decode/resample buffers */
+    float rs_out[RESAMPLE_OUT_MAX * SHM_MAX_CH];
+    float dec_buf[DECODE_BUF_MAX  * SHM_MAX_CH];
 
-/* ── SHM attach ──────────────────────────────────────── */
-static int shm_attach(void)
-{
-    for (int i = 0; i < 50; i++) {
-        g_shm_fd = shm_open(g_shm_name, O_RDWR, 0);
-        if (g_shm_fd >= 0) break;
-        usleep(100000);
-    }
-    if (g_shm_fd < 0) {
-        fprintf(stderr, "[rtp_recv] shm_open(%s): %s\n", g_shm_name, strerror(errno));
-        return 0;
-    }
-    g_shm = mmap(NULL, SHMRING_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, g_shm_fd, 0);
-    if (g_shm == MAP_FAILED) {
-        fprintf(stderr, "[rtp_recv] mmap: %s\n", strerror(errno));
-        close(g_shm_fd); g_shm_fd = -1; g_shm = NULL;
-        return 0;
-    }
-    fprintf(stderr, "[rtp_recv] attached shm %s\n", g_shm_name);
-    return 1;
-}
+    /* packet queue */
+    RtpPkt         *pkts;
+    int             pkt_wp, pkt_rp;
+    pthread_mutex_t pkt_mtx;
+    pthread_cond_t  pkt_cond;
 
-/* ── write F32 frames to ShmRing ─────────────────────── */
-static void shm_write(const float *buf, int frames)
-{
-    if (!g_shm || frames <= 0) return;
-    for (int f = 0; f < frames; f++) {
-        uint32_t wp  = atomic_load_explicit(&g_shm->wp, memory_order_relaxed);
-        uint32_t rp  = atomic_load_explicit(&g_shm->rp, memory_order_acquire);
-        if ((int32_t)(wp - rp) >= SHM_RING_FRAMES - 1)
-            break;  /* ring full: burst overflow 방지 */
-        uint32_t idx = wp % (uint32_t)SHM_RING_FRAMES;
-        for (int c = 0; c < g_ch && c < SHM_MAX_CH; c++)
-            g_shm->buf[idx * SHM_MAX_CH + c] = buf[f * g_ch + c];
-        atomic_store_explicit(&g_shm->wp, wp + 1u, memory_order_release);
-    }
-}
+    /* threads */
+    pthread_t recv_tid, decode_tid, stats_tid;
+};
 
-/* ── resample + write ────────────────────────────────── */
-static float g_rs_out[RESAMPLE_OUT_MAX * SHM_MAX_CH];
-
-static void resample_and_write(const float *in, int in_frames)
-{
-    if (!g_src_state) {
-        shm_write(in, in_frames);
-        return;
-    }
-    SRC_DATA sd = {
-        .data_in       = in,
-        .data_out      = g_rs_out,
-        .input_frames  = in_frames,
-        .output_frames = RESAMPLE_OUT_MAX,
-        .src_ratio     = (double)OUT_RATE / g_in_rate,
-        .end_of_input  = 0,
-    };
-    src_process(g_src_state, &sd);
-    shm_write(g_rs_out, (int)sd.output_frames_gen);
-}
-
-/* ── setup resampler (if rate != OUT_RATE) ───────────── */
-static void setup_resampler(void)
-{
-    if (g_src_state) { src_delete(g_src_state); g_src_state = NULL; }
-    if (g_in_rate == OUT_RATE) return;
-    int err;
-    g_src_state = src_new(SRC_SINC_FASTEST, g_ch, &err);
-    if (!g_src_state)
-        fprintf(stderr, "[rtp_recv] src_new: %s\n", src_strerror(err));
-    else
-        fprintf(stderr, "[rtp_recv] resampler: %d→%d\n", g_in_rate, OUT_RATE);
-}
-
-/* ── detect encoding from RTP PT ─────────────────────── */
-static void detect_rtp_pt(uint8_t pt, const uint8_t *payload, int plen)
-{
-    switch (pt) {
-    case 0:  g_enc = ENC_PCMU; g_in_rate = 8000;
-             snprintf(g_codec, sizeof(g_codec), "PCMU"); break;
-    case 8:  g_enc = ENC_PCMA; g_in_rate = 8000;
-             snprintf(g_codec, sizeof(g_codec), "PCMA"); break;
-    case 10: g_enc = ENC_L16;  g_in_rate = 44100;
-             snprintf(g_codec, sizeof(g_codec), "L16");  break;
-    case 11: g_enc = ENC_L16;  g_in_rate = 44100;
-             snprintf(g_codec, sizeof(g_codec), "L16");  break;
-    case 14: g_enc = ENC_MPA;  g_in_rate = 48000;
-             snprintf(g_codec, sizeof(g_codec), "MPA");
-             if (g_hip) { hip_decode_exit(g_hip); }
-             g_hip = hip_decode_init();
-             break;
-    default:
-        /* dynamic PT: sniff payload for MP3 sync word (skip 4-byte MPA header) */
-        if (plen >= 6) {
-            const uint8_t *p = payload;
-            int off = 0;
-            /* skip RFC 2250 4-byte MPA header if present */
-            if (plen >= 4) off = 4;
-            if ((p[off] & 0xFF) == 0xFF && (p[off+1] & 0xE0) == 0xE0) {
-                g_enc = ENC_MPA; g_in_rate = 48000;
-                snprintf(g_codec, sizeof(g_codec), "MPA");
-                break;
-            }
-        }
-        /* fallback: guess L16 or L24 by payload size */
-        if (plen > 4000) {
-            g_enc = ENC_L24;
-            snprintf(g_codec, sizeof(g_codec), "L24");
-        } else {
-            g_enc = ENC_L16;
-            snprintf(g_codec, sizeof(g_codec), "L16");
-        }
-        break;
-    }
-    fprintf(stderr, "[rtp_recv] RTP PT=%d → enc=%s rate=%d\n", pt, g_codec, g_in_rate);
-    setup_resampler();
-    g_detected = 1;
-}
-
-/* ── detect encoding from raw UDP payload ────────────── */
-static void detect_raw(const uint8_t *payload, int len)
-{
-    /* MP3 sync word */
-    if (len >= 4 && payload[0] == 0xFF && (payload[1] & 0xE0) == 0xE0) {
-        g_enc = ENC_MPA;
-        snprintf(g_codec, sizeof(g_codec), "mp3");
-        if (g_hip) { hip_decode_exit(g_hip); }
-        g_hip = hip_decode_init();
-        fprintf(stderr, "[rtp_recv] raw: detected MP3\n");
-    } else if (len > 0 && (len % (g_ch * 3)) == 0 && len > 4000) {
-        g_enc = ENC_L24;
-        snprintf(g_codec, sizeof(g_codec), "L24");
-        fprintf(stderr, "[rtp_recv] raw: detected L24 (payload=%d)\n", len);
-    } else {
-        g_enc = ENC_L16;
-        snprintf(g_codec, sizeof(g_codec), "L16");
-        fprintf(stderr, "[rtp_recv] raw: detected L16 (payload=%d)\n", len);
-    }
-    setup_resampler();
-    g_detected = 1;
-}
-
-/* ── decode one payload buffer ───────────────────────── */
-/* hip decoder: 1152 samples/frame max; G.711/L16/L24: up to 8192 frames */
-#define DECODE_BUF_MAX 8192
-static float g_dec_buf[DECODE_BUF_MAX * SHM_MAX_CH];
-
-static void decode_payload(const uint8_t *payload, int len)
-{
-    switch (g_enc) {
-
-    case ENC_L16: {
-        int frames = (len / 2) / g_ch;
-        if (frames * g_ch * 2 > (int)sizeof(g_dec_buf) / (int)sizeof(float))
-            frames = (int)(sizeof(g_dec_buf) / sizeof(float)) / g_ch;
-        for (int i = 0; i < frames * g_ch; i++) {
-            int16_t s = (int16_t)((payload[i*2] << 8) | payload[i*2+1]);
-            g_dec_buf[i] = s / 32768.0f;
-        }
-        resample_and_write(g_dec_buf, frames);
-        break;
-    }
-
-    case ENC_L24: {
-        int frames = (len / 3) / g_ch;
-        if (frames * g_ch > (int)(sizeof(g_dec_buf) / sizeof(float)))
-            frames = (int)(sizeof(g_dec_buf) / sizeof(float)) / g_ch;
-        for (int i = 0; i < frames * g_ch; i++) {
-            int32_t s = ((int32_t)(int8_t)payload[i*3]     << 16)
-                      | ((int32_t)payload[i*3+1]            <<  8)
-                      |  (int32_t)payload[i*3+2];
-            g_dec_buf[i] = s / 8388608.0f;
-        }
-        resample_and_write(g_dec_buf, frames);
-        break;
-    }
-
-    case ENC_PCMU:
-    case ENC_PCMA: {
-        /* G.711: 1 byte per sample, mono usually but respect g_ch */
-        const int16_t *tbl = (g_enc == ENC_PCMU) ? g_ulaw_table : g_alaw_table;
-        int frames = len / g_ch;
-        if (frames * g_ch > (int)(sizeof(g_dec_buf) / sizeof(float)))
-            frames = (int)(sizeof(g_dec_buf) / sizeof(float)) / g_ch;
-        for (int f = 0; f < frames; f++)
-            for (int c = 0; c < g_ch; c++)
-                g_dec_buf[f * g_ch + c] = tbl[payload[f * g_ch + c]] / 32768.0f;
-        resample_and_write(g_dec_buf, frames);
-        break;
-    }
-
-    case ENC_MPA: {
-        if (!g_hip) break;
-        /* MP3: skip RFC 2250 4-byte header (MBZ + Frag_offset) in RTP mode */
-        const uint8_t *mp3data = payload;
-        int mp3len = len;
-        if (g_proto == PROTO_RTP && len >= 4) {
-            /* Frag_offset != 0 이면 이 패킷은 이전 프레임의 continuation.
-             * hip_decode가 내부적으로 조각을 재조립하므로 그대로 전달. */
-            mp3data += 4;
-            mp3len  -= 4;
-        }
-        if (mp3len <= 0) break;
-
-        /* LAME hip decoder: 내부 버퍼를 관리하므로 조각 재조립 불필요.
-         * hip_decode1_headers: 한 번에 최대 1 프레임 반환 + header 정보(rate/ch).
-         * 첫 호출에 데이터 제공, 이후 len=0으로 내부 버퍼 드레인. */
-        static unsigned char s_empty[1] = {0};
-        short pcm_l[1152], pcm_r[1152];
-        mp3data_struct mp3info;
-        unsigned char *feed_buf = (unsigned char *)mp3data;
-        size_t         feed_len = (size_t)mp3len;
-        int samples;
-        while ((samples = hip_decode1_headers(g_hip, feed_buf, feed_len,
-                                              pcm_l, pcm_r, &mp3info)) >= 0) {
-            /* 첫 호출 이후 내부 버퍼만 드레인 */
-            feed_buf = s_empty;
-            feed_len = 0;
-
-            if (samples == 0) break;  /* 더 이상 완성된 프레임 없음 */
-
-            /* header_parsed: 처음 헤더를 파싱했을 때 rate/ch 업데이트 */
-            if (mp3info.header_parsed) {
-                int hz = mp3info.samplerate;
-                if (hz > 0 && hz != g_in_rate) {
-                    fprintf(stderr, "[rtp_recv] MP3 rate detected: %d→%d\n", g_in_rate, hz);
-                    g_in_rate = hz;
-                    setup_resampler();
-                }
-            }
-
-            /* int16 → float, interleave L/R */
-            float *out = g_dec_buf;
-            if (g_ch == 2) {
-                for (int i = 0; i < samples; i++) {
-                    out[i*2]   = pcm_l[i] / 32768.0f;
-                    out[i*2+1] = pcm_r[i] / 32768.0f;
-                }
-            } else {
-                /* mono: average L+R */
-                for (int i = 0; i < samples; i++)
-                    out[i] = (pcm_l[i] + pcm_r[i]) / 65536.0f;
-            }
-            resample_and_write(out, samples);
-        }
-        break;
-    }
-
-    default: break;
-    }
-}
-
-/* ── decode thread ───────────────────────────────────── */
-static void *decode_thread(void *arg)
-{
-    (void)arg;
-
-    while (!g_quit) {
-        pthread_mutex_lock(&g_pkt_mtx);
-        while (g_pkt_wp == g_pkt_rp && !g_quit)
-            pthread_cond_wait(&g_pkt_cond, &g_pkt_mtx);
-        if (g_quit) { pthread_mutex_unlock(&g_pkt_mtx); break; }
-
-        Pkt tmp; /* copy out to minimize lock time */
-        tmp = g_pkts[g_pkt_rp & PKT_QUEUE_MASK];
-        g_pkt_rp++;
-        pthread_mutex_unlock(&g_pkt_mtx);
-
-        const uint8_t *data = tmp.data;
-        int            dlen = tmp.len;
-
-        /* ── extract payload ──────────────────────────── */
-        const uint8_t *payload = data;
-        int            plen    = dlen;
-
-        if (g_proto == PROTO_RTP) {
-            if (dlen < RTP_HDR_MIN) continue;
-            uint8_t pt      = data[1] & 0x7F;
-            int     cc      = data[0] & 0x0F;
-            int     has_ext = (data[0] >> 4) & 0x1;
-            int     hdr     = RTP_HDR_MIN + cc * 4;
-            if (has_ext && dlen >= hdr + 4) {
-                int ew = ((int)data[hdr+2] << 8) | data[hdr+3];
-                hdr += 4 + ew * 4;
-            }
-            if (hdr >= dlen) continue;
-            payload = data + hdr;
-            plen    = dlen - hdr;
-
-            /* auto-detect on first RTP packet */
-            if (!g_detected)
-                detect_rtp_pt(pt, payload, plen);
-
-            /* re-detect if PT changed (codec switch) */
-            static uint8_t last_pt = 0xFF;
-            if (g_detected && pt != last_pt && last_pt != 0xFF) {
-                fprintf(stderr, "[rtp_recv] PT changed %d→%d, re-detecting\n", last_pt, pt);
-                g_detected = 0;
-                detect_rtp_pt(pt, payload, plen);
-            }
-            last_pt = pt;
-        } else {
-            /* raw UDP: detect on first packet */
-            if (!g_detected)
-                detect_raw(payload, plen);
-        }
-
-        if (!g_detected) continue;
-
-        decode_payload(payload, plen);
-        atomic_fetch_add_explicit(&g_packets, 1, memory_order_relaxed);
-    }
-    return NULL;
-}
-
-/* ── receive thread ──────────────────────────────────── */
-static void *recv_thread(void *arg)
-{
-    int sock = *(int *)arg;
-    uint8_t buf[MAX_PKT_LEN];
-    struct sockaddr_in from;
-    socklen_t fromlen = sizeof(from);
-
-    while (!g_quit) {
-        ssize_t n = recvfrom(sock, buf, sizeof(buf), 0,
-                             (struct sockaddr *)&from, &fromlen);
-        if (n <= 0) {
-            if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK) continue;
-            if (!g_quit) perror("[rtp_recv] recvfrom");
-            break;
-        }
-
-        pthread_mutex_lock(&g_addr_mtx);
-        inet_ntop(AF_INET, &from.sin_addr, g_src_ip, sizeof(g_src_ip));
-        g_src_port = ntohs(from.sin_port);
-        pthread_mutex_unlock(&g_addr_mtx);
-
-        atomic_fetch_add_explicit(&g_udp_bytes, (unsigned long)n, memory_order_relaxed);
-
-        pthread_mutex_lock(&g_pkt_mtx);
-        if ((g_pkt_wp - g_pkt_rp) >= PKT_QUEUE) {
-            atomic_fetch_add_explicit(&g_drops, 1, memory_order_relaxed);
-            pthread_mutex_unlock(&g_pkt_mtx);
-        } else {
-            Pkt *pkt = &g_pkts[g_pkt_wp & PKT_QUEUE_MASK];
-            memcpy(pkt->data, buf, (size_t)n);
-            pkt->len = (int)n;
-            g_pkt_wp++;
-            pthread_cond_signal(&g_pkt_cond);
-            pthread_mutex_unlock(&g_pkt_mtx);
-        }
-    }
-    return NULL;
-}
-
-/* ── stats thread ────────────────────────────────────── */
-static void *stats_thread(void *arg)
-{
-    (void)arg;
-    unsigned long prev_bytes = 0;
-    while (!g_quit) {
-        sleep(2);
-        unsigned long cur  = atomic_load(&g_udp_bytes);
-        int kbps = (int)((cur - prev_bytes) * 8 / 2 / 1000);
-        int has_data = (cur != prev_bytes);
-        if (!has_data) {
-            pthread_mutex_lock(&g_addr_mtx);
-            g_src_ip[0] = '\0'; g_src_port = 0;
-            pthread_mutex_unlock(&g_addr_mtx);
-        }
-        prev_bytes = cur;
-
-        char src_ip[64]; int src_port;
-        pthread_mutex_lock(&g_addr_mtx);
-        snprintf(src_ip, sizeof(src_ip), "%s", g_src_ip[0] ? g_src_ip : "none");
-        src_port = g_src_port;
-        pthread_mutex_unlock(&g_addr_mtx);
-
-        int r = fprintf(stderr,
-            "stats codec=%s bufMs=%d packets=%lu drops=%lu srcIp=%s srcPort=%d bitrateKbps=%d\n",
-            g_codec, g_buf_ms,
-            atomic_load(&g_packets), atomic_load(&g_drops),
-            src_ip, src_port, kbps);
-        fflush(stderr);
-        if (r < 0) { g_quit = 1; break; }  /* socket 닫힘(Node.js 재시작) → 종료 */
-    }
-    return NULL;
-}
-
-/* ── Unix socket helpers ─────────────────────────────── */
-#include <sys/un.h>
-
-static int unix_connect(const char *path, int retries, int ms)
+/* ── helpers ─────────────────────────────────────────── */
+static int rr_unix_connect(const char *path, int retries, int ms)
 {
     struct sockaddr_un addr = {0};
     addr.sun_family = AF_UNIX;
@@ -533,7 +111,7 @@ static int unix_connect(const char *path, int retries, int ms)
     return -1;
 }
 
-static int read_line_fd(int fd, char *buf, int maxlen)
+static int rr_read_line(int fd, char *buf, int maxlen)
 {
     int n = 0; char c;
     while (n < maxlen - 1) {
@@ -545,7 +123,7 @@ static int read_line_fd(int fd, char *buf, int maxlen)
     return n;
 }
 
-static int cfg_int(const char *s, const char *key, int def)
+static int rr_cfg_int(const char *s, const char *key, int def)
 {
     char pat[64]; int v = def;
     snprintf(pat, sizeof(pat), "%s=%%d", key);
@@ -554,7 +132,7 @@ static int cfg_int(const char *s, const char *key, int def)
     return v;
 }
 
-static void cfg_str(const char *s, const char *key, char *buf, size_t n, const char *def)
+static void rr_cfg_str(const char *s, const char *key, char *buf, size_t n, const char *def)
 {
     strncpy(buf, def, n); buf[n-1] = '\0';
     char pat[64]; snprintf(pat, sizeof(pat), "%s=%%%zus", key, n-1);
@@ -562,144 +140,485 @@ static void cfg_str(const char *s, const char *key, char *buf, size_t n, const c
     if (p) sscanf(p, pat, buf);
 }
 
-/* ── signal ──────────────────────────────────────────── */
-static void on_signal(int sig) { (void)sig; g_quit = 1; }
-
-/* ── main ────────────────────────────────────────────── */
-int main(int argc, char *argv[])
+/* ── G.711 table init ────────────────────────────────── */
+static void build_g711_tables(RtpRecvCtx *ctx)
 {
-    signal(SIGTERM, on_signal);
-    signal(SIGINT,  on_signal);
-    signal(SIGPIPE, SIG_IGN);
+    for (int i = 0; i < 256; i++) {
+        int u        = ~i & 0xFF;
+        int sign     = (u & 0x80) ? -1 : 1;
+        int exponent = (u >> 4) & 0x07;
+        int mantissa = u & 0x0F;
+        int sample   = ((mantissa << 1) | 1) << (exponent + 2);
+        ctx->ulaw_table[i] = (int16_t)(sign * (sample - 33));
+    }
+    for (int i = 0; i < 256; i++) {
+        int a        = i ^ 0x55;
+        int sign     = (a & 0x80) ? 1 : -1;
+        int exponent = (a >> 4) & 0x07;
+        int mantissa = a & 0x0F;
+        int sample   = (exponent == 0)
+                       ? ((mantissa << 1) | 1)
+                       : ((mantissa | 0x10) << exponent);
+        ctx->alaw_table[i] = (int16_t)(sign * sample * 8);
+    }
+}
 
-    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
-        fprintf(stderr, "[rtp_recv] mlockall: %s\n", strerror(errno));
+/* ── write F32 frames to ShmRing ─────────────────────── */
+static void shm_write(RtpRecvCtx *ctx, const float *buf, int frames)
+{
+    if (!ctx->ring || frames <= 0) return;
+    for (int f = 0; f < frames; f++) {
+        uint32_t wp  = atomic_load_explicit(&ctx->ring->wp, memory_order_relaxed);
+        uint32_t rp  = atomic_load_explicit(&ctx->ring->rp, memory_order_acquire);
+        if ((int32_t)(wp - rp) >= SHM_RING_FRAMES - 1) break;
+        uint32_t idx = wp % (uint32_t)SHM_RING_FRAMES;
+        for (int c = 0; c < ctx->ch && c < SHM_MAX_CH; c++)
+            ctx->ring->buf[idx * SHM_MAX_CH + c] = buf[f * ctx->ch + c];
+        atomic_store_explicit(&ctx->ring->wp, wp + 1u, memory_order_release);
+    }
+}
 
-    const char *key = argc > 1 ? argv[1] : "rtp_in";
+/* ── resample + write ────────────────────────────────── */
+static void resample_and_write(RtpRecvCtx *ctx, const float *in, int in_frames)
+{
+    if (!ctx->src_state) {
+        shm_write(ctx, in, in_frames);
+        return;
+    }
+    SRC_DATA sd = {
+        .data_in       = in,
+        .data_out      = ctx->rs_out,
+        .input_frames  = in_frames,
+        .output_frames = RESAMPLE_OUT_MAX,
+        .src_ratio     = (double)OUT_RATE / ctx->in_rate,
+        .end_of_input  = 0,
+    };
+    src_process(ctx->src_state, &sd);
+    shm_write(ctx, ctx->rs_out, (int)sd.output_frames_gen);
+}
 
-    char sock_path[256];
-    snprintf(sock_path, sizeof(sock_path), "/run/aoip/rtp_recv_%s.sock", key);
-    int sfd = unix_connect(sock_path, 30, 100);
+/* ── setup resampler ─────────────────────────────────── */
+static void setup_resampler(RtpRecvCtx *ctx)
+{
+    if (ctx->src_state) { src_delete(ctx->src_state); ctx->src_state = NULL; }
+    if (ctx->in_rate == OUT_RATE) return;
+    int err;
+    ctx->src_state = src_new(SRC_SINC_FASTEST, ctx->ch, &err);
+    if (!ctx->src_state)
+        fprintf(stderr, "[rtp_recv:%s] src_new: %s\n", ctx->key, src_strerror(err));
+    else
+        fprintf(stderr, "[rtp_recv:%s] resampler: %d→%d\n", ctx->key, ctx->in_rate, OUT_RATE);
+}
+
+/* ── detect encoding from RTP PT ─────────────────────── */
+static void detect_rtp_pt(RtpRecvCtx *ctx, uint8_t pt, const uint8_t *payload, int plen)
+{
+    switch (pt) {
+    case 0:  ctx->enc = ENC_PCMU; ctx->in_rate = 8000;
+             snprintf(ctx->codec_str, sizeof(ctx->codec_str), "PCMU"); break;
+    case 8:  ctx->enc = ENC_PCMA; ctx->in_rate = 8000;
+             snprintf(ctx->codec_str, sizeof(ctx->codec_str), "PCMA"); break;
+    case 10: ctx->enc = ENC_L16;  ctx->in_rate = 44100;
+             snprintf(ctx->codec_str, sizeof(ctx->codec_str), "L16");  break;
+    case 11: ctx->enc = ENC_L16;  ctx->in_rate = 44100;
+             snprintf(ctx->codec_str, sizeof(ctx->codec_str), "L16");  break;
+    case 14: ctx->enc = ENC_MPA;  ctx->in_rate = 48000;
+             snprintf(ctx->codec_str, sizeof(ctx->codec_str), "MPA");
+             if (ctx->hip) { hip_decode_exit(ctx->hip); }
+             ctx->hip = hip_decode_init();
+             break;
+    default:
+        if (plen >= 6) {
+            const uint8_t *p = payload;
+            int off = (plen >= 4) ? 4 : 0;
+            if ((p[off] & 0xFF) == 0xFF && (p[off+1] & 0xE0) == 0xE0) {
+                ctx->enc = ENC_MPA; ctx->in_rate = 48000;
+                snprintf(ctx->codec_str, sizeof(ctx->codec_str), "MPA");
+                break;
+            }
+        }
+        if (plen > 4000) {
+            ctx->enc = ENC_L24;
+            snprintf(ctx->codec_str, sizeof(ctx->codec_str), "L24");
+        } else {
+            ctx->enc = ENC_L16;
+            snprintf(ctx->codec_str, sizeof(ctx->codec_str), "L16");
+        }
+        break;
+    }
+    fprintf(stderr, "[rtp_recv:%s] RTP PT=%d → enc=%s rate=%d\n",
+            ctx->key, pt, ctx->codec_str, ctx->in_rate);
+    setup_resampler(ctx);
+    ctx->detected = 1;
+}
+
+/* ── detect encoding from raw UDP payload ────────────── */
+static void detect_raw(RtpRecvCtx *ctx, const uint8_t *payload, int len)
+{
+    if (len >= 4 && payload[0] == 0xFF && (payload[1] & 0xE0) == 0xE0) {
+        ctx->enc = ENC_MPA;
+        snprintf(ctx->codec_str, sizeof(ctx->codec_str), "mp3");
+        if (ctx->hip) { hip_decode_exit(ctx->hip); }
+        ctx->hip = hip_decode_init();
+        fprintf(stderr, "[rtp_recv:%s] raw: detected MP3\n", ctx->key);
+    } else if (len > 0 && (len % (ctx->ch * 3)) == 0 && len > 4000) {
+        ctx->enc = ENC_L24;
+        snprintf(ctx->codec_str, sizeof(ctx->codec_str), "L24");
+        fprintf(stderr, "[rtp_recv:%s] raw: detected L24 (payload=%d)\n", ctx->key, len);
+    } else {
+        ctx->enc = ENC_L16;
+        snprintf(ctx->codec_str, sizeof(ctx->codec_str), "L16");
+        fprintf(stderr, "[rtp_recv:%s] raw: detected L16 (payload=%d)\n", ctx->key, len);
+    }
+    setup_resampler(ctx);
+    ctx->detected = 1;
+}
+
+/* ── decode one payload buffer ───────────────────────── */
+static void decode_payload(RtpRecvCtx *ctx, const uint8_t *payload, int len)
+{
+    switch (ctx->enc) {
+
+    case ENC_L16: {
+        int frames = (len / 2) / ctx->ch;
+        if (frames * ctx->ch * 2 > (int)sizeof(ctx->dec_buf) / (int)sizeof(float))
+            frames = (int)(sizeof(ctx->dec_buf) / sizeof(float)) / ctx->ch;
+        for (int i = 0; i < frames * ctx->ch; i++) {
+            int16_t s = (int16_t)((payload[i*2] << 8) | payload[i*2+1]);
+            ctx->dec_buf[i] = s / 32768.0f;
+        }
+        resample_and_write(ctx, ctx->dec_buf, frames);
+        break;
+    }
+
+    case ENC_L24: {
+        int frames = (len / 3) / ctx->ch;
+        if (frames * ctx->ch > (int)(sizeof(ctx->dec_buf) / sizeof(float)))
+            frames = (int)(sizeof(ctx->dec_buf) / sizeof(float)) / ctx->ch;
+        for (int i = 0; i < frames * ctx->ch; i++) {
+            int32_t s = ((int32_t)(int8_t)payload[i*3]     << 16)
+                      | ((int32_t)payload[i*3+1]            <<  8)
+                      |  (int32_t)payload[i*3+2];
+            ctx->dec_buf[i] = s / 8388608.0f;
+        }
+        resample_and_write(ctx, ctx->dec_buf, frames);
+        break;
+    }
+
+    case ENC_PCMU:
+    case ENC_PCMA: {
+        const int16_t *tbl = (ctx->enc == ENC_PCMU) ? ctx->ulaw_table : ctx->alaw_table;
+        int frames = len / ctx->ch;
+        if (frames * ctx->ch > (int)(sizeof(ctx->dec_buf) / sizeof(float)))
+            frames = (int)(sizeof(ctx->dec_buf) / sizeof(float)) / ctx->ch;
+        for (int f = 0; f < frames; f++)
+            for (int c = 0; c < ctx->ch; c++)
+                ctx->dec_buf[f * ctx->ch + c] = tbl[payload[f * ctx->ch + c]] / 32768.0f;
+        resample_and_write(ctx, ctx->dec_buf, frames);
+        break;
+    }
+
+    case ENC_MPA: {
+        if (!ctx->hip) break;
+        const uint8_t *mp3data = payload;
+        int mp3len = len;
+        if (ctx->proto == PROTO_RTP && len >= 4) {
+            mp3data += 4;
+            mp3len  -= 4;
+        }
+        if (mp3len <= 0) break;
+
+        static unsigned char s_empty[1] = {0};
+        short pcm_l[1152], pcm_r[1152];
+        mp3data_struct mp3info;
+        unsigned char *feed_buf = (unsigned char *)mp3data;
+        size_t         feed_len = (size_t)mp3len;
+        int samples;
+        while ((samples = hip_decode1_headers(ctx->hip, feed_buf, feed_len,
+                                              pcm_l, pcm_r, &mp3info)) >= 0) {
+            feed_buf = s_empty;
+            feed_len = 0;
+            if (samples == 0) break;
+            if (mp3info.header_parsed) {
+                int hz = mp3info.samplerate;
+                if (hz > 0 && hz != ctx->in_rate) {
+                    fprintf(stderr, "[rtp_recv:%s] MP3 rate: %d→%d\n", ctx->key, ctx->in_rate, hz);
+                    ctx->in_rate = hz;
+                    setup_resampler(ctx);
+                }
+            }
+            float *out = ctx->dec_buf;
+            if (ctx->ch == 2) {
+                for (int i = 0; i < samples; i++) {
+                    out[i*2]   = pcm_l[i] / 32768.0f;
+                    out[i*2+1] = pcm_r[i] / 32768.0f;
+                }
+            } else {
+                for (int i = 0; i < samples; i++)
+                    out[i] = (pcm_l[i] + pcm_r[i]) / 65536.0f;
+            }
+            resample_and_write(ctx, out, samples);
+        }
+        break;
+    }
+
+    default: break;
+    }
+}
+
+/* ── decode thread ───────────────────────────────────── */
+static void *decode_thread(void *arg)
+{
+    RtpRecvCtx *ctx = (RtpRecvCtx *)arg;
+
+    while (!ctx->quit) {
+        pthread_mutex_lock(&ctx->pkt_mtx);
+        while (ctx->pkt_wp == ctx->pkt_rp && !ctx->quit)
+            pthread_cond_wait(&ctx->pkt_cond, &ctx->pkt_mtx);
+        if (ctx->quit) { pthread_mutex_unlock(&ctx->pkt_mtx); break; }
+
+        RtpPkt tmp = ctx->pkts[ctx->pkt_rp & PKT_QUEUE_MASK];
+        ctx->pkt_rp++;
+        pthread_mutex_unlock(&ctx->pkt_mtx);
+
+        const uint8_t *data = tmp.data;
+        int            dlen = tmp.len;
+        const uint8_t *payload = data;
+        int            plen    = dlen;
+
+        if (ctx->proto == PROTO_RTP) {
+            if (dlen < RTP_HDR_MIN) continue;
+            uint8_t pt      = data[1] & 0x7F;
+            int     cc      = data[0] & 0x0F;
+            int     has_ext = (data[0] >> 4) & 0x1;
+            int     hdr     = RTP_HDR_MIN + cc * 4;
+            if (has_ext && dlen >= hdr + 4) {
+                int ew = ((int)data[hdr+2] << 8) | data[hdr+3];
+                hdr += 4 + ew * 4;
+            }
+            if (hdr >= dlen) continue;
+            payload = data + hdr;
+            plen    = dlen - hdr;
+
+            if (!ctx->detected)
+                detect_rtp_pt(ctx, pt, payload, plen);
+
+            if (ctx->detected && pt != ctx->last_rtp_pt && ctx->last_rtp_pt != 0xFF) {
+                fprintf(stderr, "[rtp_recv:%s] PT changed %d→%d\n", ctx->key, ctx->last_rtp_pt, pt);
+                ctx->detected = 0;
+                detect_rtp_pt(ctx, pt, payload, plen);
+            }
+            ctx->last_rtp_pt = pt;
+        } else {
+            if (!ctx->detected) detect_raw(ctx, payload, plen);
+        }
+
+        if (!ctx->detected) continue;
+        decode_payload(ctx, payload, plen);
+        atomic_fetch_add_explicit(&ctx->packets, 1, memory_order_relaxed);
+    }
+    return NULL;
+}
+
+/* ── receive thread ──────────────────────────────────── */
+static void *recv_thread(void *arg)
+{
+    RtpRecvCtx *ctx = (RtpRecvCtx *)arg;
+    uint8_t buf[MAX_PKT_LEN];
+    struct sockaddr_in from;
+    socklen_t fromlen = sizeof(from);
+
+    while (!ctx->quit) {
+        ssize_t n = recvfrom(ctx->udp_sock, buf, sizeof(buf), 0,
+                             (struct sockaddr *)&from, &fromlen);
+        if (n <= 0) {
+            if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK) continue;
+            if (!ctx->quit) perror("[rtp_recv] recvfrom");
+            break;
+        }
+
+        pthread_mutex_lock(&ctx->addr_mtx);
+        inet_ntop(AF_INET, &from.sin_addr, ctx->src_ip, sizeof(ctx->src_ip));
+        ctx->src_port = ntohs(from.sin_port);
+        pthread_mutex_unlock(&ctx->addr_mtx);
+
+        atomic_fetch_add_explicit(&ctx->udp_bytes, (unsigned long)n, memory_order_relaxed);
+
+        pthread_mutex_lock(&ctx->pkt_mtx);
+        if ((ctx->pkt_wp - ctx->pkt_rp) >= PKT_QUEUE) {
+            atomic_fetch_add_explicit(&ctx->drops, 1, memory_order_relaxed);
+            pthread_mutex_unlock(&ctx->pkt_mtx);
+        } else {
+            RtpPkt *pkt = &ctx->pkts[ctx->pkt_wp & PKT_QUEUE_MASK];
+            memcpy(pkt->data, buf, (size_t)n);
+            pkt->len = (int)n;
+            ctx->pkt_wp++;
+            pthread_cond_signal(&ctx->pkt_cond);
+            pthread_mutex_unlock(&ctx->pkt_mtx);
+        }
+    }
+    return NULL;
+}
+
+/* ── stats thread ────────────────────────────────────── */
+static void *stats_thread(void *arg)
+{
+    RtpRecvCtx *ctx = (RtpRecvCtx *)arg;
+    unsigned long prev_bytes = 0;
+    while (!ctx->quit) {
+        sleep(2);
+        unsigned long cur  = atomic_load(&ctx->udp_bytes);
+        int kbps = (int)((cur - prev_bytes) * 8 / 2 / 1000);
+        int has_data = (cur != prev_bytes);
+        if (!has_data) {
+            pthread_mutex_lock(&ctx->addr_mtx);
+            ctx->src_ip[0] = '\0'; ctx->src_port = 0;
+            pthread_mutex_unlock(&ctx->addr_mtx);
+        }
+        prev_bytes = cur;
+
+        char src_ip[64]; int src_port;
+        pthread_mutex_lock(&ctx->addr_mtx);
+        snprintf(src_ip, sizeof(src_ip), "%s", ctx->src_ip[0] ? ctx->src_ip : "none");
+        src_port = ctx->src_port;
+        pthread_mutex_unlock(&ctx->addr_mtx);
+
+        int r = dprintf(ctx->sock_fd,
+            "stats codec=%s bufMs=%d packets=%lu drops=%lu srcIp=%s srcPort=%d bitrateKbps=%d\n",
+            ctx->codec_str, ctx->buf_ms,
+            atomic_load(&ctx->packets), atomic_load(&ctx->drops),
+            src_ip, src_port, kbps);
+        if (r < 0) { ctx->quit = 1; break; }
+    }
+    return NULL;
+}
+
+/* ── public API ──────────────────────────────────────── */
+RtpRecvCtx *rtp_recv_start(ShmRing *ring, const char *key, const char *sock_path)
+{
+    int sfd = rr_unix_connect(sock_path, 50, 200);
     if (sfd < 0) {
-        fprintf(stderr, "[rtp_recv] cannot connect to %s\n", sock_path);
-        return 1;
+        fprintf(stderr, "[rtp_recv:%s] cannot connect to %s\n", key, sock_path);
+        return NULL;
     }
 
+    RtpRecvCtx *ctx = calloc(1, sizeof(RtpRecvCtx));
+    if (!ctx) { close(sfd); return NULL; }
+    ctx->pkts = malloc(sizeof(RtpPkt) * PKT_QUEUE);
+    if (!ctx->pkts) { free(ctx); close(sfd); return NULL; }
+
+    ctx->ring        = ring;
+    ctx->sock_fd     = sfd;
+    ctx->last_rtp_pt = 0xFF;
+    ctx->udp_sock    = -1;
+    snprintf(ctx->key, sizeof(ctx->key), "%s", key);
+    strcpy(ctx->codec_str, "unknown");
+
+    pthread_mutex_init(&ctx->pkt_mtx,  NULL);
+    pthread_cond_init(&ctx->pkt_cond,  NULL);
+    pthread_mutex_init(&ctx->addr_mtx, NULL);
+
+    /* Read config line from Node.js */
     char cfg[512] = "";
-    read_line_fd(sfd, cfg, sizeof(cfg));
-
-    int port  = cfg_int(cfg, "port", 5004);
-    g_ch      = cfg_int(cfg, "channels", 2);
-    if (g_ch < 1) g_ch = 1;
-    if (g_ch > SHM_MAX_CH) g_ch = SHM_MAX_CH;
-    g_buf_ms  = cfg_int(cfg, "bufMs", 100);
-    if (g_buf_ms < 10)   g_buf_ms = 10;
-    if (g_buf_ms > 2000) g_buf_ms = 2000;
-    g_in_rate = cfg_int(cfg, "rate", 48000);
-    if (g_in_rate <= 0)  g_in_rate = 48000;
-
+    rr_read_line(sfd, cfg, sizeof(cfg));
+    ctx->ch      = rr_cfg_int(cfg, "channels", 2);
+    if (ctx->ch < 1) ctx->ch = 1;
+    if (ctx->ch > SHM_MAX_CH) ctx->ch = SHM_MAX_CH;
+    ctx->buf_ms  = rr_cfg_int(cfg, "bufMs", 100);
+    if (ctx->buf_ms < 10)   ctx->buf_ms = 10;
+    if (ctx->buf_ms > 2000) ctx->buf_ms = 2000;
+    ctx->in_rate = rr_cfg_int(cfg, "rate", 48000);
+    if (ctx->in_rate <= 0)  ctx->in_rate = 48000;
     char proto_str[16];
-    cfg_str(cfg, "proto", proto_str, sizeof(proto_str), "rtp");
-    g_proto = (strcmp(proto_str, "raw") == 0) ? PROTO_RAW : PROTO_RTP;
-    cfg_str(cfg, "addr", g_bind_addr, sizeof(g_bind_addr), "0.0.0.0");
-    cfg_str(cfg, "shm",  g_shm_name,  sizeof(g_shm_name),  "");
-    if (!g_shm_name[0])
-        snprintf(g_shm_name, sizeof(g_shm_name), "/%s", key);
+    rr_cfg_str(cfg, "proto", proto_str, sizeof(proto_str), "rtp");
+    ctx->proto = (strcmp(proto_str, "raw") == 0) ? PROTO_RAW : PROTO_RTP;
+    rr_cfg_str(cfg, "addr", ctx->bind_addr, sizeof(ctx->bind_addr), "0.0.0.0");
 
-    /* socket → stderr (stats, ready 등 모든 출력) */
-    dup2(sfd, STDERR_FILENO);
-    close(sfd);
-
-    if (!shm_attach()) return 1;
-
-    /* jitter buffer: wp를 bufMs만큼 선행 이동 → MP3 같은 대형 패킷에도 무음 없음 */
-    if (g_buf_ms > 0) {
-        int pre = (int)((long long)g_buf_ms * OUT_RATE / 1000);
-        /* 링 버퍼 크기를 초과하지 않도록 안전 마진(1024프레임) 확보 */
-        int max_pre = SHM_RING_FRAMES * 3 / 4;  /* 75%: 나머지 25%는 burst 여유 */
+    /* Jitter buffer: pre-fill wp */
+    if (ctx->buf_ms > 0) {
+        int pre     = (int)((long long)ctx->buf_ms * OUT_RATE / 1000);
+        int max_pre = SHM_RING_FRAMES * 3 / 4;
         if (pre > max_pre) pre = max_pre;
-        uint32_t wp0 = atomic_load_explicit(&g_shm->wp, memory_order_relaxed);
-        atomic_store_explicit(&g_shm->wp, wp0 + (uint32_t)pre, memory_order_release);
-        fprintf(stderr, "[rtp_recv] jitter buffer: %dms (%d frames pre-buffered)\n", g_buf_ms, pre);
+        uint32_t wp0 = atomic_load_explicit(&ring->wp, memory_order_relaxed);
+        atomic_store_explicit(&ring->wp, wp0 + (uint32_t)pre, memory_order_release);
+        fprintf(stderr, "[rtp_recv:%s] jitter buffer: %dms (%d frames)\n", key, ctx->buf_ms, pre);
     }
 
-    /* init decoders */
-    g_hip = hip_decode_init();
-    build_g711_tables();
+    build_g711_tables(ctx);
+    ctx->hip = hip_decode_init();
+    setup_resampler(ctx);
 
-    /* ── UDP socket ──────────────────────────────────── */
+    /* UDP socket */
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) { perror("[rtp_recv] socket"); return 1; }
-
+    if (sock < 0) {
+        fprintf(stderr, "[rtp_recv:%s] socket: %s\n", key, strerror(errno));
+        free(ctx->pkts); free(ctx); close(sfd);
+        return NULL;
+    }
     int reuse = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
-
-    /* 1-second receive timeout so recv_thread can check g_quit */
     struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    /* increase OS receive buffer */
     int rcvbuf = 2 * 1024 * 1024;
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
-    /* 멀티캐스트(224.0.0.0/4) 여부를 먼저 판단 후 바인드 주소 결정 */
+    int port = rr_cfg_int(cfg, "port", 5004);
     struct in_addr bind_in = { .s_addr = INADDR_ANY };
     int is_multicast = 0;
-    if (g_bind_addr[0] && inet_aton(g_bind_addr, &bind_in)) {
+    if (ctx->bind_addr[0] && inet_aton(ctx->bind_addr, &bind_in)) {
         uint32_t ba = ntohl(bind_in.s_addr);
         is_multicast = (ba >= 0xE0000000u && ba <= 0xEFFFFFFFu);
     }
-
     struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port   = htons((uint16_t)port),
-        /* 멀티캐스트: 그룹 주소로 바인드 → 유니캐스트 패킷 수신 차단
-         * 유니캐스트: INADDR_ANY                                       */
+        .sin_family      = AF_INET,
+        .sin_port        = htons((uint16_t)port),
         .sin_addr.s_addr = is_multicast ? bind_in.s_addr : INADDR_ANY,
     };
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("[rtp_recv] bind"); close(sock); return 1;
+        fprintf(stderr, "[rtp_recv:%s] bind: %s\n", key, strerror(errno));
+        close(sock); free(ctx->pkts); free(ctx); close(sfd);
+        return NULL;
     }
-
-    /* 멀티캐스트 그룹 join */
     if (is_multicast) {
         struct ip_mreq mreq;
         mreq.imr_multiaddr        = bind_in;
         mreq.imr_interface.s_addr = INADDR_ANY;
-        if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP,
-                       &mreq, sizeof(mreq)) < 0)
-            fprintf(stderr, "[rtp_recv] multicast join failed: %s\n", strerror(errno));
+        if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
+            fprintf(stderr, "[rtp_recv:%s] multicast join failed: %s\n", key, strerror(errno));
         else
-            fprintf(stderr, "[rtp_recv] multicast joined %s\n", g_bind_addr);
+            fprintf(stderr, "[rtp_recv:%s] multicast joined %s\n", key, ctx->bind_addr);
     }
+    ctx->udp_sock = sock;
 
-    fprintf(stderr, "[rtp_recv] mode=%s port=%d ch=%d bufMs=%d addr=%s\n",
-            proto_str, port, g_ch, g_buf_ms, g_bind_addr);
+    fprintf(stderr, "[rtp_recv:%s] mode=%s port=%d ch=%d bufMs=%d addr=%s\n",
+            key, proto_str, port, ctx->ch, ctx->buf_ms, ctx->bind_addr);
 
-    pthread_t recv_tid, decode_tid, stats_tid;
-    pthread_create(&recv_tid,   NULL, recv_thread,   &sock);
-    pthread_create(&decode_tid, NULL, decode_thread, NULL);
-    pthread_create(&stats_tid,  NULL, stats_thread,  NULL);
+    pthread_create(&ctx->recv_tid,   NULL, recv_thread,   ctx);
+    pthread_create(&ctx->decode_tid, NULL, decode_thread, ctx);
+    pthread_create(&ctx->stats_tid,  NULL, stats_thread,  ctx);
 
-    fprintf(stderr, "[rtp_recv] ready\n");
-    fflush(stderr);
+    dprintf(sfd, "[rtp_recv] ready\n");
+    fprintf(stderr, "[rtp_recv:%s] started\n", key);
+    return ctx;
+}
 
-    while (!g_quit) usleep(50000);
+void rtp_recv_stop(RtpRecvCtx *ctx)
+{
+    if (!ctx) return;
+    ctx->quit = 1;
+    pthread_cond_broadcast(&ctx->pkt_cond);
+    pthread_join(ctx->recv_tid,   NULL);
+    pthread_join(ctx->decode_tid, NULL);
+    pthread_join(ctx->stats_tid,  NULL);
 
-    g_quit = 1;
-    pthread_cond_broadcast(&g_pkt_cond);
-
-    pthread_join(recv_tid,   NULL);
-    pthread_join(decode_tid, NULL);
-    pthread_join(stats_tid,  NULL);
-
-    if (g_hip)      { hip_decode_exit(g_hip); g_hip = NULL; }
-    if (g_src_state) { src_delete(g_src_state); g_src_state = NULL; }
-    if (g_shm)     { munmap(g_shm, SHMRING_SIZE); g_shm = NULL; }
-    if (g_shm_fd >= 0) { close(g_shm_fd); g_shm_fd = -1; }
-    close(sock);
-
-    fprintf(stderr, "[rtp_recv] exiting\n");
-    return g_exit_code;
+    if (ctx->hip)       { hip_decode_exit(ctx->hip); ctx->hip = NULL; }
+    if (ctx->src_state) { src_delete(ctx->src_state); ctx->src_state = NULL; }
+    if (ctx->udp_sock >= 0) { close(ctx->udp_sock); ctx->udp_sock = -1; }
+    if (ctx->sock_fd  >= 0) { close(ctx->sock_fd);  ctx->sock_fd  = -1; }
+    pthread_mutex_destroy(&ctx->pkt_mtx);
+    pthread_cond_destroy(&ctx->pkt_cond);
+    pthread_mutex_destroy(&ctx->addr_mtx);
+    free(ctx->pkts);
+    free(ctx);
 }

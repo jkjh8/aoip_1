@@ -32,6 +32,8 @@
 #include "include/ring_buf.h"
 #include "include/dsp_math.h"
 #include "include/alsa_device.h"
+#include "include/rtp_recv.h"
+#include "include/rtp_send.h"
 
 /* ── RT 우선순위 (CLI로 재정의 가능) ─────────────────────────────── */
 static int g_prio_dsp     = 92;
@@ -105,6 +107,8 @@ typedef struct {
     int     enabled;
     ShmRing *shm;
     int     fd;
+    int     is_send;   /* 1 = rtp_out (RtpSendCtx), 0 = rtp_in (RtpRecvCtx) */
+    void   *rtp_ctx;   /* RtpRecvCtx * or RtpSendCtx * */
 } ShmBuf;
 
 /* ── 전역 상태 ────────────────────────────────────────────────────── */
@@ -533,6 +537,26 @@ static void *reporter_thread(void *arg)
 }
 
 /* ── RTP shm 헬퍼 ────────────────────────────────────────────────── */
+
+typedef struct {
+    ShmRing *ring;
+    char     key[32];
+    char     sock_path[256];
+    int      is_send;
+    ShmBuf  *buf;
+} RtpLaunchArg;
+
+static void *rtp_launch_thread(void *arg)
+{
+    RtpLaunchArg *la = (RtpLaunchArg *)arg;
+    if (la->is_send)
+        la->buf->rtp_ctx = rtp_send_start(la->ring, la->key, la->sock_path);
+    else
+        la->buf->rtp_ctx = rtp_recv_start(la->ring, la->key, la->sock_path);
+    free(la);
+    return NULL;
+}
+
 static int shmbuf_open(ShmBuf *r, int is_out)
 {
     shm_unlink(r->shm_name);
@@ -561,13 +585,42 @@ static int shmbuf_open(ShmBuf *r, int is_out)
     atomic_init(&r->shm->rp, 0u);
     r->shm->channels = r->channels;
     __atomic_store_n(&r->shm->ring_frames, SHM_RING_FRAMES, __ATOMIC_RELEASE);
+    r->is_send  = is_out;
+    r->rtp_ctx  = NULL;
+
     fprintf(stderr, "[aoip_engine] rtp_%s '%s' shm=%s ch=%d ch_start=%d\n",
             is_out ? "out" : "in", r->name, r->shm_name, r->channels, r->ch_start);
+
+    /* RTP recv/send 스레드 기동 (Node.js 소켓 연결은 비동기로 처리) */
+    RtpLaunchArg *la = malloc(sizeof(RtpLaunchArg));
+    if (la) {
+        la->ring    = r->shm;
+        la->is_send = is_out;
+        la->buf     = r;
+        snprintf(la->key, sizeof(la->key), "%s", r->name);
+        snprintf(la->sock_path, sizeof(la->sock_path),
+                 "/run/aoip/%s_%s.sock",
+                 is_out ? "rtp_send" : "rtp_recv", r->name);
+        pthread_t tid;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_create(&tid, &attr, rtp_launch_thread, la);
+        pthread_attr_destroy(&attr);
+    }
+
     return 1;
 }
 
 static void shmbuf_close(ShmBuf *r)
 {
+    if (r->rtp_ctx) {
+        if (r->is_send)
+            rtp_send_stop((RtpSendCtx *)r->rtp_ctx);
+        else
+            rtp_recv_stop((RtpRecvCtx *)r->rtp_ctx);
+        r->rtp_ctx = NULL;
+    }
     if (r->shm) { munmap(r->shm, SHMRING_SIZE); r->shm = NULL; }
     if (r->fd >= 0) { close(r->fd); r->fd = -1; }
     shm_unlink(r->shm_name);

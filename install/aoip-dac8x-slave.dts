@@ -1,0 +1,57 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * AoIP DAC8x + ADC8x Device Tree Overlay — I2S Slave Mode
+ * compatible: aoip,aoip-dac8x
+ * RPi(CM5)가 I2S clock consumer(slave) → 외부 컨버터가 BCK/LRCLK 공급
+ * i2s_clk_consumer = RP1 i2s@a4000 (I2S1 하드웨어 블록)
+ * → GPIO function "i2s1" 이 올바른 핀 먹스 (i2s0 사용 시 DMA 불동작)
+ */
+
+/ {
+	compatible = "brcm,bcm2712";
+
+	fragment@0 {
+		target = <&rp1_gpio>;
+		__overlay__ {
+			rp1_i2s1_aoip: rp1_i2s1_aoip {
+				function = "i2s1";
+				pins = "gpio18", "gpio19", "gpio20", "gpio21",
+				       "gpio22", "gpio23", "gpio24", "gpio25",
+				       "gpio26", "gpio27";
+				bias-disable;
+				status = "okay";
+			};
+		};
+	};
+
+	fragment@1 {
+		target = <&i2s_clk_consumer>;
+		__overlay__ {
+			pinctrl-names = "default";
+			pinctrl-0 = <&rp1_i2s1_aoip>;
+			status = "okay";
+		};
+	};
+
+	fragment@2 {
+		target-path = "/";
+		__overlay__ {
+			dummy-codec {
+				#sound-dai-cells = <0>;
+				compatible = "snd-soc-dummy";
+				status = "okay";
+			};
+		};
+	};
+
+	fragment@3 {
+		target = <&sound>;
+		__overlay__ {
+			compatible = "aoip,aoip-dac8x";
+			i2s-controller = <&i2s_clk_consumer>;
+			status = "okay";
+		};
+	};
+};

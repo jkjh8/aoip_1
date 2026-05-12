@@ -101,6 +101,7 @@ struct RtpSendCtx {
     /* state */
     volatile int quit;
     volatile int reader_run;
+    int prio;
 
     /* threads */
     pthread_t reader_tid, stdin_tid, stats_tid;
@@ -301,6 +302,10 @@ static void send_mp3(RtpSendCtx *ctx, const float *buf, int frames)
 static void *shm_reader_thread(void *arg)
 {
     RtpSendCtx *ctx = (RtpSendCtx *)arg;
+    if (ctx->prio > 0) {
+        struct sched_param sp = { .sched_priority = ctx->prio };
+        pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    }
     int out_rate  = ctx->out_rate;
     int need_src  = (out_rate != RS_SAMPLE_RATE) && (ctx->src != NULL);
 
@@ -484,7 +489,7 @@ static void *rs_stdin_thread(void *arg)
 }
 
 /* ── public API ──────────────────────────────────────── */
-RtpSendCtx *rtp_send_start(ShmRing *ring, const char *key, const char *sock_path)
+RtpSendCtx *rtp_send_start(ShmRing *ring, const char *key, const char *sock_path, int prio)
 {
     int sfd = rs_unix_connect(sock_path, 50, 200);
     if (sfd < 0) {
@@ -498,6 +503,7 @@ RtpSendCtx *rtp_send_start(ShmRing *ring, const char *key, const char *sock_path
     ctx->ring     = ring;
     ctx->sock_fd  = sfd;
     ctx->udp_sock = -1;
+    ctx->prio     = prio;
     snprintf(ctx->key, sizeof(ctx->key), "%s", key);
 
     pthread_mutex_init(&ctx->target_mtx, NULL);

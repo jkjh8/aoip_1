@@ -65,6 +65,7 @@ struct RtpRecvCtx {
 
     /* state */
     volatile int quit;
+    int prio;
     volatile int detected;
     uint8_t   last_rtp_pt;
     char      codec_str[32];
@@ -424,6 +425,10 @@ static void *decode_thread(void *arg)
 static void *recv_thread(void *arg)
 {
     RtpRecvCtx *ctx = (RtpRecvCtx *)arg;
+    if (ctx->prio > 0) {
+        struct sched_param sp = { .sched_priority = ctx->prio };
+        pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    }
     uint8_t buf[MAX_PKT_LEN];
     struct sockaddr_in from;
     socklen_t fromlen = sizeof(from);
@@ -494,7 +499,7 @@ static void *stats_thread(void *arg)
 }
 
 /* ── public API ──────────────────────────────────────── */
-RtpRecvCtx *rtp_recv_start(ShmRing *ring, const char *key, const char *sock_path)
+RtpRecvCtx *rtp_recv_start(ShmRing *ring, const char *key, const char *sock_path, int prio)
 {
     int sfd = rr_unix_connect(sock_path, 50, 200);
     if (sfd < 0) {
@@ -506,6 +511,7 @@ RtpRecvCtx *rtp_recv_start(ShmRing *ring, const char *key, const char *sock_path
     if (!ctx) { close(sfd); return NULL; }
     ctx->pkts = malloc(sizeof(RtpPkt) * PKT_QUEUE);
     if (!ctx->pkts) { free(ctx); close(sfd); return NULL; }
+    ctx->prio = prio;
 
     ctx->ring        = ring;
     ctx->sock_fd     = sfd;

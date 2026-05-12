@@ -1,8 +1,9 @@
 #pragma once
 
-#define SAMPLE_RATE     48000
-#define PERIOD_FRAMES   512
-#define RING_FRAMES     16384
+#define SAMPLE_RATE         48000
+#define MAX_PERIOD_FRAMES   512
+#define DEFAULT_PERIOD_FRAMES 24
+#define RING_FRAMES         16384
 #define MAX_CH          8
 #define MAX_DEVICES     8
 #define MAX_RTP         4

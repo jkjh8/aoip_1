@@ -1,5 +1,5 @@
 import { Server as SocketIO } from 'socket.io';
-import { getBridgeStatus, getUsbGadgetEnabled, isUdcConnected } from '../lib/bridges.js';
+import { getBridgeStatus } from '../lib/bridges.js';
 import { getDaemonStatus }                          from '../lib/aes67daemon.js';
 import { getGstStatus, getRxStats, getRtpStreamStatus } from '../lib/rtp/index.js';
 import { getChannels, getSavedRoutes }              from '../lib/channels/index.js';
@@ -10,7 +10,6 @@ import registerBridges  from './bridges.js';
 import registerStreams   from './streams.js';
 import registerChannels from './channels.js';
 import registerDsp      from './dsp.js';
-import registerUsb      from './usb.js';
 import registerSystem   from './system.js';
 import registerAes67    from './aes67.js';
 
@@ -48,7 +47,6 @@ async function snapshot() {
     rxStats:  getRxStats(),
     channels:    getChannels(connections),
     connections,
-    usb:      { enabled: getUsbGadgetEnabled(), connected: isUdcConnected() },
     aes67:    cachedAes67Status,
   };
 }
@@ -119,7 +117,6 @@ export function setupSocket(httpServer, config) {
     registerStreams(socket, ctx);
     registerChannels(socket, ctx);
     registerDsp(socket, ctx);
-    registerUsb(socket, ctx);
     registerSystem(socket);
     registerAes67(socket, ctx);
   });

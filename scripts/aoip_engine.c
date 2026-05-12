@@ -2,7 +2,7 @@
  * aoip_engine.c — Unified AoIP 오디오 매트릭스 엔진
  *
  * 스레드 구성:
- *   [P85] dsp_thread          — timerfd 기반 마스터 오디오 루프
+ *   [P85] dsp_thread          — I2S 크리스탈(eventfd) 기반 마스터 오디오 루프
  *   [P80] alsa_capture_thread × N  — 장치별 캡처 (alsa_device.c)
  *   [P80] alsa_playback_thread × N — 장치별 재생 (alsa_device.c)
  *   [  ]  reporter_thread     — ~8Hz stdout 레벨 미터
@@ -23,29 +23,48 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <sys/timerfd.h>
+#include <time.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/eventfd.h>
+#include <poll.h>
 
 #include "include/engine_constants.h"
 #include "include/shm_ring.h"
 #include "include/ring_buf.h"
-#include "include/dsp_math.h"
 #include "include/alsa_device.h"
 #include "include/rtp_recv.h"
 #include "include/rtp_send.h"
+
+/* ── DSP 클럭: RAVENNA 우선, ptp0 폴백 ─────────────────────────── */
+#define CLOCKFD 3
+#define FD_TO_CLOCKID(fd)  ((~(clockid_t)(fd) << 3) | CLOCKFD)
+static int       g_ptp_fd      = -1;
+static clockid_t g_ptp_clockid = CLOCK_MONOTONIC;  /* /dev/ptp0 실패 시 폴백 */
+
+/* DSP 타이밍 eventfd — 클럭 마스터 장치(hw:aoip)가 g_period_frames 누적 시 신호 */
+int g_dsp_clock_fd = -1;
+
+/* hw:aoip ↔ hw:RAVENNA 클럭 비교 — ALSA htstamp 기반 (DMA 인터럽트 시점)
+ * 스레드 지터 없음: 커널이 DMA 완료 시 기록하는 CLOCK_MONOTONIC 타임스탬프 사용
+ * frames: 누적 캡처 프레임 수,  hts_ns: 최신 ALSA htstamp (ns) */
+_Atomic int64_t g_aoip_frames    = 0;
+_Atomic int64_t g_aoip_hts_ns    = 0;
+_Atomic int64_t g_ravenna_frames = 0;
+_Atomic int64_t g_ravenna_hts_ns = 0;
+
+/* ── 처리 단위 프레임 수 (런타임 설정 가능, alsa_device.c extern 참조) */
+int g_period_frames = DEFAULT_PERIOD_FRAMES;
 
 /* ── RT 우선순위 (CLI로 재정의 가능) ─────────────────────────────── */
 static int g_prio_dsp     = 92;
 static int g_prio_alsa    = 80;
 static int g_prio_ravenna = 95;
+static int g_prio_rtp     = 45;
 
 /* ── SPSC 명령 링버퍼 ─────────────────────────────────────────────── */
 typedef enum {
     CMD_GAIN, CMD_MUTE, CMD_BYPASS,
-    CMD_HPF_ENABLE, CMD_HPF_COEFFS, CMD_HPF_STAGES,
-    CMD_EQ_ENABLE, CMD_EQ_COEFFS, CMD_EQ_GLOBAL_ENABLE,
-    CMD_LIMITER_ENABLE, CMD_LIMITER_PARAMS,
     CMD_ROUTE_SET,
 } CmdType;
 
@@ -53,12 +72,9 @@ typedef struct {
     CmdType type;
     int     dir;
     int     ch;
-    int     band;
     union {
-        float     gain;
-        int       flag;
-        BqCoeffs  coeffs;
-        LimCoeffs lim_coeffs;
+        float gain;
+        int   flag;
         struct { int in_ch, out_ch; float level; } route;
     };
 } Cmd;
@@ -86,16 +102,10 @@ static int cmd_pop(Cmd *c) {
     return 1;
 }
 
-/* ── 채널별 DSP 상태 ──────────────────────────────────────────────── */
+/* ── 채널별 DSP 상태 (볼륨 + 레벨 미터만) ────────────────────────── */
 typedef struct {
-    float   gain_tgt, gain_cur;
-    int     muted, bypass_dsp;
-    int     hpf_enabled, hpf_stages;
-    Biquad  hpf[2];
-    int     eq_global_enabled;          /* EQ 섹션 전체 on/off */
-    int     eq_enabled[MAX_EQ_BANDS];
-    Biquad  eq[MAX_EQ_BANDS];
-    Limiter lim;
+    float gain_tgt, gain_cur;
+    int   muted, bypass_dsp;
 } Channel;
 
 /* ── RTP 공유 메모리 연결 ─────────────────────────────────────────── */
@@ -132,8 +142,6 @@ static float   g_route[MAX_CH][MAX_CH];
 
 static volatile float g_in_level[MAX_CH];
 static volatile float g_out_level[MAX_CH];
-static volatile float g_lim_pre[MAX_CH];
-static volatile float g_lim_post[MAX_CH];
 
 static volatile int g_reporter_running = 0;
 
@@ -149,20 +157,14 @@ typedef struct {
 static WorkerArg         g_worker_arg[DSP_WORKER_COUNT];
 static pthread_t         g_worker_tid[DSP_WORKER_COUNT];
 static pthread_barrier_t g_barrier_work_start;
+static pthread_barrier_t g_barrier_input_done;   /* 입력 DSP 완료 후 라우팅 전 동기화 */
+static pthread_barrier_t g_barrier_routing_done; /* 라우팅 완료 후 출력 DSP 전 동기화 */
 static pthread_barrier_t g_barrier_work_done;
 static volatile int      g_worker_quit = 0;
 
-typedef struct {
-    float hpf_freq; int hpf_slope;
-    struct { float freq, gain_db, q; EqType type; } eq[MAX_EQ_BANDS];
-    struct { float threshold_db, attack_ms, release_ms, makeup_db; } lim;
-} ChState;
-
-static ChState g_in_state[MAX_CH];
-static ChState g_out_state[MAX_CH];
 
 /* ── 시그널 핸들러 ───────────────────────────────────────────────── */
-static void sig_handler(int s) { (void)s; g_quit = 1; fclose(stdin); }
+static void sig_handler(int s) { (void)s; g_quit = 1; close(STDIN_FILENO); }
 
 /* ── 명령 적용 (DSP 스레드) ──────────────────────────────────────── */
 static void apply_cmd(const Cmd *cmd)
@@ -172,28 +174,6 @@ static void apply_cmd(const Cmd *cmd)
     case CMD_GAIN:   ch->gain_tgt = cmd->gain; break;
     case CMD_MUTE:   ch->muted = cmd->flag; if (ch->muted) ch->gain_cur = ch->gain_tgt; break;
     case CMD_BYPASS: ch->bypass_dsp = cmd->flag; break;
-    case CMD_HPF_ENABLE: ch->hpf_enabled = cmd->flag; break;
-    case CMD_HPF_STAGES: ch->hpf_stages  = cmd->flag; break;
-    case CMD_HPF_COEFFS: {
-        Biquad *bq = &ch->hpf[cmd->band];
-        bq->b0=(float)cmd->coeffs.b0; bq->b1=(float)cmd->coeffs.b1; bq->b2=(float)cmd->coeffs.b2;
-        bq->a1=(float)cmd->coeffs.a1; bq->a2=(float)cmd->coeffs.a2; break;
-    }
-    case CMD_EQ_ENABLE: ch->eq_enabled[cmd->band] = cmd->flag; break;
-    case CMD_EQ_GLOBAL_ENABLE: ch->eq_global_enabled = cmd->flag; break;
-    case CMD_EQ_COEFFS: {
-        Biquad *bq = &ch->eq[cmd->band];
-        bq->b0=(float)cmd->coeffs.b0; bq->b1=(float)cmd->coeffs.b1; bq->b2=(float)cmd->coeffs.b2;
-        bq->a1=(float)cmd->coeffs.a1; bq->a2=(float)cmd->coeffs.a2; break;
-    }
-    case CMD_LIMITER_ENABLE:
-        ch->lim.enabled = cmd->flag;
-        if (!cmd->flag) { lim_reset(&ch->lim); } break;
-    case CMD_LIMITER_PARAMS:
-        ch->lim.threshold    = cmd->lim_coeffs.threshold;
-        ch->lim.attack_coef  = cmd->lim_coeffs.attack_coef;
-        ch->lim.release_coef = cmd->lim_coeffs.release_coef;
-        ch->lim.makeup       = cmd->lim_coeffs.makeup; break;
     case CMD_ROUTE_SET:
         if (cmd->route.out_ch < MAX_CH && cmd->route.in_ch < MAX_CH)
             g_route[cmd->route.out_ch][cmd->route.in_ch] = cmd->route.level;
@@ -202,8 +182,8 @@ static void apply_cmd(const Cmd *cmd)
 }
 
 /* ── DSP 처리 함수 (채널 슬라이스 단위, 워커/마스터 공용) ─────────── */
-static float g_in_buf[MAX_CH][PERIOD_FRAMES];
-static float g_out_buf[MAX_CH][PERIOD_FRAMES];
+static float g_in_buf[MAX_CH][MAX_PERIOD_FRAMES];
+static float g_out_buf[MAX_CH][MAX_PERIOD_FRAMES];
 
 static void process_input_dsp(int ch_start, int ch_count, int n_in)
 {
@@ -211,30 +191,14 @@ static void process_input_dsp(int ch_start, int ch_count, int n_in)
         Channel *ic  = &g_in_ch[ch];
         float   *buf = g_in_buf[ch];
         if (ic->muted) {
-            memset(buf, 0, PERIOD_FRAMES * sizeof(float));
+            memset(buf, 0, g_period_frames * sizeof(float));
             ic->gain_cur = ic->gain_tgt;
             continue;
         }
-        if (!ic->bypass_dsp && !g_bypass_all_dsp) {
-            if (ic->hpf_enabled) {
-                for (int i = 0; i < PERIOD_FRAMES; i++)
-                    buf[i] = bq_process(&ic->hpf[0], buf[i]);
-                if (ic->hpf_stages >= 2)
-                    for (int i = 0; i < PERIOD_FRAMES; i++)
-                        buf[i] = bq_process(&ic->hpf[1], buf[i]);
-            }
-            if (ic->eq_global_enabled) {
-                for (int b = 0; b < MAX_EQ_BANDS; b++) {
-                    if (!ic->eq_enabled[b]) continue;
-                    for (int i = 0; i < PERIOD_FRAMES; i++)
-                        buf[i] = bq_process(&ic->eq[b], buf[i]);
-                }
-            }
-        }
         float cur  = ic->gain_cur;
-        float step = (ic->gain_tgt - cur) / (float)PERIOD_FRAMES;
+        float step = (ic->gain_tgt - cur) / (float)g_period_frames;
         float peak = 0.0f;
-        for (int i = 0; i < PERIOD_FRAMES; i++) {
+        for (int i = 0; i < g_period_frames; i++) {
             cur += step;
             buf[i] *= cur;
             float ap = fabsf(buf[i]);
@@ -248,11 +212,11 @@ static void process_input_dsp(int ch_start, int ch_count, int n_in)
 static void process_routing(int out_start, int out_count, int n_in, int n_out)
 {
     for (int out = out_start; out < out_start + out_count && out < n_out; out++) {
-        memset(g_out_buf[out], 0, PERIOD_FRAMES * sizeof(float));
+        memset(g_out_buf[out], 0, g_period_frames * sizeof(float));
         for (int in = 0; in < n_in; in++) {
             float gain = g_route[out][in];
             if (gain == 0.0f) continue;
-            for (int f = 0; f < PERIOD_FRAMES; f++)
+            for (int f = 0; f < g_period_frames; f++)
                 g_out_buf[out][f] += g_in_buf[in][f] * gain;
         }
     }
@@ -264,32 +228,14 @@ static void process_output_dsp(int ch_start, int ch_count, int n_out)
         Channel *oc  = &g_out_ch[ch];
         float   *buf = g_out_buf[ch];
         if (oc->muted) {
-            memset(buf, 0, PERIOD_FRAMES * sizeof(float));
+            memset(buf, 0, g_period_frames * sizeof(float));
             oc->gain_cur = oc->gain_tgt;
             continue;
         }
-        if (!oc->bypass_dsp && !g_bypass_all_dsp) {
-            if (oc->eq_global_enabled) {
-                for (int b = 0; b < MAX_EQ_BANDS; b++) {
-                    if (!oc->eq_enabled[b]) continue;
-                    for (int i = 0; i < PERIOD_FRAMES; i++)
-                        buf[i] = bq_process(&oc->eq[b], buf[i]);
-                }
-            }
-            if (oc->lim.enabled) {
-                float pre_peak = 0.0f;
-                for (int i = 0; i < PERIOD_FRAMES; i++) {
-                    float ap = fabsf(buf[i]);
-                    if (ap > pre_peak) pre_peak = ap;
-                    buf[i] = lim_process(&oc->lim, buf[i]);
-                }
-                if (pre_peak > g_lim_pre[ch]) g_lim_pre[ch] = pre_peak;
-            }
-        }
         float cur  = oc->gain_cur;
-        float step = (oc->gain_tgt - cur) / (float)PERIOD_FRAMES;
+        float step = (oc->gain_tgt - cur) / (float)g_period_frames;
         float peak = 0.0f;
-        for (int i = 0; i < PERIOD_FRAMES; i++) {
+        for (int i = 0; i < g_period_frames; i++) {
             cur += step;
             buf[i] *= cur;
             float ap = fabsf(buf[i]);
@@ -297,7 +243,6 @@ static void process_output_dsp(int ch_start, int ch_count, int n_out)
         }
         oc->gain_cur = oc->gain_tgt;
         if (peak > g_out_level[ch]) g_out_level[ch] = peak;
-        if (oc->lim.enabled && peak > g_lim_post[ch]) g_lim_post[ch] = peak;
     }
 }
 
@@ -312,11 +257,18 @@ static void *dsp_worker_thread(void *arg)
     volatile char stack_touch[4096];
     memset((void *)stack_touch, 0, sizeof(stack_touch));
 
-    while (!g_worker_quit) {
+    while (1) {
         pthread_barrier_wait(&g_barrier_work_start);
-        if (g_worker_quit) break;
+        if (g_worker_quit) {
+            pthread_barrier_wait(&g_barrier_input_done);
+            pthread_barrier_wait(&g_barrier_routing_done);
+            pthread_barrier_wait(&g_barrier_work_done);
+            break;
+        }
         process_input_dsp(w->ch_start, w->ch_count, w->n_in);
+        pthread_barrier_wait(&g_barrier_input_done);
         process_routing(w->ch_start, w->ch_count, w->n_in, w->n_out);
+        pthread_barrier_wait(&g_barrier_routing_done);
         process_output_dsp(w->ch_start, w->ch_count, w->n_out);
         pthread_barrier_wait(&g_barrier_work_done);
     }
@@ -332,20 +284,127 @@ static void *dsp_thread(void *arg)
     struct sched_param sp = { .sched_priority = g_prio_dsp };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
 
-    int tfd = timerfd_create(CLOCK_MONOTONIC, 0);
-    struct itimerspec ts;
-    ts.it_value.tv_sec     = 0;
-    ts.it_value.tv_nsec    = 1000000LL;
-    ts.it_interval.tv_sec  = 0;
-    ts.it_interval.tv_nsec = (long)(1000000000LL * PERIOD_FRAMES / SAMPLE_RATE);
-    timerfd_settime(tfd, 0, &ts, NULL);
+    /* ── DSP 클럭 상태 (ptp0 폴백) ── */
+    struct timespec _ptp_init;
+    clock_gettime(g_ptp_clockid, &_ptp_init);
+    long long ptp_base_ns   = _ptp_init.tv_sec * 1000000000LL + _ptp_init.tv_nsec;
+    long long dsp_tick      = 0;
+    long long cur_period_ns = 0;
+
+    /* ── hw:aoip ↔ hw:RAVENNA 클럭 비교 상태 ── */
+    int64_t clk2_pa_fr  = 0;  /* 직전 aoip 누적 프레임 */
+    int64_t clk2_pa_hts = 0;  /* 직전 aoip ALSA htstamp (ns) */
+    int64_t clk2_pr_fr  = 0;  /* 직전 ravenna 누적 프레임 */
+    int64_t clk2_pr_hts = 0;  /* 직전 ravenna ALSA htstamp (ns) */
+    int64_t clk2_next_ns = 0; /* 다음 보고 시각 */
+    {
+        struct timespec _now;
+        clock_gettime(CLOCK_MONOTONIC, &_now);
+        clk2_next_ns = (int64_t)_now.tv_sec * 1000000000LL + _now.tv_nsec
+                       + 30LL * 1000000000LL;
+    }
 
     while (!g_quit) {
-        uint64_t exp;
-        if (read(tfd, &exp, sizeof(exp)) < 0) break;
-        if (exp > 2)
-            fprintf(stderr, "[aoip_engine] DSP overrun: skipped %llu periods\n",
-                    (unsigned long long)(exp - 1));
+        /* g_period_frames는 cmd_loop에서 변경될 수 있으므로 매 틱 갱신 */
+        long long period_ns = (long long)g_period_frames * 1000000000LL / SAMPLE_RATE;
+
+        /* ── DSP 타이밍: hw:aoip 클럭 마스터 우선, ptp0 폴백 ── */
+        if (g_dsp_clock_fd >= 0) {
+            /* 클럭 마스터(hw:aoip) 캡처가 g_period_frames 누적 시 eventfd 신호 → DSP 틱
+             * poll timeout = 3×period (소스 없을 때 무한 블로킹 방지) */
+            struct pollfd _pfd = { .fd = g_dsp_clock_fd, .events = POLLIN };
+            int timeout_ms = (int)(period_ns * 3 / 1000000LL);
+            if (timeout_ms < 4) timeout_ms = 4;
+            int _ready = poll(&_pfd, 1, timeout_ms);
+            if (g_quit) break;
+            if (_ready > 0 && (_pfd.revents & POLLIN)) {
+                uint64_t _val;
+                (void)read(g_dsp_clock_fd, &_val, sizeof(_val));
+                /* EFD_SEMAPHORE: 1 틱 소비 — 즉시 DSP 처리 */
+            }
+            /* timeout: RAVENNA 소스 없음 — DSP는 계속 (I2S 유지) */
+
+            /* ptp0 폴백 상태를 현재 시각으로 유지 (hw:aoip→ptp0 전환 시 연속성) */
+            if (period_ns != cur_period_ns) {
+                clock_gettime(CLOCK_MONOTONIC, &_ptp_init);
+                ptp_base_ns   = _ptp_init.tv_sec * 1000000000LL + _ptp_init.tv_nsec;
+                dsp_tick      = 0;
+                cur_period_ns = period_ns;
+            }
+        } else {
+            /* CLOCK_MONOTONIC 폴백 (hw:aoip 미기동 시) */
+            if (period_ns != cur_period_ns) {
+                clock_gettime(CLOCK_MONOTONIC, &_ptp_init);
+                ptp_base_ns   = _ptp_init.tv_sec * 1000000000LL + _ptp_init.tv_nsec;
+                dsp_tick      = 0;
+                cur_period_ns = period_ns;
+            }
+
+            dsp_tick++;
+            long long tgt_ns = ptp_base_ns + dsp_tick * period_ns;
+
+            struct timespec _now;
+            clock_gettime(CLOCK_MONOTONIC, &_now);
+            long long now_ns    = _now.tv_sec * 1000000000LL + _now.tv_nsec;
+            long long remain_ns = tgt_ns - now_ns;
+
+            if (remain_ns > 10 * period_ns || remain_ns < -10 * period_ns) {
+                fprintf(stderr, "[aoip_engine] DSP clock resync (%.1fms)\n",
+                        (double)remain_ns / 1e6);
+                clock_gettime(CLOCK_MONOTONIC, &_ptp_init);
+                ptp_base_ns = _ptp_init.tv_sec * 1000000000LL + _ptp_init.tv_nsec;
+                dsp_tick    = 0;
+            } else if (remain_ns > 0) {
+                struct timespec _tgt = {
+                    .tv_sec  = tgt_ns / 1000000000LL,
+                    .tv_nsec = (long)(tgt_ns % 1000000000LL),
+                };
+                clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &_tgt, NULL);
+            }
+        }
+        if (g_quit) break;
+
+        /* ── hw:aoip ↔ hw:RAVENNA 클럭 비교 (30s 주기) ─────────────────
+         * ALSA htstamp: DMA 인터럽트 시점 커널 타임스탬프 → 스레드 지터 없음
+         * rate = delta_frames / delta_htstamp_s  →  drift_ppm = (aoip-ravenna)/48000*1e6 */
+        {
+            struct timespec _now;
+            clock_gettime(CLOCK_MONOTONIC, &_now);
+            int64_t now_ns = (int64_t)_now.tv_sec * 1000000000LL + _now.tv_nsec;
+
+            if (now_ns >= clk2_next_ns) {
+                int64_t a_fr  = atomic_load_explicit(&g_aoip_frames,    memory_order_acquire);
+                int64_t a_hts = atomic_load_explicit(&g_aoip_hts_ns,    memory_order_acquire);
+                int64_t r_fr  = atomic_load_explicit(&g_ravenna_frames,  memory_order_acquire);
+                int64_t r_hts = atomic_load_explicit(&g_ravenna_hts_ns,  memory_order_acquire);
+
+                if (clk2_pa_hts > 0 && clk2_pr_hts > 0 &&
+                    a_hts > clk2_pa_hts && r_hts > clk2_pr_hts) {
+
+                    int64_t da_fr  = a_fr  - clk2_pa_fr;
+                    int64_t da_hts = a_hts - clk2_pa_hts;
+                    int64_t dr_fr  = r_fr  - clk2_pr_fr;
+                    int64_t dr_hts = r_hts - clk2_pr_hts;
+
+                    double aoip_rate    = (double)da_fr * 1e9 / (double)da_hts;
+                    double ravenna_rate = (double)dr_fr * 1e9 / (double)dr_hts;
+                    double drift_ppm    = (aoip_rate - ravenna_rate) / SAMPLE_RATE * 1e6;
+                    double elapsed_s    = (double)da_hts / 1e9;
+
+                    double dsp_tick_ms = (double)g_period_frames / aoip_rate * 1000.0;
+                    printf("clk2 aoip_rate=%.3f ravenna_rate=%.3f drift_ppm=%+.3f elapsed=%.0f"
+                           " dsp_period=%d dsp_tick_ms=%.3f dsp_src=%s\n",
+                           aoip_rate, ravenna_rate, drift_ppm, elapsed_s,
+                           g_period_frames, dsp_tick_ms,
+                           g_dsp_clock_fd >= 0 ? "aoip" : "monotonic");
+                    fflush(stdout);
+                }
+
+                clk2_pa_fr  = a_fr;  clk2_pa_hts = a_hts;
+                clk2_pr_fr  = r_fr;  clk2_pr_hts = r_hts;
+                clk2_next_ns = now_ns + 30LL * 1000000000LL;
+            }
+        }
 
         /* ── 명령 링 드레인 ── */
         Cmd cmd;
@@ -356,12 +415,34 @@ static void *dsp_thread(void *arg)
             Device *d = &g_dev[di];
             if (!d->enabled || d->mode == 2) continue;
 
+            /* RAVENNA: PTP 미잠금(EIO) 중 뮤트 */
+            if (d->is_ravenna && !atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_acquire)) {
+                for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
+                    memset(g_in_buf[d->ch_start+c], 0, g_period_frames*sizeof(float));
+                continue;
+            }
+
+            if (d->is_clock_master) {
+                /* hw:aoip: DSP 클럭 마스터 — SRC 불필요, in_ring 직접 읽기 */
+                if (rb_avail(&d->in_ring) >= g_period_frames) {
+                    rb_read(&d->in_ring, d->tmp_cap_in, g_period_frames);
+                    for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
+                        for (int f = 0; f < g_period_frames; f++)
+                            g_in_buf[d->ch_start+c][f] = d->tmp_cap_in[f*d->channels+c];
+                } else {
+                    for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
+                        memset(g_in_buf[d->ch_start+c], 0, g_period_frames*sizeof(float));
+                }
+                continue;
+            }
+            /* RAVENNA 및 I2S 기타: SRC로 클럭 도메인 차이 보정 */
+
             int avail = rb_avail(&d->in_ring);
 
             if (!d->cap_pi.prebuf_done) {
                 if (avail < PREBUF_FRAMES) {
                     for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
-                        memset(g_in_buf[d->ch_start+c], 0, PERIOD_FRAMES*sizeof(float));
+                        memset(g_in_buf[d->ch_start+c], 0, g_period_frames*sizeof(float));
                     continue;
                 }
                 d->cap_pi.prebuf_done = 1;
@@ -369,7 +450,7 @@ static void *dsp_thread(void *arg)
 
             pi_update(&d->cap_pi, avail, FILL_TARGET);
 
-            int input_need = (int)ceil((double)PERIOD_FRAMES / d->cap_pi.ratio) + 2;
+            int input_need = (int)ceil((double)g_period_frames / d->cap_pi.ratio) + 2;
             if (input_need > avail) {
                 /* 언더런: 페이드아웃으로 클릭 방지 */
                 if (d->cap_fade_buf) {
@@ -378,13 +459,13 @@ static void *dsp_thread(void *arg)
                                   : 0.0f;
                     for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++) {
                         float *dst = g_in_buf[d->ch_start+c];
-                        for (int f = 0; f < PERIOD_FRAMES; f++)
+                        for (int f = 0; f < g_period_frames; f++)
                             dst[f] = d->cap_fade_buf[f * d->channels + c] * scale;
                     }
                     if (d->cap_fade_cnt < UNDERRUN_FADE_PERIODS) d->cap_fade_cnt++;
                 } else {
                     for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
-                        memset(g_in_buf[d->ch_start+c], 0, PERIOD_FRAMES*sizeof(float));
+                        memset(g_in_buf[d->ch_start+c], 0, g_period_frames*sizeof(float));
                 }
                 continue;
             }
@@ -402,7 +483,7 @@ static void *dsp_thread(void *arg)
                 .data_in       = d->tmp_cap_in,
                 .data_out      = d->tmp_cap_out,
                 .input_frames  = input_need,
-                .output_frames = PERIOD_FRAMES,
+                .output_frames = g_period_frames,
                 .src_ratio     = d->cap_pi.ratio,
                 .end_of_input  = 0,
             };
@@ -415,12 +496,12 @@ static void *dsp_thread(void *arg)
             for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++) {
                 float *dst = g_in_buf[d->ch_start+c];
                 for (long f = 0; f < gen; f++) dst[f] = d->tmp_cap_out[f*d->channels+c];
-                for (long f = gen; f < PERIOD_FRAMES; f++) dst[f] = 0.0f;
+                for (long f = gen; f < g_period_frames; f++) dst[f] = 0.0f;
             }
             if (d->cap_fade_buf) {
                 d->cap_fade_cnt = 0;
                 for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
-                    for (int f = 0; f < PERIOD_FRAMES; f++)
+                    for (int f = 0; f < g_period_frames; f++)
                         d->cap_fade_buf[f * d->channels + c] = g_in_buf[d->ch_start+c][f];
             }
         }
@@ -430,23 +511,23 @@ static void *dsp_thread(void *arg)
             ShmBuf *r = &g_rtp_in[ri];
             if (!r->enabled || !r->shm) {
                 for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
-                    memset(g_in_buf[r->ch_start+c], 0, PERIOD_FRAMES*sizeof(float));
+                    memset(g_in_buf[r->ch_start+c], 0, g_period_frames*sizeof(float));
                 continue;
             }
             ShmRing *ring = r->shm;
             uint32_t wp = atomic_load_explicit(&ring->wp, memory_order_acquire);
             uint32_t rp = atomic_load_explicit(&ring->rp, memory_order_relaxed);
-            if ((int32_t)(wp - rp) >= PERIOD_FRAMES) {
-                for (int f = 0; f < PERIOD_FRAMES; f++) {
+            if ((int32_t)(wp - rp) >= g_period_frames) {
+                for (int f = 0; f < g_period_frames; f++) {
                     uint32_t idx = (rp + (uint32_t)f) % (uint32_t)SHM_RING_FRAMES;
                     for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
                         g_in_buf[r->ch_start+c][f] = ring->buf[idx * SHM_MAX_CH + c];
                 }
-                atomic_store_explicit(&ring->rp, rp + (uint32_t)PERIOD_FRAMES,
+                atomic_store_explicit(&ring->rp, rp + (uint32_t)g_period_frames,
                                       memory_order_release);
             } else {
                 for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
-                    memset(g_in_buf[r->ch_start+c], 0, PERIOD_FRAMES*sizeof(float));
+                    memset(g_in_buf[r->ch_start+c], 0, g_period_frames*sizeof(float));
             }
         }
 
@@ -459,28 +540,39 @@ static void *dsp_thread(void *arg)
         /* 워커 해제 + 마스터는 ch 0..(DSP_WORKER_CH-1) 담당 */
         pthread_barrier_wait(&g_barrier_work_start);
         process_input_dsp(0, DSP_WORKER_CH, g_n_in);
+        pthread_barrier_wait(&g_barrier_input_done);   /* 전체 입력 DSP 완료 대기 */
         process_routing(0, DSP_WORKER_CH, g_n_in, g_n_out);
+        pthread_barrier_wait(&g_barrier_routing_done); /* 전체 라우팅 완료 대기 */
         process_output_dsp(0, DSP_WORKER_CH, g_n_out);
-        /* 워커(ch DSP_WORKER_CH 이상) 완료 대기 */
         pthread_barrier_wait(&g_barrier_work_done);
 
         /* ── 출력 기록: ALSA 장치 ── */
         for (int di = 0; di < g_n_dev; di++) {
             Device *d = &g_dev[di];
             if (!d->enabled || d->mode == 1) continue;
-            for (int f = 0; f < PERIOD_FRAMES; f++) {
+
+            /* 출력 데이터 인터리브 패킹 */
+            for (int f = 0; f < g_period_frames; f++)
                 for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
                     d->tmp_play_in[f*d->channels+c] = g_out_buf[d->ch_start+c][f];
+
+            if (d->is_clock_master) {
+                /* hw:aoip: DSP 클럭 마스터 — SRC 불필요, out_ring 직접 쓰기 */
+                if (rb_free(&d->out_ring) >= g_period_frames)
+                    rb_write(&d->out_ring, d->tmp_play_in, g_period_frames);
+                continue;
             }
+
+            /* RAVENNA 및 I2S 기타: SRC로 클럭 도메인 변환 */
             int avail_out = rb_avail(&d->out_ring);
             pi_update(&d->play_pi, avail_out, FILL_TARGET);
-            long out_max = (long)ceil((double)PERIOD_FRAMES * d->play_pi.ratio) + 4;
+            long out_max = (long)ceil((double)g_period_frames * d->play_pi.ratio) + 4;
             if (out_max > DEV_TMP_FRAMES) out_max = DEV_TMP_FRAMES;
             if (rb_free(&d->out_ring) < (int)out_max) continue;
             SRC_DATA sd = {
                 .data_in       = d->tmp_play_in,
                 .data_out      = d->tmp_play_out,
-                .input_frames  = PERIOD_FRAMES,
+                .input_frames  = g_period_frames,
                 .output_frames = out_max,
                 .src_ratio     = d->play_pi.ratio,
                 .end_of_input  = 0,
@@ -495,17 +587,16 @@ static void *dsp_thread(void *arg)
             if (!r->enabled || !r->shm) continue;
             ShmRing *ring = r->shm;
             uint32_t wp = atomic_load_explicit(&ring->wp, memory_order_relaxed);
-            for (int f = 0; f < PERIOD_FRAMES; f++) {
+            for (int f = 0; f < g_period_frames; f++) {
                 uint32_t idx = (wp + (uint32_t)f) % (uint32_t)SHM_RING_FRAMES;
                 for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
                     ring->buf[idx * SHM_MAX_CH + c] = g_out_buf[r->ch_start+c][f];
             }
-            atomic_store_explicit(&ring->wp, wp + (uint32_t)PERIOD_FRAMES,
+            atomic_store_explicit(&ring->wp, wp + (uint32_t)g_period_frames,
                                   memory_order_release);
         }
     }
 
-    close(tfd);
     return NULL;
 }
 
@@ -522,14 +613,6 @@ static void *reporter_thread(void *arg)
         for (int i = 0; i < g_n_out; i++) {
             float pk = g_out_level[i]; g_out_level[i] = 0.0f;
             printf("lvl out %d %.1f\n", i+1, pk > 1e-7f ? 20.0f*log10f(pk) : -120.0f);
-        }
-        for (int i = 0; i < g_n_out; i++) {
-            if (!g_out_ch[i].lim.enabled) continue;
-            float pre_p  = g_lim_pre[i];  g_lim_pre[i]  = 0.0f;
-            float post_p = g_lim_post[i]; g_lim_post[i] = 0.0f;
-            printf("lm out %d %.1f %.1f\n", i+1,
-                   pre_p  > 1e-7f ? 20.0f*log10f(pre_p)  : -120.0f,
-                   post_p > 1e-7f ? 20.0f*log10f(post_p) : -120.0f);
         }
         fflush(stdout);
     }
@@ -550,9 +633,9 @@ static void *rtp_launch_thread(void *arg)
 {
     RtpLaunchArg *la = (RtpLaunchArg *)arg;
     if (la->is_send)
-        la->buf->rtp_ctx = rtp_send_start(la->ring, la->key, la->sock_path);
+        la->buf->rtp_ctx = rtp_send_start(la->ring, la->key, la->sock_path, g_prio_rtp);
     else
-        la->buf->rtp_ctx = rtp_recv_start(la->ring, la->key, la->sock_path);
+        la->buf->rtp_ctx = rtp_recv_start(la->ring, la->key, la->sock_path, g_prio_rtp);
     free(la);
     return NULL;
 }
@@ -627,16 +710,6 @@ static void shmbuf_close(ShmBuf *r)
     r->enabled = 0;
 }
 
-/* ── EQ 타입 파서 ────────────────────────────────────────────────── */
-static EqType parse_eq_type(const char *s)
-{
-    if (!strcmp(s, "loshelf")) return T_LOSHELF;
-    if (!strcmp(s, "hishelf")) return T_HISHELF;
-    if (!strcmp(s, "lp"))      return T_LP;
-    if (!strcmp(s, "hp"))      return T_HP;
-    return T_PEAK;
-}
-
 /* ── stdin 명령 루프 ─────────────────────────────────────────────── */
 static void cmd_loop(void)
 {
@@ -648,6 +721,19 @@ static void cmd_loop(void)
         if (n < 1) continue;
 
         const char *verb = tok[0];
+
+        /* ── set period N — DSP 시작 전에만 유효 ── */
+        if (!strcmp(verb, "set") && n >= 3 && !strcmp(tok[1], "period")) {
+            int pf = atoi(tok[2]);
+            if (pf >= 1 && pf <= MAX_PERIOD_FRAMES) {
+                g_period_frames = pf;
+                fprintf(stderr, "[aoip_engine] period_frames set to %d\n", g_period_frames);
+            } else {
+                fprintf(stderr, "[aoip_engine] set period: invalid value %d (1..%d)\n",
+                        pf, MAX_PERIOD_FRAMES);
+            }
+            continue;
+        }
 
         /* ── bridge 명령 ── */
         if (!strcmp(verb, "bridge") && n >= 3) {
@@ -673,7 +759,11 @@ static void cmd_loop(void)
                 d->mode     = !strcmp(sub, "add_in")  ? 1 :
                               !strcmp(sub, "add_out") ? 2 : 0;
                 d->enabled  = 1;
-                d->thread_priority = strstr(d->dev, "RAVENNA") ? g_prio_ravenna : g_prio_alsa;
+                d->is_ravenna      = strstr(d->dev, "RAVENNA") ? 1 : 0;
+                d->thread_priority = d->is_ravenna ? g_prio_ravenna : g_prio_alsa;
+                /* analog 장치(I2S)를 DSP 마스터 클럭으로 지정 */
+                d->is_clock_master = (!strcmp(name, "analog") && d->mode != 2) ? 1 : 0;
+                d->clk_accum       = 0;
                 device_start(d);
             } else if (!strcmp(sub, "start")) {
                 for (int i = 0; i < g_n_dev; i++)
@@ -748,8 +838,7 @@ static void cmd_loop(void)
         int ch  = atoi(tok[2]) - 1;
         if (ch < 0 || (dir==0 && ch>=g_n_in) || (dir==1 && ch>=g_n_out)) continue;
 
-        ChState *cs  = (dir == 0) ? &g_in_state[ch] : &g_out_state[ch];
-        Cmd      cmd = { .dir = dir, .ch = ch };
+        Cmd cmd = { .dir = dir, .ch = ch };
 
         if (!strcmp(verb, "gain") && n >= 4) {
             cmd.type = CMD_GAIN;
@@ -763,68 +852,6 @@ static void cmd_loop(void)
         } else if (!strcmp(verb, "bypass") && n >= 4) {
             cmd.type = CMD_BYPASS; cmd.flag = atoi(tok[3]);
             cmd_push(&cmd);
-
-        } else if (!strcmp(verb, "hpf") && n >= 5) {
-            const char *param = tok[3];
-            if (!strcmp(param, "enable")) {
-                cmd.type = CMD_HPF_ENABLE; cmd.flag = atoi(tok[4]);
-                cmd_push(&cmd);
-            } else if (!strcmp(param, "freq")) {
-                cs->hpf_freq = (float)atof(tok[4]);
-                BqCoeffs c; calc_hpf(&c, cs->hpf_freq, g_sr);
-                cmd.type = CMD_HPF_COEFFS; cmd.band = 0; cmd.coeffs = c; cmd_push(&cmd);
-                if (cs->hpf_slope >= 24) { cmd.band = 1; cmd_push(&cmd); }
-            } else if (!strcmp(param, "slope")) {
-                cs->hpf_slope = atoi(tok[4]);
-                int stages = (cs->hpf_slope >= 24) ? 2 : 1;
-                cmd.type = CMD_HPF_STAGES; cmd.flag = stages; cmd_push(&cmd);
-                if (cs->hpf_freq > 0.0f) {
-                    BqCoeffs c; calc_hpf(&c, cs->hpf_freq, g_sr);
-                    cmd.type = CMD_HPF_COEFFS; cmd.band = 0; cmd.coeffs = c; cmd_push(&cmd);
-                    if (stages > 1) { cmd.band = 1; cmd_push(&cmd); }
-                }
-            }
-
-        } else if (!strcmp(verb, "eq") && n >= 5 && !strcmp(tok[3], "global")) {
-            cmd.type = CMD_EQ_GLOBAL_ENABLE; cmd.flag = atoi(tok[4]); cmd_push(&cmd);
-
-        } else if (!strcmp(verb, "eq") && n >= 6) {
-            int band = atoi(tok[3]);
-            if (band < 0 || band >= MAX_EQ_BANDS) continue;
-            cmd.band = band;
-            const char *param = tok[4];
-            if (!strcmp(param, "enable")) {
-                cmd.type = CMD_EQ_ENABLE; cmd.flag = atoi(tok[5]); cmd_push(&cmd);
-            } else if (!strcmp(param, "coeffs") && n >= 10) {
-                BqCoeffs c = {atof(tok[5]),atof(tok[6]),atof(tok[7]),atof(tok[8]),atof(tok[9])};
-                cmd.type = CMD_EQ_COEFFS; cmd.coeffs = c; cmd_push(&cmd);
-            } else {
-                if      (!strcmp(param, "freq")) cs->eq[band].freq    = (float)atof(tok[5]);
-                else if (!strcmp(param, "gain")) cs->eq[band].gain_db = (float)atof(tok[5]);
-                else if (!strcmp(param, "q"))    cs->eq[band].q       = fmaxf(0.1f,(float)atof(tok[5]));
-                else if (!strcmp(param, "type")) cs->eq[band].type    = parse_eq_type(tok[5]);
-                else continue;
-                BqCoeffs c;
-                calc_eq(&c, cs->eq[band].type, cs->eq[band].freq,
-                        cs->eq[band].gain_db, cs->eq[band].q, g_sr);
-                cmd.type = CMD_EQ_COEFFS; cmd.coeffs = c; cmd_push(&cmd);
-            }
-
-        } else if (!strcmp(verb, "limiter") && n >= 5) {
-            if (dir != 1) continue;
-            const char *param = tok[3];
-            if (!strcmp(param, "enable")) {
-                cmd.type = CMD_LIMITER_ENABLE; cmd.flag = atoi(tok[4]); cmd_push(&cmd);
-            } else {
-                if      (!strcmp(param, "threshold")) cs->lim.threshold_db = (float)atof(tok[4]);
-                else if (!strcmp(param, "attack"))    cs->lim.attack_ms    = fmaxf(0.1f,(float)atof(tok[4]));
-                else if (!strcmp(param, "release"))   cs->lim.release_ms   = fmaxf(1.0f,(float)atof(tok[4]));
-                else if (!strcmp(param, "makeup"))    cs->lim.makeup_db    = (float)atof(tok[4]);
-                else continue;
-                LimCoeffs lc = calc_limiter(cs->lim.threshold_db, cs->lim.attack_ms,
-                                            cs->lim.release_ms,   cs->lim.makeup_db, g_sr);
-                cmd.type = CMD_LIMITER_PARAMS; cmd.lim_coeffs = lc; cmd_push(&cmd);
-            }
         }
     }
 }
@@ -869,6 +896,54 @@ static int cfg_int(const char *s, const char *key, int def)
     return v;
 }
 
+/* ── audio.json 간단 파서 ────────────────────────────────────────── */
+static int json_int(const char *json, const char *key, int def)
+{
+    char pat[64];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = strstr(json, pat);
+    if (!p) return def;
+    p += strlen(pat);
+    while (*p == ' ' || *p == ':' || *p == '\t') p++;
+    if (*p < '0' || *p > '9') return def;
+    return atoi(p);
+}
+
+static void load_config_prios(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+
+    /* engine 섹션만 읽기 */
+    char buf[4096] = "";
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    /* "engine" 섹션 위치 찾기 */
+    const char *sec = strstr(buf, "\"engine\"");
+    if (!sec) return;
+    const char *start = strchr(sec, '{');
+    if (!start) return;
+    const char *end = strchr(start, '}');
+    if (!end) return;
+
+    char section[512] = "";
+    size_t len = (size_t)(end - start + 1);
+    if (len >= sizeof(section)) len = sizeof(section) - 1;
+    memcpy(section, start, len);
+    section[len] = '\0';
+
+    int v;
+    if ((v = json_int(section, "dspPrio",     0)) > 0) g_prio_dsp     = v;
+    if ((v = json_int(section, "alsaPrio",    0)) > 0) g_prio_alsa    = v;
+    if ((v = json_int(section, "ravennaPrio", 0)) > 0) g_prio_ravenna = v;
+    if ((v = json_int(section, "rtpPrio",     0)) > 0) g_prio_rtp     = v;
+
+    fprintf(stderr, "[aoip_engine] config prios: dsp=%d alsa=%d ravenna=%d rtp=%d\n",
+            g_prio_dsp, g_prio_alsa, g_prio_ravenna, g_prio_rtp);
+}
+
 /* ── main ────────────────────────────────────────────────────────── */
 int main(int argc, char *argv[])
 {
@@ -876,12 +951,16 @@ int main(int argc, char *argv[])
     if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
         fprintf(stderr, "[aoip_engine] mlockall failed: %s\n", strerror(errno));
 
+    /* audio.json에서 우선순위 로드 (커맨드라인으로 덮어쓰기 가능) */
+    load_config_prios("config/audio.json");
+
     const char *name = "aoip_engine";
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--name")         && i+1 < argc) name             = argv[++i];
         else if (!strcmp(argv[i], "--dsp-prio")     && i+1 < argc) g_prio_dsp     = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--alsa-prio")    && i+1 < argc) g_prio_alsa    = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ravenna-prio") && i+1 < argc) g_prio_ravenna = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--rtp-prio")     && i+1 < argc) g_prio_rtp     = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bypass-dsp"))                 g_bypass_all_dsp = 1;
     }
 
@@ -910,43 +989,10 @@ int main(int argc, char *argv[])
     close(sfd);
 
     /* 채널 초기 상태 */
-    for (int i = 0; i < g_n_in; i++) {
-        g_in_state[i].hpf_freq  = 80.0f;
-        g_in_state[i].hpf_slope = 12;
-        g_in_ch[i].hpf_stages   = 1;
-        for (int b = 0; b < MAX_EQ_BANDS; b++) {
-            g_in_state[i].eq[b].freq    = 100.0f;
-            g_in_state[i].eq[b].gain_db = 0.0f;
-            g_in_state[i].eq[b].q       = 0.7f;
-            g_in_state[i].eq[b].type    = T_PEAK;
-        }
-        g_in_ch[i].gain_tgt        = g_in_ch[i].gain_cur = 1.0f;
-        g_in_ch[i].lim.gr          = 1.0f;
-        g_in_ch[i].eq_global_enabled = 1;
-    }
-    for (int i = 0; i < g_n_out; i++) {
-        g_out_state[i].hpf_freq  = 80.0f;
-        g_out_state[i].hpf_slope = 12;
-        g_out_ch[i].hpf_stages   = 1;
-        for (int b = 0; b < MAX_EQ_BANDS; b++) {
-            g_out_state[i].eq[b].freq    = 100.0f;
-            g_out_state[i].eq[b].gain_db = 0.0f;
-            g_out_state[i].eq[b].q       = 0.7f;
-            g_out_state[i].eq[b].type    = T_PEAK;
-        }
-        g_out_state[i].lim.threshold_db = -6.0f;
-        g_out_state[i].lim.attack_ms    = 5.0f;
-        g_out_state[i].lim.release_ms   = 100.0f;
-        g_out_state[i].lim.makeup_db    = 0.0f;
-        LimCoeffs lc = calc_limiter(-6.0f, 5.0f, 100.0f, 0.0f, g_sr);
-        g_out_ch[i].lim.threshold    = lc.threshold;
-        g_out_ch[i].lim.attack_coef  = lc.attack_coef;
-        g_out_ch[i].lim.release_coef = lc.release_coef;
-        g_out_ch[i].lim.makeup       = lc.makeup;
-        g_out_ch[i].lim.gr             = 1.0f;
-        g_out_ch[i].gain_tgt           = g_out_ch[i].gain_cur = 1.0f;
-        g_out_ch[i].eq_global_enabled  = 1;
-    }
+    for (int i = 0; i < g_n_in; i++)
+        g_in_ch[i].gain_tgt = g_in_ch[i].gain_cur = 1.0f;
+    for (int i = 0; i < g_n_out; i++)
+        g_out_ch[i].gain_tgt = g_out_ch[i].gain_cur = 1.0f;
 
     memset(g_route, 0, sizeof(g_route));
 
@@ -958,9 +1004,39 @@ int main(int argc, char *argv[])
     signal(SIGTERM, sig_handler);
     signal(SIGINT,  sig_handler);
 
+    /* DSP 클럭 마스터용 eventfd 생성 (EFD_SEMAPHORE: 틱당 1 카운트) */
+    g_dsp_clock_fd = eventfd(0, EFD_SEMAPHORE);
+    if (g_dsp_clock_fd < 0)
+        fprintf(stderr, "[aoip_engine] eventfd: %s — dsp clock master disabled\n",
+                strerror(errno));
+    else
+        fprintf(stderr, "[aoip_engine] dsp clock eventfd=%d ready\n",
+                g_dsp_clock_fd);
+
+    /* /dev/ptp0 를 DSP 폴백 클럭으로 오픈 (RAVENNA 없을 때 사용) */
+    g_ptp_fd = open("/dev/ptp0", O_RDONLY);
+    if (g_ptp_fd >= 0) {
+        g_ptp_clockid = FD_TO_CLOCKID(g_ptp_fd);
+        struct timespec _probe;
+        if (clock_gettime(g_ptp_clockid, &_probe) < 0) {
+            fprintf(stderr, "[aoip_engine] /dev/ptp0 clock_gettime failed: %s, fallback CLOCK_MONOTONIC\n",
+                    strerror(errno));
+            close(g_ptp_fd); g_ptp_fd = -1;
+            g_ptp_clockid = CLOCK_MONOTONIC;
+        } else {
+            fprintf(stderr, "[aoip_engine] ptp0 fallback clock ready (clockid=%d)\n",
+                    (int)g_ptp_clockid);
+        }
+    } else {
+        fprintf(stderr, "[aoip_engine] /dev/ptp0 open failed: %s, fallback CLOCK_MONOTONIC\n",
+                strerror(errno));
+    }
+
     /* 병렬 DSP 워커 초기화 */
-    pthread_barrier_init(&g_barrier_work_start, NULL, DSP_WORKER_COUNT + 1);
-    pthread_barrier_init(&g_barrier_work_done,  NULL, DSP_WORKER_COUNT + 1);
+    pthread_barrier_init(&g_barrier_work_start,   NULL, DSP_WORKER_COUNT + 1);
+    pthread_barrier_init(&g_barrier_input_done,   NULL, DSP_WORKER_COUNT + 1);
+    pthread_barrier_init(&g_barrier_routing_done, NULL, DSP_WORKER_COUNT + 1);
+    pthread_barrier_init(&g_barrier_work_done,    NULL, DSP_WORKER_COUNT + 1);
     for (int w = 0; w < DSP_WORKER_COUNT; w++) {
         g_worker_arg[w].id       = w;
         g_worker_arg[w].ch_start = (w + 1) * DSP_WORKER_CH;  /* 마스터가 0 담당, 워커는 그 이상 */
@@ -988,11 +1064,15 @@ int main(int argc, char *argv[])
 
     /* 워커 스레드 종료 */
     g_worker_quit = 1;
-    pthread_barrier_wait(&g_barrier_work_start);  /* 대기 중인 워커 해제 */
+    pthread_barrier_wait(&g_barrier_work_start);
+    pthread_barrier_wait(&g_barrier_input_done);
+    pthread_barrier_wait(&g_barrier_routing_done);
     pthread_barrier_wait(&g_barrier_work_done);
     for (int w = 0; w < DSP_WORKER_COUNT; w++)
         pthread_join(g_worker_tid[w], NULL);
     pthread_barrier_destroy(&g_barrier_work_start);
+    pthread_barrier_destroy(&g_barrier_input_done);
+    pthread_barrier_destroy(&g_barrier_routing_done);
     pthread_barrier_destroy(&g_barrier_work_done);
 
     for (int i = 0; i < g_n_dev; i++)
@@ -1002,6 +1082,9 @@ int main(int argc, char *argv[])
         if (g_rtp_in[i].enabled) shmbuf_close(&g_rtp_in[i]);
     for (int i = 0; i < g_n_rtp_out; i++)
         if (g_rtp_out[i].enabled) shmbuf_close(&g_rtp_out[i]);
+
+    if (g_ptp_fd >= 0) { close(g_ptp_fd); g_ptp_fd = -1; }
+    if (g_dsp_clock_fd >= 0) { close(g_dsp_clock_fd); g_dsp_clock_fd = -1; }
 
     return 0;
 }

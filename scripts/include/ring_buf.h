@@ -31,7 +31,7 @@ static inline int rb_free(const RingBuf *r) {
     return (int)((unsigned)r->ring_frames - (wp - rp));
 }
 
-static inline void rb_write(RingBuf *r, const float *src, int n) {
+static inline int rb_write(RingBuf *r, const float *src, int n) {
     unsigned wp        = atomic_load_explicit(&r->wp, memory_order_relaxed);
     unsigned rp        = atomic_load_explicit(&r->rp, memory_order_acquire);
     int      free_frm  = (int)((unsigned)r->ring_frames - (wp - rp));
@@ -42,6 +42,7 @@ static inline void rb_write(RingBuf *r, const float *src, int n) {
                (size_t)r->channels * sizeof(float));
     }
     atomic_store_explicit(&r->wp, wp + (unsigned)n, memory_order_release);
+    return n;
 }
 
 static inline int rb_read(RingBuf *r, float *dst, int n) {

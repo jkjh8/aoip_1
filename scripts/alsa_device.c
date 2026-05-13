@@ -16,8 +16,13 @@
 #include <stdint.h>
 #include <math.h>
 #include <poll.h>
+#include <sched.h>
 #include <sys/eventfd.h>
 #include "include/alsa_device.h"
+#include "include/clk2.h"
+
+/* PTP 재잠금/시작 후 언뮤트까지 쌓아야 할 최소 프레임 수 (3 DSP 주기) */
+#define RAVENNA_LOCK_PREBUF (g_period_frames * 3)
 
 /* aoip_engine.c 가 소유하는 전역 플래그 */
 extern volatile int g_quit;
@@ -32,18 +37,10 @@ extern _Atomic int64_t g_aoip_hts_ns;
 extern _Atomic int64_t g_ravenna_frames;
 extern _Atomic int64_t g_ravenna_hts_ns;
 
-/* ── PI 드리프트 보정 ────────────────────────────────────────────── */
-void pi_reset(PiState *p) {
-    p->ratio = 1.0; p->integ = 0.0; p->smooth = 0.0;
-}
-
-void pi_update(PiState *p, int avail, int target) {
-    double err  = ((double)target - avail) / (double)target;
-    p->smooth  += 0.05 * (err - p->smooth);
-    p->integ   += p->smooth;
-    p->ratio    = 1.0 + p->smooth * p->kp + p->integ * p->ki;
-    if (p->ratio < p->min) { p->ratio = p->min; p->integ = (p->min - 1.0 - p->smooth * p->kp) / p->ki; }
-    if (p->ratio > p->max) { p->ratio = p->max; p->integ = (p->max - 1.0 - p->smooth * p->kp) / p->ki; }
+/* ── RT 스레드 CPU 어피니티 (CPU 2-3 고정) ──────────────────────── */
+static inline void pin_to_rt_cores(void) {
+    cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(2, &cs); CPU_SET(3, &cs);
+    pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
 }
 
 /* ── ALSA 오픈 헬퍼 ──────────────────────────────────────────────── */
@@ -104,6 +101,7 @@ static void *alsa_capture_thread(void *arg)
 
     struct sched_param sp = { .sched_priority = d->thread_priority };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    pin_to_rt_cores();
 
     snd_pcm_t *pcm = NULL;
     while (!d->quit_cap && !g_quit) {
@@ -153,15 +151,34 @@ static void *alsa_capture_thread(void *arg)
 
         snd_pcm_sframes_t n = snd_pcm_readi(pcm, ibuf, (snd_pcm_uframes_t)d->period);
         if (n == -EPIPE) {
-            /* 오버런: recover 후 재시작.
-             * RAVENNA: in_ring은 그대로 유지 — 캡처된 유효 데이터 손실 방지.
-             * accum만 리셋하여 eventfd 타이밍 재동기화. */
-            if (d->is_ravenna && cap_err_count++ < 3)
+            /* RT 스레드 내 fprintf 지연 포함 전체 복구 시간 측정 */
+            struct timespec _t0, _t1;
+            clock_gettime(CLOCK_MONOTONIC, &_t0);
+            if (d->is_ravenna && cap_err_count++ < 10)
                 fprintf(stderr, "[aoip_engine] cap %s: xrun (overrun), recovering\n", d->name);
             snd_pcm_recover(pcm, n, 1);
+            if (d->is_ravenna) snd_pcm_start(pcm);
+            clock_gettime(CLOCK_MONOTONIC, &_t1);
+            long _us = (long)((_t1.tv_sec  - _t0.tv_sec)  * 1000000L
+                            + (_t1.tv_nsec - _t0.tv_nsec) / 1000L);
+            if (_us > 500)
+                fprintf(stderr, "[aoip_engine] cap %s: xrun recovery (log+IOCTL) %ldus\n",
+                        d->name, _us);
             if (d->is_ravenna) {
-                snd_pcm_start(pcm);
                 d->ravenna_accum = 0;
+                d->ravenna_prebuf_count = 0;
+                /* 입력 링버퍼·SRC·PI 전부 리셋: xrun으로 데이터 불연속 발생 */
+                rb_reset(&d->in_ring);
+                if (d->cap_src) {
+                    src_reset(d->cap_src);
+                    /* xrun 후 PI를 실측 ratio hint로 재초기화 — ratio=1.0 튐 방지 */
+                    double hint = atomic_load_explicit(&g_ravenna_ratio_hint, memory_order_relaxed);
+                    d->cap_pi.ratio = hint;
+                    d->cap_pi.integ = 0.0;
+                    d->cap_pi.smooth = 0.0;
+                }
+                /* ptp_locked=0 → prebuffer 경로 재진입, DSP 입력 뮤트 */
+                atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_release);
             }
             continue;
         }
@@ -181,7 +198,9 @@ static void *alsa_capture_thread(void *arg)
                  * in_ring 리셋: EIO 중 쌓인 쓰레기 데이터 제거 (DSP가 읽지 않으므로 안전). */
                 if (cap_err_count++ == 0) {
                     atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_release);
+                    atomic_store_explicit(&d->ravenna_flush, 1, memory_order_release);
                     rb_reset(&d->in_ring);
+                    d->ravenna_prebuf_count = 0;
                     fprintf(stderr, "[aoip_engine] cap %s: EIO (PTP not locked), muting\n", d->name);
                 }
                 d->ravenna_accum = 0;
@@ -209,11 +228,20 @@ static void *alsa_capture_thread(void *arg)
             }
             continue;
         }
-        /* 에러에서 복귀: in_ring 리셋 후 언뮤트 (PTP 재잠금 또는 소스 복귀) */
-        if (d->is_ravenna && cap_err_count > 0 &&
+        /* PTP 잠금/재잠금: 클럭 안정화를 위해 RAVENNA_LOCK_PREBUF 프레임 쌓은 뒤 언뮤트.
+         * 초기 시작(cap_err_count==0)과 EIO 복구 후(cap_err_count>0) 모두 처리. */
+        if (d->is_ravenna &&
             !atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed)) {
+            d->ravenna_prebuf_count += (int)n;
+            if (d->ravenna_prebuf_count < RAVENNA_LOCK_PREBUF) {
+                /* 아직 prebuffer 중 — in_ring에 쓰지 않고 대기 */
+                cap_err_count = 0;
+                continue;
+            }
+            /* prebuffer 완료: in_ring 초기화 후 언뮤트 */
             rb_reset(&d->in_ring);
             atomic_store_explicit(&d->ravenna_ptp_locked, 1, memory_order_release);
+            d->ravenna_prebuf_count = 0;
             fprintf(stderr, "[aoip_engine] cap %s: PTP locked, unmuting capture\n", d->name);
         }
         cap_err_count = 0;
@@ -241,8 +269,18 @@ static void *alsa_capture_thread(void *arg)
             d->ravenna_accum += written;
             if (d->ravenna_accum >= g_period_frames && g_dsp_clock_fd >= 0) {
                 d->ravenna_accum -= g_period_frames;
-                uint64_t val = 1;
-                (void)write(g_dsp_clock_fd, &val, sizeof(val));
+                if (d->ravenna_prebuf_count < RAVENNA_LOCK_PREBUF) {
+                    /* 시작 prebuffer 중 — eventfd 지연, 버퍼 누적 */
+                    d->ravenna_prebuf_count += g_period_frames;
+                    if (d->ravenna_prebuf_count >= RAVENNA_LOCK_PREBUF) {
+                        rb_reset(&d->in_ring);
+                        fprintf(stderr, "[aoip_engine] cap %s: startup prebuffer done, starting DSP clock\n",
+                                d->name);
+                    }
+                } else {
+                    uint64_t val = 1;
+                    (void)write(g_dsp_clock_fd, &val, sizeof(val));
+                }
             }
             atomic_fetch_add_explicit(&g_aoip_frames, (int64_t)written, memory_order_relaxed);
             {
@@ -274,6 +312,7 @@ static void *alsa_playback_thread(void *arg)
 
     struct sched_param sp = { .sched_priority = d->thread_priority };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    pin_to_rt_cores();
 
     /* RAVENNA는 hw 주기 48 고정; 일반 장치는 설정값 그대로 */
     int hw_period = d->is_ravenna ? RAVENNA_HW_PERIOD : d->period;
@@ -293,13 +332,27 @@ static void *alsa_playback_thread(void *arg)
     int play_err_count = 0;
 
     /* RAVENNA: 3 DSP period(≈6ms) — PTP 도메인이 동일하므로 과도한 버퍼 불필요.
-     * I2S/USB: PREBUF_FRAMES(42ms) — SRC 워밍업 + 클럭 도메인 지터 흡수. */
-    const int prebuf = d->is_ravenna ? (g_period_frames * 3) : PREBUF_FRAMES;
+     * I2S: 마스터 클럭 — 클럭 도메인 교차 없으므로 prebuffer 불필요(0).
+     * USB 등 기타: PREBUF_FRAMES(42ms) — SRC 워밍업 + 클럭 도메인 지터 흡수. */
+    const int prebuf = d->is_ravenna ? (g_period_frames * 3)
+                     : d->is_i2s    ? 0
+                     :                PREBUF_FRAMES;
 
-    while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < prebuf)
-        usleep(1000);
+    if (prebuf > 0) {
+        while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < prebuf)
+            usleep(1000);
+    }
 
     while (!d->quit_play && !g_quit) {
+        /* PTP 언락 신호: out_ring 플러시 → 즉시 무음 출력 */
+        if (d->is_ravenna &&
+            atomic_load_explicit(&d->ravenna_flush, memory_order_acquire)) {
+            atomic_store_explicit(&d->ravenna_flush, 0, memory_order_relaxed);
+            rb_reset(&d->out_ring);
+            fprintf(stderr, "[aoip_engine] play %s: PTP unlock, flushing output buffer\n",
+                    d->name);
+        }
+
         if (!rb_read(&d->out_ring, fbuf, d->period)) {
             memset(fbuf, 0, (size_t)(d->period * d->channels) * sizeof(float));
         }
@@ -328,10 +381,9 @@ static void *alsa_playback_thread(void *arg)
 
         if (n == -EPIPE) {
             fprintf(stderr, "[aoip_engine] play %s: xrun (underrun)\n", d->name);
-            rb_reset(&d->out_ring);
             snd_pcm_recover(pcm, (int)n, 1);
+            /* out_ring 데이터는 유효 — 리셋 없이 즉시 재공급하여 재xrun 방지 */
         } else if (n == -ESTRPIPE) {
-            rb_reset(&d->out_ring);
             while (!g_quit && snd_pcm_resume(pcm) == -EAGAIN) usleep(10000);
             snd_pcm_prepare(pcm);
         } else if (n == -EIO) {
@@ -411,7 +463,8 @@ void device_start(Device *d)
 
     if (d->mode != 2) {  /* capture */
         rb_init(&d->in_ring, RING_FRAMES, d->channels);
-        d->ravenna_accum = 0;
+        d->ravenna_accum       = 0;
+        d->ravenna_prebuf_count = 0;
         pthread_create(&d->cap_tid, NULL, alsa_capture_thread, d);
     }
     if (d->mode != 1) {  /* playback */

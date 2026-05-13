@@ -28,6 +28,7 @@
 #include <sys/stat.h>
 #include <sys/eventfd.h>
 #include <poll.h>
+#include <sched.h>
 
 #include "include/engine_constants.h"
 #include "include/shm_ring.h"
@@ -140,6 +141,12 @@ static pthread_barrier_t g_barrier_work_done;
 static volatile int      g_worker_quit = 0;
 
 
+/* ── RT 스레드 CPU 어피니티 (CPU 2-3 고정) ──────────────────────── */
+static inline void pin_to_rt_cores(void) {
+    cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(2, &cs); CPU_SET(3, &cs);
+    pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
+}
+
 /* ── 시그널 핸들러 ───────────────────────────────────────────────── */
 static void sig_handler(int s) { (void)s; g_quit = 1; close(STDIN_FILENO); }
 
@@ -169,9 +176,20 @@ static void process_channel_dsp(Channel *chs, float bufs[][MAX_PERIOD_FRAMES],
     for (int ch = ch_start; ch < ch_start + ch_count && ch < n_ch; ch++) {
         Channel *c   = &chs[ch];
         float   *buf = bufs[ch];
+        if (g_bypass_all_dsp || c->bypass_dsp) {
+            /* bypass: gain 적용 없이 레벨만 측정 */
+            float peak = 0.0f;
+            for (int i = 0; i < g_period_frames; i++) {
+                float ap = fabsf(buf[i]);
+                if (ap > peak) peak = ap;
+            }
+            if (peak > levels[ch]) levels[ch] = peak;
+            continue;
+        }
         if (c->muted) {
             memset(buf, 0, g_period_frames * sizeof(float));
             c->gain_cur = c->gain_tgt;
+            levels[ch] = 0.0f;
             continue;
         }
         float cur  = c->gain_cur;
@@ -208,6 +226,7 @@ static void *dsp_worker_thread(void *arg)
 
     struct sched_param sp = { .sched_priority = g_prio_dsp };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    pin_to_rt_cores();
 
     /* RT 스택 page-fault 방지 */
     volatile char stack_touch[4096];
@@ -257,7 +276,16 @@ static void read_alsa_master(Device *d)
         for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
             for (int f = 0; f < g_period_frames; f++)
                 g_in_buf[d->ch_start+c][f] = d->tmp_cap_in[f*d->channels+c];
+        if (d->cap_underrun > 0) {
+            fprintf(stderr, "[aoip_engine] alsa '%s': capture recovered after %d ticks\n",
+                    d->name, d->cap_underrun);
+            d->cap_underrun = 0;
+        }
     } else {
+        d->cap_underrun++;
+        if (d->cap_underrun == 10 || (d->cap_underrun > 10 && d->cap_underrun % 500 == 0))
+            fprintf(stderr, "[aoip_engine] alsa '%s': capture underrun %d ticks (avail=%d)\n",
+                    d->name, d->cap_underrun, rb_avail(&d->in_ring));
         for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
             memset(g_in_buf[d->ch_start+c], 0, g_period_frames*sizeof(float));
     }
@@ -313,8 +341,8 @@ static void dsp_read_inputs(void)
             r->rtp_underrun = 0;
         } else {
             r->rtp_underrun++;
-            /* 100틱(~200ms) 연속 언더런 시에만 출력, 이후 매 500틱마다 반복 */
-            if (r->rtp_underrun == 100 || (r->rtp_underrun > 100 && r->rtp_underrun % 500 == 0))
+            /* 10틱(~20ms) 연속 언더런 시에만 출력, 이후 매 500틱마다 반복 */
+            if (r->rtp_underrun == 10 || (r->rtp_underrun > 100 && r->rtp_underrun % 500 == 0))
                 fprintf(stderr, "[aoip_engine] rtp_in '%s': underrun %d ticks (fill=%d)\n",
                         r->name, r->rtp_underrun, rb_avail(&r->ring));
         }
@@ -337,37 +365,48 @@ static void dsp_run_parallel(void)
     pthread_barrier_wait(&g_barrier_work_done);
 }
 
-/* ── ALSA 출력 쓰기 ──────────────────────────────────────────────── */
-static void dsp_write_alsa(void)
+/* ── 출력 쓰기 (ALSA + RTP) ─────────────────────────────────────── */
+static void interleave_buf(int ch_start, int channels, float *tmp)
 {
+    for (int f = 0; f < g_period_frames; f++)
+        for (int c = 0; c < channels && (ch_start+c) < MAX_CH; c++)
+            tmp[f * channels + c] = g_out_buf[ch_start+c][f];
+}
+
+static void dsp_write_outputs(void)
+{
+    float tmp[MAX_PERIOD_FRAMES * MAX_CH];
+
     for (int di = 0; di < g_n_dev; di++) {
         Device *d = &g_dev[di];
         if (!d->enabled || d->mode == 1) continue;
 
-        for (int f = 0; f < g_period_frames; f++)
-            for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
-                d->tmp_play_in[f*d->channels+c] = g_out_buf[d->ch_start+c][f];
+        interleave_buf(d->ch_start, d->channels, d->tmp_play_in);
 
         if (d->is_i2s) {
-            if (rb_free(&d->out_ring) >= g_period_frames)
+            if (rb_free(&d->out_ring) >= g_period_frames) {
                 rb_write(&d->out_ring, d->tmp_play_in, g_period_frames);
+                if (d->play_overflow > 0) {
+                    fprintf(stderr, "[aoip_engine] alsa '%s': playback recovered after %d ticks\n",
+                            d->name, d->play_overflow);
+                    d->play_overflow = 0;
+                }
+            } else {
+                d->play_overflow++;
+                if (d->play_overflow == 10 || (d->play_overflow > 10 && d->play_overflow % 500 == 0))
+                    fprintf(stderr, "[aoip_engine] alsa '%s': playback overflow %d ticks (free=%d)\n",
+                            d->name, d->play_overflow, rb_free(&d->out_ring));
+            }
             continue;
         }
 
         alsa_playback_src(d);
     }
-}
 
-/* ── RTP 출력 쓰기 ───────────────────────────────────────────────── */
-static void dsp_write_rtp(void)
-{
-    float tmp[MAX_PERIOD_FRAMES * MAX_CH];
     for (int ri = 0; ri < g_n_rtp_out; ri++) {
         RtpStream *r = &g_rtp_out[ri];
         if (!r->enabled || !r->ring.buf) continue;
-        for (int f = 0; f < g_period_frames; f++)
-            for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
-                tmp[f * r->channels + c] = g_out_buf[r->ch_start+c][f];
+        interleave_buf(r->ch_start, r->channels, tmp);
         rb_write(&r->ring, tmp, g_period_frames);
     }
 }
@@ -379,16 +418,23 @@ static void *dsp_thread(void *arg)
 
     struct sched_param sp = { .sched_priority = g_prio_dsp };
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    pin_to_rt_cores();
 
     int64_t clk2_pa_fr = 0, clk2_pa_hts = 0;
     int64_t clk2_pr_fr = 0, clk2_pr_hts = 0;
     struct timespec _now;
     clock_gettime(CLOCK_MONOTONIC, &_now);
     int64_t clk2_next_ns = (int64_t)_now.tv_sec * 1000000000LL + _now.tv_nsec
-                           + 30LL * 1000000000LL;
+                           + 1LL * 1000000000LL;  /* 초기 1s 빠른 측정 시작 */
+
+    int cached_period_frames = g_period_frames;
+    long long period_ns = (long long)cached_period_frames * 1000000000LL / SAMPLE_RATE;
 
     while (!g_quit) {
-        long long period_ns = (long long)g_period_frames * 1000000000LL / SAMPLE_RATE;
+        if (g_period_frames != cached_period_frames) {
+            cached_period_frames = g_period_frames;
+            period_ns = (long long)cached_period_frames * 1000000000LL / SAMPLE_RATE;
+        }
 
         if (!dsp_wait_tick(period_ns)) break;
 
@@ -399,8 +445,7 @@ static void *dsp_thread(void *arg)
 
         dsp_read_inputs();
         dsp_run_parallel();
-        dsp_write_alsa();
-        dsp_write_rtp();
+        dsp_write_outputs();
     }
 
     return NULL;
@@ -435,9 +480,16 @@ static void bridge_start(Device *d)
         if (d->mode != 2) {
             d->cap_src   = src_new(SRC_SINC_FASTEST, d->channels, &err);
             d->clk_accum = 0;
-            d->cap_pi  = (PiState){ .ratio=1.0, .kp=RATIO_KP, .ki=RATIO_KI, .min=RATIO_MIN, .max=RATIO_MAX };
-            if (d->is_ravenna)
-                atomic_store_explicit(&d->ravenna_ptp_locked, 1, memory_order_relaxed);
+            double ratio_hint = d->is_ravenna
+                ? atomic_load_explicit(&g_ravenna_ratio_hint, memory_order_relaxed)
+                : 1.0;
+            d->cap_pi  = (PiState){ .ratio=ratio_hint, .kp=RATIO_KP, .ki=RATIO_KI, .min=RATIO_MIN, .max=RATIO_MAX };
+            if (d->is_ravenna) {
+                /* 시작 시 ptp_locked=0 → 캡처 스레드가 prebuffer 후 언뮤트 */
+                atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_relaxed);
+                atomic_store_explicit(&d->ravenna_flush, 0, memory_order_relaxed);
+                d->ravenna_prebuf_count = 0;
+            }
         }
         if (d->mode != 1) {
             d->play_src = src_new(SRC_SINC_FASTEST, d->channels, &err);
@@ -785,9 +837,10 @@ static void load_config_prios(const char *path)
     if ((v = json_int(section, "periodFrames", 0)) > 0 && v <= MAX_PERIOD_FRAMES)
         g_period_frames = v;
     g_lvl_report = json_bool(section, "lvlReport", 1);
+    g_clk2_report = g_lvl_report;
 
-    fprintf(stderr, "[aoip_engine] config: dsp=%d alsa=%d ravenna=%d rtp=%d period=%d lvl=%d\n",
-            g_prio_dsp, g_prio_alsa, g_prio_ravenna, g_prio_rtp, g_period_frames, g_lvl_report);
+    fprintf(stderr, "[aoip_engine] config: dsp=%d alsa=%d ravenna=%d rtp=%d period=%d lvl=%d clk2=%d\n",
+            g_prio_dsp, g_prio_alsa, g_prio_ravenna, g_prio_rtp, g_period_frames, g_lvl_report, g_clk2_report);
 }
 
 /* ── main ────────────────────────────────────────────────────────── */

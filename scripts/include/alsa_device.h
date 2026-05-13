@@ -8,8 +8,8 @@
 #include "ring_buf.h"
 
 /* ── PI 드리프트 보정 상수 ──────────────────────────────────────── */
-#define RATIO_KP   0.00005
-#define RATIO_KI   0.000000005
+#define RATIO_KP   0.0002      /* 버퍼 오차 → ratio 비례 반응 */
+#define RATIO_KI   0.0000005   /* 버퍼 오차 적분 → 영구 drift 제거 (~3-5s 수렴) */
 #define RATIO_MIN  0.99980
 #define RATIO_MAX  1.00020
 
@@ -52,8 +52,10 @@ typedef struct {
     volatile int quit_play;
     int          thread_priority;
 
-    int          is_i2s; /* 1 = 이 장치의 I2S 크리스탈이 DSP 클럭 기준 */
-    int          clk_accum;       /* 마스터 클럭 누적 프레임 카운터 */
+    int          is_i2s;
+    int          clk_accum;
+    int          cap_underrun;   /* 연속 캡처 언더런 틱 카운터 */
+    int          play_overflow;  /* 연속 재생 오버플로우 틱 카운터 */
 
     /* ── Ravenna 직결 ───────────────────────────────────────────────── */
     int              is_ravenna;
@@ -82,6 +84,13 @@ typedef struct {
     /* PTP 잠금 상태: 0=EIO(뮤트), 1=정상
      * 캡처 스레드가 쓰고, DSP 스레드가 읽음 */
     _Atomic int      ravenna_ptp_locked;
+
+    /* PTP 언락 시 재생 스레드에 out_ring 플러시 요청:
+     * 캡처 스레드가 1로 설정 → 재생 스레드가 rb_reset 후 0으로 */
+    _Atomic int      ravenna_flush;
+
+    /* PTP 재잠금 후 클럭 안정화 prebuffer 누적 카운터 (캡처 스레드만 접근) */
+    int              ravenna_prebuf_count;
 } Device;
 
 /* ── 함수 선언 ───────────────────────────────────────────────────── */

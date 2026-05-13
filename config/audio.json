@@ -6,7 +6,8 @@
     "ravennaPrio": 88,
     "rtpPrio": 87,
     "periodFrames": 96,
-    "lvlReport": true
+    "lvlReport": false,
+    "startupDelay": 5000
   },
   "jack": {
     "device": "hw:aoip",
@@ -23,7 +24,7 @@
       "device": "hw:RAVENNA",
       "rate": 48000,
       "period": 48,
-      "periods": 3,
+      "periods": 8,
       "channels": 2,
       "aes67": true,
       "enabled": true

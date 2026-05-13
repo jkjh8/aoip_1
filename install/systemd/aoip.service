@@ -10,6 +10,8 @@ WorkingDirectory=/home/kjh/aoip_1
 ExecStart=/usr/bin/node --max-old-space-size=128 index.js
 Restart=on-failure
 RestartSec=5
+RuntimeDirectory=aoip
+RuntimeDirectoryPreserve=yes
 
 User=kjh
 Group=audio
@@ -18,6 +20,9 @@ Group=audio
 LimitRTPRIO=99
 LimitMEMLOCK=infinity
 LimitNICE=-20
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=50
+CPUAffinity=0 1
 
 # stdout/stderr to journald
 StandardOutput=journal

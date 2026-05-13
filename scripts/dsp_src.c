@@ -12,6 +12,20 @@ extern int   g_period_frames;
 extern float g_in_buf[MAX_CH][MAX_PERIOD_FRAMES];
 extern float g_out_buf[MAX_CH][MAX_PERIOD_FRAMES];
 
+/* ── PI 드리프트 보정 ────────────────────────────────────────────── */
+void pi_reset(PiState *p) {
+    p->ratio = 1.0; p->integ = 0.0; p->smooth = 0.0;
+}
+
+void pi_update(PiState *p, int avail, int target) {
+    double err  = ((double)target - avail) / (double)target;
+    p->smooth  += 0.1 * (err - p->smooth);
+    p->integ   += p->smooth;
+    p->ratio    = 1.0 + p->smooth * p->kp + p->integ * p->ki;
+    if (p->ratio < p->min) { p->ratio = p->min; p->integ = (p->min - 1.0 - p->smooth * p->kp) / p->ki; }
+    if (p->ratio > p->max) { p->ratio = p->max; p->integ = (p->max - 1.0 - p->smooth * p->kp) / p->ki; }
+}
+
 /*
  * src_convert — PI 보정 SRC 통합 함수
  *

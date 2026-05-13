@@ -10,10 +10,10 @@ import { setupSocket } from './socket/index.js';
 import logger from './lib/logger.js';
 import { getConfig, reloadConfig } from './lib/config.js';
 import { getDspChannelCounts, restoreRoutes, restoreDspState } from './lib/channels/index.js';
-import { startupDsp, registerAnalogBridge, waitForDspReady, addEngineRestartListener, sendToEngine } from './lib/dsp/index.js';
+import { startupDsp, registerAnalogBridge, waitForDspReady, addEngineRestartListener, sendToEngine, markStartupDone } from './lib/dsp/index.js';
 import { startupBridges, reregisterBridges } from './lib/bridges.js';
 import { startupRtp } from './lib/rtp/index.js';
-import { getDaemonStatus } from './lib/aes67daemon.js';
+import { getDaemonStatus, startDaemonLogForwarder } from './lib/aes67daemon.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const config    = getConfig();
@@ -51,11 +51,20 @@ setupSocket(httpServer, config);
 async function startup() {
   const dspCounts = getDspChannelCounts();
   await startupDsp(dspCounts, config);
+
+  const startupDelay = config.engine?.startupDelay ?? 0;
+  if (startupDelay > 0) {
+    logger.info('[startup] stabilization delay %dms before audio start...', startupDelay);
+    await new Promise(r => setTimeout(r, startupDelay));
+  }
+
   startupBridges();
   await startupRtp(config);
   await restoreRoutes();
   restoreDspState();
   getDaemonStatus();
+  startDaemonLogForwarder();
+  markStartupDone();
 
   addEngineRestartListener(async () => {
     logger.info('[startup] aoip_engine restarted — re-applying config...');

@@ -5,7 +5,8 @@
     "alsaPrio": 89,
     "ravennaPrio": 88,
     "rtpPrio": 87,
-    "periodFrames": 144
+    "periodFrames": 96,
+    "lvlReport": true
   },
   "jack": {
     "device": "hw:aoip",
@@ -48,7 +49,7 @@
       "channels": 2,
       "protocol": "rtp",
       "rtpEncoding": "MPA",
-      "bufferMs": 100,
+      "bufferMs": 500,
       "enabled": true,
       "sampleRate": 44100,
       "address": "0.0.0.0"

@@ -10,13 +10,13 @@
 /* ── PI 드리프트 보정 상수 ──────────────────────────────────────── */
 #define RATIO_KP   0.00005
 #define RATIO_KI   0.000000005
-#define RATIO_MIN  0.99990
-#define RATIO_MAX  1.00010
+#define RATIO_MIN  0.99980
+#define RATIO_MAX  1.00020
 
 /* ── PI 상태 ─────────────────────────────────────────────────────── */
 typedef struct {
     double ratio, integ, smooth;
-    int    prebuf_done;
+    double kp, ki, min, max;   /* 튜닝 상수 (초기화 시 설정, reset 후에도 유지) */
 } PiState;
 
 void pi_reset(PiState *p);
@@ -24,7 +24,6 @@ void pi_update(PiState *p, int avail, int target);
 
 /* ── ALSA 장치 ───────────────────────────────────────────────────── */
 #define DEV_TMP_FRAMES ((MAX_PERIOD_FRAMES + 8) * 2)
-#define UNDERRUN_FADE_PERIODS 4
 
 typedef struct {
     char  name[32];
@@ -53,10 +52,7 @@ typedef struct {
     volatile int quit_play;
     int          thread_priority;
 
-    float       *cap_fade_buf;  /* 마지막 정상 캡처 데이터 — 언더런 시 페이드 소스 */
-    int          cap_fade_cnt;
-
-    int          is_clock_master; /* 1 = 이 장치의 I2S 크리스탈이 DSP 클럭 기준 */
+    int          is_i2s; /* 1 = 이 장치의 I2S 크리스탈이 DSP 클럭 기준 */
     int          clk_accum;       /* 마스터 클럭 누적 프레임 카운터 */
 
     /* ── Ravenna 직결 ───────────────────────────────────────────────── */

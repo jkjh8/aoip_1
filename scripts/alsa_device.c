@@ -15,7 +15,6 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <math.h>
-#include <samplerate.h>
 #include <poll.h>
 #include <sys/eventfd.h>
 #include "include/alsa_device.h"
@@ -35,22 +34,16 @@ extern _Atomic int64_t g_ravenna_hts_ns;
 
 /* ── PI 드리프트 보정 ────────────────────────────────────────────── */
 void pi_reset(PiState *p) {
-    p->ratio = 1.0; p->integ = 0.0; p->smooth = 0.0; p->prebuf_done = 0;
+    p->ratio = 1.0; p->integ = 0.0; p->smooth = 0.0;
 }
 
 void pi_update(PiState *p, int avail, int target) {
-    double err  = ((double)avail - target) / (double)target;
+    double err  = ((double)target - avail) / (double)target;
     p->smooth  += 0.05 * (err - p->smooth);
     p->integ   += p->smooth;
-    p->ratio    = 1.0 + p->smooth * RATIO_KP + p->integ * RATIO_KI;
-    if (p->ratio < RATIO_MIN) {
-        p->ratio = RATIO_MIN;
-        p->integ = (RATIO_MIN - 1.0 - p->smooth * RATIO_KP) / RATIO_KI;
-    }
-    if (p->ratio > RATIO_MAX) {
-        p->ratio = RATIO_MAX;
-        p->integ = (RATIO_MAX - 1.0 - p->smooth * RATIO_KP) / RATIO_KI;
-    }
+    p->ratio    = 1.0 + p->smooth * p->kp + p->integ * p->ki;
+    if (p->ratio < p->min) { p->ratio = p->min; p->integ = (p->min - 1.0 - p->smooth * p->kp) / p->ki; }
+    if (p->ratio > p->max) { p->ratio = p->max; p->integ = (p->max - 1.0 - p->smooth * p->kp) / p->ki; }
 }
 
 /* ── ALSA 오픈 헬퍼 ──────────────────────────────────────────────── */
@@ -243,8 +236,8 @@ static void *alsa_capture_thread(void *arg)
             }
         }
 
-        /* hw:aoip (is_clock_master=1): DSP 틱 신호 + htstamp 갱신 */
-        if (d->is_clock_master) {
+        /* hw:aoip (is_i2s=1): DSP 틱 신호 + htstamp 갱신 */
+        if (d->is_i2s) {
             d->ravenna_accum += written;
             if (d->ravenna_accum >= g_period_frames && g_dsp_clock_fd >= 0) {
                 d->ravenna_accum -= g_period_frames;
@@ -295,10 +288,8 @@ static void *alsa_playback_thread(void *arg)
     }
     if (!pcm) return NULL;
 
-    float   *fbuf     = malloc((size_t)(d->period * d->channels) * sizeof(float));
-    float   *fade_buf = calloc((size_t)(d->period * d->channels), sizeof(float));
-    int32_t *ibuf     = malloc((size_t)(d->period * d->channels) * sizeof(int32_t));
-    int      fade_cnt = 0;
+    float   *fbuf = malloc((size_t)(d->period * d->channels) * sizeof(float));
+    int32_t *ibuf = malloc((size_t)(d->period * d->channels) * sizeof(int32_t));
     int play_err_count = 0;
 
     /* RAVENNA: 3 DSP period(≈6ms) — PTP 도메인이 동일하므로 과도한 버퍼 불필요.
@@ -310,16 +301,7 @@ static void *alsa_playback_thread(void *arg)
 
     while (!d->quit_play && !g_quit) {
         if (!rb_read(&d->out_ring, fbuf, d->period)) {
-            /* 언더런: 페이드아웃으로 클릭 방지 */
-            float scale = (fade_cnt < UNDERRUN_FADE_PERIODS)
-                          ? 1.0f - (float)(fade_cnt + 1) / (float)UNDERRUN_FADE_PERIODS
-                          : 0.0f;
-            int nn = d->period * d->channels;
-            for (int i = 0; i < nn; i++) fbuf[i] = fade_buf[i] * scale;
-            if (fade_cnt < UNDERRUN_FADE_PERIODS) fade_cnt++;
-        } else {
-            memcpy(fade_buf, fbuf, (size_t)(d->period * d->channels) * sizeof(float));
-            fade_cnt = 0;
+            memset(fbuf, 0, (size_t)(d->period * d->channels) * sizeof(float));
         }
         for (int i = 0; i < d->period * d->channels; i++) {
             float v = fbuf[i];
@@ -346,15 +328,12 @@ static void *alsa_playback_thread(void *arg)
 
         if (n == -EPIPE) {
             fprintf(stderr, "[aoip_engine] play %s: xrun (underrun)\n", d->name);
-            rb_reset(&d->out_ring); snd_pcm_prepare(pcm);
-            while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < prebuf)
-                usleep(1000);
+            rb_reset(&d->out_ring);
+            snd_pcm_recover(pcm, (int)n, 1);
         } else if (n == -ESTRPIPE) {
             rb_reset(&d->out_ring);
             while (!g_quit && snd_pcm_resume(pcm) == -EAGAIN) usleep(10000);
             snd_pcm_prepare(pcm);
-            while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < prebuf)
-                usleep(1000);
         } else if (n == -EIO) {
             rb_reset(&d->out_ring);
             if (d->is_ravenna) {
@@ -382,9 +361,6 @@ static void *alsa_playback_thread(void *arg)
                             play_err_count = 0;
                             snd_pcm_prepare(pcm);
                             rb_reset(&d->out_ring);
-                            while (!d->quit_play && !g_quit &&
-                                   rb_avail(&d->out_ring) < prebuf)
-                                usleep(1000);
                             break;
                         } else {
                             snd_pcm_close(pcm); pcm = NULL;
@@ -414,8 +390,6 @@ static void *alsa_playback_thread(void *arg)
                                 d->rate, hw_period, d->nperiods, d->channels);
                 if (pcm) {
                     play_err_count = 0;
-                    while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < prebuf)
-                        usleep(1000);
                     break;
                 }
             }
@@ -424,7 +398,7 @@ static void *alsa_playback_thread(void *arg)
         }
     }
 
-    free(fbuf); free(fade_buf); free(ibuf);
+    free(fbuf); free(ibuf);
     if (pcm) snd_pcm_close(pcm);
     return NULL;
 }
@@ -433,33 +407,15 @@ static void *alsa_playback_thread(void *arg)
 void device_start(Device *d)
 {
     d->enabled = 1;
-    int err;
     d->quit_cap = d->quit_play = 0;
 
     if (d->mode != 2) {  /* capture */
         rb_init(&d->in_ring, RING_FRAMES, d->channels);
         d->ravenna_accum = 0;
-        if (d->is_clock_master) {
-            /* hw:aoip: DSP 클럭 마스터 — direct ring, SRC 불필요 */
-        } else {
-            /* RAVENNA 및 I2S 기타: SRC 초기화 */
-            d->cap_src = src_new(SRC_SINC_FASTEST, d->channels, &err);
-            pi_reset(&d->cap_pi);
-            d->cap_fade_buf = calloc((size_t)(g_period_frames * d->channels), sizeof(float));
-            d->cap_fade_cnt = 0;
-            d->clk_accum   = 0;
-            if (d->is_ravenna)
-                atomic_store_explicit(&d->ravenna_ptp_locked, 1, memory_order_relaxed);
-        }
         pthread_create(&d->cap_tid, NULL, alsa_capture_thread, d);
     }
     if (d->mode != 1) {  /* playback */
         rb_init(&d->out_ring, RING_FRAMES, d->channels);
-        if (!d->is_clock_master) {
-            /* RAVENNA 및 I2S 기타: SRC 초기화 */
-            d->play_src = src_new(SRC_SINC_FASTEST, d->channels, &err);
-            pi_reset(&d->play_pi);
-        }
         pthread_create(&d->play_tid, NULL, alsa_playback_thread, d);
     }
     printf("bridge:%s:ready\n", d->name);
@@ -478,15 +434,12 @@ void device_stop(Device *d)
     if (d->mode != 2) {
         d->quit_cap = 1;
         pthread_join(d->cap_tid, NULL);
-        if (d->cap_src)      { src_delete(d->cap_src); d->cap_src = NULL; }
-        if (d->in_ring.buf)  { free(d->in_ring.buf);   d->in_ring.buf = NULL; }
-        if (d->cap_fade_buf) { free(d->cap_fade_buf);  d->cap_fade_buf = NULL; }
+        if (d->in_ring.buf)  { free(d->in_ring.buf);  d->in_ring.buf  = NULL; }
     }
     if (d->mode != 1) {
         d->quit_play = 1;
         pthread_join(d->play_tid, NULL);
-        if (d->play_src)     { src_delete(d->play_src); d->play_src = NULL; }
-        if (d->out_ring.buf) { free(d->out_ring.buf);   d->out_ring.buf = NULL; }
+        if (d->out_ring.buf) { free(d->out_ring.buf); d->out_ring.buf = NULL; }
     }
     printf("bridge:%s:stopped\n", d->name);
     fflush(stdout);

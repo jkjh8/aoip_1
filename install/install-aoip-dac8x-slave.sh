@@ -139,27 +139,38 @@ if count == 0:
     print("ERROR: GPIO 블록을 찾지 못했습니다.")
     sys.exit(1)
 
-# dai_fmt: codec slave(master) → codec master(slave) 변경
-# 신 커널(5.15+): CBC_CFC → CBP_CFP
-# 구 커널:        CBS_CFS → CBP_CFP  (CBM_CFM은 이미 codec master이므로 그대로)
-replaced = False
-for old_fmt, new_fmt in [
-    ('SND_SOC_DAIFMT_CBC_CFC', 'SND_SOC_DAIFMT_CBP_CFP'),
-    ('SND_SOC_DAIFMT_CBS_CFS', 'SND_SOC_DAIFMT_CBP_CFP'),
-]:
-    if old_fmt in src:
-        src = src.replace(old_fmt, new_fmt)
-        print(f"dai_fmt: {old_fmt} → {new_fmt}")
-        replaced = True
-if not replaced:
-    print("WARN: dai_fmt CBC_CFC/CBS_CFS 를 찾지 못했습니다. 소스를 확인하세요.")
-
 # card_name 및 DAI 이름
 src = src.replace('.card_name = "snd_rpi_hifiberry_dac8x"', '.card_name = "aoip"')
 src = src.replace('.name           = "HifiBerry DAC8x"',    '.name           = "AoIP 8"')
 src = src.replace('.stream_name    = "HifiBerry DAC8x HiFi"', '.stream_name    = "AoIP 8 HiFi"')
 
-# of_match 테이블
+# 슬레이브용 dai_link + drvdata 구조체를 of_match 테이블 바로 앞에 삽입
+slave_structs = (
+    '\n/* AoIP slave mode: external device provides BCK/LRCLK */\n'
+    'static struct snd_soc_dai_link snd_aoip_slave_dai[] = {\n'
+    '\t{\n'
+    '\t\t.name\t\t= "AoIP 8",\n'
+    '\t\t.stream_name\t= "AoIP 8 HiFi",\n'
+    '\t\t.dai_fmt\t= SND_SOC_DAIFMT_I2S |\n'
+    '\t\t\t\t  SND_SOC_DAIFMT_NB_NF |\n'
+    '\t\t\t\t  SND_SOC_DAIFMT_CBP_CFP,\n'
+    '\t\t.init\t\t= hifiberry_dac8x_init,\n'
+    '\t\tSND_SOC_DAILINK_REG(hifiberry_dac8x),\n'
+    '\t},\n'
+    '};\n'
+    '\nstatic struct snd_rpi_simple_drvdata drvdata_aoip_slave = {\n'
+    '\t.card_name = "aoip",\n'
+    '\t.dai = snd_aoip_slave_dai,\n'
+    '\t.fixed_bclk_ratio = 64,\n'
+    '};\n\n'
+)
+idx = src.find('static const struct of_device_id snd_rpi_simple_of_match')
+if idx == -1:
+    print("ERROR: of_device_id 위치를 찾지 못했습니다.")
+    sys.exit(1)
+src = src[:idx] + slave_structs + src[idx:]
+
+# of_match 테이블: 마스터(aoip-dac8x)와 슬레이브(aoip-dac8x-slave) 두 엔트리
 old_match = re.compile(
     r'static const struct of_device_id snd_rpi_simple_of_match\[\]\s*=\s*\{.*?\{\},\s*\};',
     re.DOTALL
@@ -168,6 +179,8 @@ new_match = (
     'static const struct of_device_id snd_rpi_simple_of_match[] = {\n'
     '\t{ .compatible = "aoip,aoip-dac8x",\n'
     '\t\t.data = (void *) &drvdata_hifiberry_dac8x },\n'
+    '\t{ .compatible = "aoip,aoip-dac8x-slave",\n'
+    '\t\t.data = (void *) &drvdata_aoip_slave },\n'
     '\t{},\n'
     '};\n'
 )

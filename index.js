@@ -8,7 +8,7 @@ import cookieParser from 'cookie-parser';
 import apiRoutes from './routes/index.js';
 import { setupSocket } from './socket/index.js';
 import logger from './lib/logger.js';
-import { getConfig } from './lib/config.js';
+import { getConfig, reloadConfig } from './lib/config.js';
 import { getDspChannelCounts, restoreRoutes, restoreDspState } from './lib/channels/index.js';
 import { startupDsp, registerAnalogBridge, waitForDspReady, addEngineRestartListener, sendToEngine } from './lib/dsp/index.js';
 import { startupBridges, reregisterBridges } from './lib/bridges.js';
@@ -61,8 +61,9 @@ async function startup() {
     logger.info('[startup] aoip_engine restarted — re-applying config...');
     try { await waitForDspReady('_engine'); }
     catch (e) { logger.warn('[startup] restart ready timeout: %s', e.message); return; }
-    if (config.engine?.periodFrames != null) {
-      const pf = Math.trunc(config.engine.periodFrames)
+    const freshConfig = reloadConfig();
+    if (freshConfig.engine?.periodFrames != null) {
+      const pf = Math.trunc(freshConfig.engine.periodFrames)
       logger.info('[startup] Setting engine period_frames to %d (restart)', pf)
       sendToEngine(`set period ${pf}`)
     }

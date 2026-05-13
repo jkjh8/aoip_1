@@ -162,7 +162,33 @@ src = src.replace(
     '.stream_name    = "AoIP 8 HiFi"'
 )
 
-# of_match 테이블을 aoip-dac8x 항목만 남기도록 교체
+# 슬레이브용 dai_link + drvdata 구조체를 of_match 테이블 바로 앞에 삽입
+slave_structs = (
+    '\n/* AoIP slave mode: external device provides BCK/LRCLK */\n'
+    'static struct snd_soc_dai_link snd_aoip_slave_dai[] = {\n'
+    '\t{\n'
+    '\t\t.name\t\t= "AoIP 8",\n'
+    '\t\t.stream_name\t= "AoIP 8 HiFi",\n'
+    '\t\t.dai_fmt\t= SND_SOC_DAIFMT_I2S |\n'
+    '\t\t\t\t  SND_SOC_DAIFMT_NB_NF |\n'
+    '\t\t\t\t  SND_SOC_DAIFMT_CBP_CFP,\n'
+    '\t\t.init\t\t= hifiberry_dac8x_init,\n'
+    '\t\tSND_SOC_DAILINK_REG(hifiberry_dac8x),\n'
+    '\t},\n'
+    '};\n'
+    '\nstatic struct snd_rpi_simple_drvdata drvdata_aoip_slave = {\n'
+    '\t.card_name = "aoip",\n'
+    '\t.dai = snd_aoip_slave_dai,\n'
+    '\t.fixed_bclk_ratio = 64,\n'
+    '};\n\n'
+)
+idx = src.find('static const struct of_device_id snd_rpi_simple_of_match')
+if idx == -1:
+    print("ERROR: of_device_id 위치를 찾지 못했습니다.")
+    sys.exit(1)
+src = src[:idx] + slave_structs + src[idx:]
+
+# of_match 테이블: 마스터(aoip-dac8x)와 슬레이브(aoip-dac8x-slave) 두 엔트리
 old_match = re.compile(
     r'static const struct of_device_id snd_rpi_simple_of_match\[\]\s*=\s*\{.*?\{\},\s*\};',
     re.DOTALL
@@ -171,6 +197,8 @@ new_match = (
     'static const struct of_device_id snd_rpi_simple_of_match[] = {\n'
     '\t{ .compatible = "aoip,aoip-dac8x",\n'
     '\t\t.data = (void *) &drvdata_hifiberry_dac8x },\n'
+    '\t{ .compatible = "aoip,aoip-dac8x-slave",\n'
+    '\t\t.data = (void *) &drvdata_aoip_slave },\n'
     '\t{},\n'
     '};\n'
 )
@@ -318,8 +346,8 @@ for old in "hifiberry-dac8x" "hifiberry-studio-dac8x" "hifiberry-adc8x" "i2s-dum
     fi
 done
 
-# aoip-dac8x가 없으면 [all] 섹션에 추가
-if ! grep -q "dtoverlay=aoip-dac8x" "${CONFIG_FILE}"; then
+# aoip-dac8x가 없으면 [all] 섹션에 추가 (aoip-dac8x-slave 와 구분)
+if ! grep -qE "dtoverlay=aoip-dac8x([^-]|$)" "${CONFIG_FILE}"; then
     if grep -q "^\[all\]" "${CONFIG_FILE}"; then
         sed -i '/^\[all\]/a dtoverlay=aoip-dac8x' "${CONFIG_FILE}"
     else

@@ -22,15 +22,14 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
 
-#include "include/shm_ring.h"
+#include "include/engine_constants.h"
+#include "include/ring_buf.h"
 #include "include/rtp_recv.h"
 
 /* ── constants ───────────────────────────────────────── */
@@ -60,8 +59,8 @@ struct RtpRecvCtx {
     int       sock_fd;   /* Unix socket to Node.js (stats output) */
     int       udp_sock;
 
-    /* SHM ring (owned by engine) */
-    ShmRing  *ring;
+    /* ring buffer (owned by engine) */
+    RingBuf  *ring;
 
     /* state */
     volatile int quit;
@@ -83,8 +82,8 @@ struct RtpRecvCtx {
     int16_t    alaw_table[256];
 
     /* decode/resample buffers */
-    float rs_out[RESAMPLE_OUT_MAX * SHM_MAX_CH];
-    float dec_buf[DECODE_BUF_MAX  * SHM_MAX_CH];
+    float rs_out[RESAMPLE_OUT_MAX * MAX_CH];
+    float dec_buf[DECODE_BUF_MAX  * MAX_CH];
 
     /* packet queue */
     RtpPkt         *pkts;
@@ -164,26 +163,18 @@ static void build_g711_tables(RtpRecvCtx *ctx)
     }
 }
 
-/* ── write F32 frames to ShmRing ─────────────────────── */
-static void shm_write(RtpRecvCtx *ctx, const float *buf, int frames)
+/* ── write F32 frames to ring ────────────────────────── */
+static void ring_write(RtpRecvCtx *ctx, const float *buf, int frames)
 {
     if (!ctx->ring || frames <= 0) return;
-    for (int f = 0; f < frames; f++) {
-        uint32_t wp  = atomic_load_explicit(&ctx->ring->wp, memory_order_relaxed);
-        uint32_t rp  = atomic_load_explicit(&ctx->ring->rp, memory_order_acquire);
-        if ((int32_t)(wp - rp) >= SHM_RING_FRAMES - 1) break;
-        uint32_t idx = wp % (uint32_t)SHM_RING_FRAMES;
-        for (int c = 0; c < ctx->ch && c < SHM_MAX_CH; c++)
-            ctx->ring->buf[idx * SHM_MAX_CH + c] = buf[f * ctx->ch + c];
-        atomic_store_explicit(&ctx->ring->wp, wp + 1u, memory_order_release);
-    }
+    rb_write(ctx->ring, buf, frames);
 }
 
 /* ── resample + write ────────────────────────────────── */
 static void resample_and_write(RtpRecvCtx *ctx, const float *in, int in_frames)
 {
     if (!ctx->src_state) {
-        shm_write(ctx, in, in_frames);
+        ring_write(ctx, in, in_frames);
         return;
     }
     SRC_DATA sd = {
@@ -195,7 +186,7 @@ static void resample_and_write(RtpRecvCtx *ctx, const float *in, int in_frames)
         .end_of_input  = 0,
     };
     src_process(ctx->src_state, &sd);
-    shm_write(ctx, ctx->rs_out, (int)sd.output_frames_gen);
+    ring_write(ctx, ctx->rs_out, (int)sd.output_frames_gen);
 }
 
 /* ── setup resampler ─────────────────────────────────── */
@@ -499,7 +490,7 @@ static void *stats_thread(void *arg)
 }
 
 /* ── public API ──────────────────────────────────────── */
-RtpRecvCtx *rtp_recv_start(ShmRing *ring, const char *key, const char *sock_path, int prio)
+RtpRecvCtx *rtp_recv_start(RingBuf *ring, const char *key, const char *sock_path, int prio)
 {
     int sfd = rr_unix_connect(sock_path, 50, 200);
     if (sfd < 0) {
@@ -529,7 +520,7 @@ RtpRecvCtx *rtp_recv_start(ShmRing *ring, const char *key, const char *sock_path
     rr_read_line(sfd, cfg, sizeof(cfg));
     ctx->ch      = rr_cfg_int(cfg, "channels", 2);
     if (ctx->ch < 1) ctx->ch = 1;
-    if (ctx->ch > SHM_MAX_CH) ctx->ch = SHM_MAX_CH;
+    if (ctx->ch > MAX_CH) ctx->ch = MAX_CH;
     ctx->buf_ms  = rr_cfg_int(cfg, "bufMs", 100);
     if (ctx->buf_ms < 10)   ctx->buf_ms = 10;
     if (ctx->buf_ms > 2000) ctx->buf_ms = 2000;
@@ -539,16 +530,6 @@ RtpRecvCtx *rtp_recv_start(ShmRing *ring, const char *key, const char *sock_path
     rr_cfg_str(cfg, "proto", proto_str, sizeof(proto_str), "rtp");
     ctx->proto = (strcmp(proto_str, "raw") == 0) ? PROTO_RAW : PROTO_RTP;
     rr_cfg_str(cfg, "addr", ctx->bind_addr, sizeof(ctx->bind_addr), "0.0.0.0");
-
-    /* Jitter buffer: pre-fill wp */
-    if (ctx->buf_ms > 0) {
-        int pre     = (int)((long long)ctx->buf_ms * OUT_RATE / 1000);
-        int max_pre = SHM_RING_FRAMES * 3 / 4;
-        if (pre > max_pre) pre = max_pre;
-        uint32_t wp0 = atomic_load_explicit(&ring->wp, memory_order_relaxed);
-        atomic_store_explicit(&ring->wp, wp0 + (uint32_t)pre, memory_order_release);
-        fprintf(stderr, "[rtp_recv:%s] jitter buffer: %dms (%d frames)\n", key, ctx->buf_ms, pre);
-    }
 
     build_g711_tables(ctx);
     ctx->hip = hip_decode_init();

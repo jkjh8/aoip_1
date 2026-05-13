@@ -22,17 +22,14 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <math.h>
-#include <setjmp.h>
 
-#include "include/shm_ring.h"
+#include "include/ring_buf.h"
 #include "include/rtp_send.h"
 
 /* ── constants ───────────────────────────────────────── */
@@ -65,8 +62,8 @@ struct RtpSendCtx {
     int     sock_fd;   /* Unix socket to Node.js (bidirectional) */
     int     udp_sock;
 
-    /* SHM ring (owned by engine) */
-    ShmRing *ring;
+    /* ring buffer (owned by engine) */
+    RingBuf *ring;
 
     /* targets */
     RsTarget        targets[RS_MAX_TARGETS];
@@ -106,10 +103,6 @@ struct RtpSendCtx {
     /* threads */
     pthread_t reader_tid, stdin_tid, stats_tid;
 };
-
-/* ── thread-local SIGBUS recovery ────────────────────── */
-static _Thread_local sigjmp_buf  tl_bus_jmp;
-static _Thread_local int         tl_bus_armed = 0;
 
 /* ── helpers ─────────────────────────────────────────── */
 static int rs_unix_connect(const char *path, int retries, int ms)
@@ -343,29 +336,11 @@ static void *shm_reader_thread(void *arg)
 
         if (!ctx->ring) { usleep(10000); continue; }
 
-        if (sigsetjmp(tl_bus_jmp, 1)) {
-            fprintf(stderr, "[rtp_send:%s] SIGBUS on SHM access\n", ctx->key);
-            usleep(500000);
-            continue;
-        }
-        tl_bus_armed = 1;
-
-        uint32_t wp = atomic_load_explicit(&ctx->ring->wp, memory_order_acquire);
-        uint32_t rp = atomic_load_explicit(&ctx->ring->rp, memory_order_relaxed);
-
-        if ((int32_t)(wp - rp) < RS_PERIOD_FRAMES) {
-            tl_bus_armed = 0;
+        if (rb_avail(ctx->ring) < RS_PERIOD_FRAMES) {
             usleep(1000);
             continue;
         }
-
-        for (int f = 0; f < RS_PERIOD_FRAMES; f++) {
-            uint32_t idx = (rp + (uint32_t)f) % SHM_RING_FRAMES;
-            for (int c = 0; c < ctx->ch && c < SHM_MAX_CH; c++)
-                in_buf[f * ctx->ch + c] = ctx->ring->buf[idx * SHM_MAX_CH + c];
-        }
-        atomic_store_explicit(&ctx->ring->rp, rp + RS_PERIOD_FRAMES, memory_order_release);
-        tl_bus_armed = 0;
+        rb_read(ctx->ring, in_buf, RS_PERIOD_FRAMES);
 
         float *send_buf;
         int    send_frames;
@@ -489,7 +464,7 @@ static void *rs_stdin_thread(void *arg)
 }
 
 /* ── public API ──────────────────────────────────────── */
-RtpSendCtx *rtp_send_start(ShmRing *ring, const char *key, const char *sock_path, int prio)
+RtpSendCtx *rtp_send_start(RingBuf *ring, const char *key, const char *sock_path, int prio)
 {
     int sfd = rs_unix_connect(sock_path, 50, 200);
     if (sfd < 0) {

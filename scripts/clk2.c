@@ -22,7 +22,7 @@ extern int g_period_frames;
 /* 안정화 판정: 연속 STABLE_COUNT회 drift 변화 < STABLE_PPM → 30s 주기로 전환 */
 #define STABLE_PPM   2.0
 #define STABLE_COUNT 5
-#define FAST_INTERVAL_S  1LL
+#define FAST_INTERVAL_S 30LL
 #define SLOW_INTERVAL_S 30LL
 
 /* hw:aoip ↔ RAVENNA 클럭 drift 보고

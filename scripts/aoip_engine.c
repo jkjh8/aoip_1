@@ -34,6 +34,7 @@
 #include "include/shm_ring.h"
 #include "include/ring_buf.h"
 #include "include/alsa_device.h"
+#include "include/dsp_neon.h"
 #include "include/rtp_recv.h"
 #include "include/rtp_send.h"
 #include "include/clk2.h"
@@ -166,10 +167,16 @@ static void apply_cmd(const Cmd *cmd)
 }
 
 /* ── DSP 처리 함수 (채널 슬라이스 단위, 워커/마스터 공용) ─────────── */
-float g_in_buf[MAX_CH][MAX_PERIOD_FRAMES];
-float g_out_buf[MAX_CH][MAX_PERIOD_FRAMES];
+/* I2S 경로: SlotRing 슬롯을 직접 가리킴 (zero-copy).
+ * RAVENNA/RTP 경로: 아래 정적 버퍼를 가리킴. */
+float *g_in_ptr[MAX_CH];
+float *g_out_ptr[MAX_CH];
 
-static void process_channel_dsp(Channel *chs, float bufs[][MAX_PERIOD_FRAMES],
+/* RAVENNA/RTP 폴백 정적 버퍼 (SRC 경로, I2S는 사용 안 함) */
+static float g_in_buf_static [MAX_CH][MAX_PERIOD_FRAMES];
+static float g_out_buf_static[MAX_CH][MAX_PERIOD_FRAMES];
+
+static void process_channel_dsp(Channel *chs, float * const *bufs,
                                 volatile float *levels,
                                 int ch_start, int ch_count, int n_ch)
 {
@@ -177,31 +184,25 @@ static void process_channel_dsp(Channel *chs, float bufs[][MAX_PERIOD_FRAMES],
         Channel *c   = &chs[ch];
         float   *buf = bufs[ch];
         if (g_bypass_all_dsp || c->bypass_dsp) {
-            /* bypass: gain 적용 없이 레벨만 측정 */
-            float peak = 0.0f;
-            for (int i = 0; i < g_period_frames; i++) {
-                float ap = fabsf(buf[i]);
-                if (ap > peak) peak = ap;
-            }
+            float peak = level_peak_neon(buf, g_period_frames);
             if (peak > levels[ch]) levels[ch] = peak;
             continue;
         }
         if (c->muted) {
-            memset(buf, 0, g_period_frames * sizeof(float));
+            memset(buf, 0, (size_t)g_period_frames * sizeof(float));
             c->gain_cur = c->gain_tgt;
             levels[ch] = 0.0f;
             continue;
         }
+        /* gain ramp: cur는 샘플마다 변하므로 스칼라 유지, peak는 NEON */
         float cur  = c->gain_cur;
         float step = (c->gain_tgt - cur) / (float)g_period_frames;
-        float peak = 0.0f;
         for (int i = 0; i < g_period_frames; i++) {
             cur += step;
             buf[i] *= cur;
-            float ap = fabsf(buf[i]);
-            if (ap > peak) peak = ap;
         }
         c->gain_cur = c->gain_tgt;
+        float peak = level_peak_neon(buf, g_period_frames);
         if (peak > levels[ch]) levels[ch] = peak;
     }
 }
@@ -209,12 +210,11 @@ static void process_channel_dsp(Channel *chs, float bufs[][MAX_PERIOD_FRAMES],
 static void process_routing(int out_start, int out_count, int n_in, int n_out)
 {
     for (int out = out_start; out < out_start + out_count && out < n_out; out++) {
-        memset(g_out_buf[out], 0, g_period_frames * sizeof(float));
+        memset(g_out_ptr[out], 0, (size_t)g_period_frames * sizeof(float));
         for (int in = 0; in < n_in; in++) {
             float gain = g_route[out][in];
             if (gain == 0.0f) continue;
-            for (int f = 0; f < g_period_frames; f++)
-                g_out_buf[out][f] += g_in_buf[in][f] * gain;
+            route_add_neon(g_out_ptr[out], g_in_ptr[in], gain, g_period_frames);
         }
     }
 }
@@ -240,11 +240,11 @@ static void *dsp_worker_thread(void *arg)
             pthread_barrier_wait(&g_barrier_work_done);
             break;
         }
-        process_channel_dsp(g_in_ch,  g_in_buf,  g_in_level,  w->ch_start, w->ch_count, w->n_in);
+        process_channel_dsp(g_in_ch,  g_in_ptr,  g_in_level,  w->ch_start, w->ch_count, w->n_in);
         pthread_barrier_wait(&g_barrier_input_done);
         process_routing(w->ch_start, w->ch_count, w->n_in, w->n_out);
         pthread_barrier_wait(&g_barrier_routing_done);
-        process_channel_dsp(g_out_ch, g_out_buf, g_out_level, w->ch_start, w->ch_count, w->n_out);
+        process_channel_dsp(g_out_ch, g_out_ptr, g_out_level, w->ch_start, w->ch_count, w->n_out);
         pthread_barrier_wait(&g_barrier_work_done);
     }
     return NULL;
@@ -268,26 +268,29 @@ static int dsp_wait_tick(long long period_ns)
 
 /* ── ALSA 입력 읽기 ──────────────────────────────────────────────── */
 /* ── ALSA 장치 단일 읽기 (클럭 마스터 직접 읽기 / SRC 경로) ─────── */
-/* I2S 클럭 마스터: SRC 없이 in_ring 직접 읽기 */
+/* I2S 클럭 마스터: SlotRing 포인터 직접 획득 (zero-copy) */
 static void read_alsa_master(Device *d)
 {
-    if (rb_avail(&d->in_ring) >= g_period_frames) {
-        rb_read(&d->in_ring, d->tmp_cap_in, g_period_frames);
+    float *rptrs[MAX_CH];
+    if (slot_ring_acquire_read(&d->i2s_in_ring, rptrs)) {
+        d->i2s_in_acquired = 1;
         for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
-            for (int f = 0; f < g_period_frames; f++)
-                g_in_buf[d->ch_start+c][f] = d->tmp_cap_in[f*d->channels+c];
+            g_in_ptr[d->ch_start+c] = rptrs[c];
         if (d->cap_underrun > 0) {
             fprintf(stderr, "[aoip_engine] alsa '%s': capture recovered after %d ticks\n",
                     d->name, d->cap_underrun);
             d->cap_underrun = 0;
         }
     } else {
+        d->i2s_in_acquired = 0;
         d->cap_underrun++;
         if (d->cap_underrun == 10 || (d->cap_underrun > 10 && d->cap_underrun % 500 == 0))
             fprintf(stderr, "[aoip_engine] alsa '%s': capture underrun %d ticks (avail=%d)\n",
-                    d->name, d->cap_underrun, rb_avail(&d->in_ring));
-        for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
-            memset(g_in_buf[d->ch_start+c], 0, g_period_frames*sizeof(float));
+                    d->name, d->cap_underrun, slot_ring_avail(&d->i2s_in_ring));
+        for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++) {
+            g_in_ptr[d->ch_start+c] = g_in_buf_static[d->ch_start+c];
+            memset(g_in_ptr[d->ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
+        }
     }
 }
 
@@ -295,9 +298,11 @@ static void read_alsa_master(Device *d)
 static void read_alsa_device(Device *d)
 {
     if (d->is_ravenna) {
+        for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
+            g_in_ptr[d->ch_start+c] = g_in_buf_static[d->ch_start+c];
         if (!atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_acquire)) {
             for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
-                memset(g_in_buf[d->ch_start+c], 0, g_period_frames*sizeof(float));
+                memset(g_in_ptr[d->ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
             return;
         }
         ring_capture_src(d->cap_src, &d->cap_pi, &d->in_ring,
@@ -308,18 +313,47 @@ static void read_alsa_device(Device *d)
     }
 }
 
-/* ── 전체 입력 읽기 ──────────────────────────────────────────────── */
+/* ── 전체 입력 읽기 + I2S 출력 슬롯 미리 획득 ───────────────────── */
 static void dsp_read_inputs(void)
 {
+    /* 먼저 전체 채널 포인터를 정적 버퍼로 초기화 (장치가 커버하지 않는 채널 폴백) */
+    for (int ch = 0; ch < g_n_in; ch++)
+        g_in_ptr[ch] = g_in_buf_static[ch];
+    for (int ch = 0; ch < g_n_out; ch++)
+        g_out_ptr[ch] = g_out_buf_static[ch];
+
     for (int di = 0; di < g_n_dev; di++) {
         Device *d = &g_dev[di];
-        if (d->enabled && d->mode != 2) read_alsa_device(d);
+        if (!d->enabled) continue;
+        /* I2S 출력 슬롯 미리 획득: DSP가 직접 슬롯에 쓰기 위해 필요 */
+        if (d->is_i2s && d->mode != 1) {
+            float *wptrs[MAX_CH];
+            if (slot_ring_acquire_write(&d->i2s_out_ring, wptrs)) {
+                for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
+                    g_out_ptr[d->ch_start+c] = wptrs[c];
+                d->i2s_out_acquired = 1;
+                if (d->play_overflow > 0) {
+                    fprintf(stderr, "[aoip_engine] alsa '%s': playback recovered after %d ticks\n",
+                            d->name, d->play_overflow);
+                    d->play_overflow = 0;
+                }
+            } else {
+                d->i2s_out_acquired = 0;
+                d->play_overflow++;
+                if (d->play_overflow == 10 || (d->play_overflow > 10 && d->play_overflow % 500 == 0))
+                    fprintf(stderr, "[aoip_engine] alsa '%s': playback overflow %d ticks (free=%d)\n",
+                            d->name, d->play_overflow, slot_ring_free_slots(&d->i2s_out_ring));
+            }
+        }
+        if (d->mode != 2) read_alsa_device(d);
     }
     for (int ri = 0; ri < g_n_rtp_in; ri++) {
         RtpStream *r = &g_rtp_in[ri];
+        for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
+            g_in_ptr[r->ch_start+c] = g_in_buf_static[r->ch_start+c];
         if (!r->enabled || !r->ring.buf || !r->rtp_src) {
             for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
-                memset(g_in_buf[r->ch_start+c], 0, g_period_frames*sizeof(float));
+                memset(g_in_ptr[r->ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
             continue;
         }
         /* 프리버퍼링: 실데이터가 RTP_FILL_TARGET 이상 쌓일 때까지 zeros 출력 */
@@ -330,7 +364,7 @@ static void dsp_read_inputs(void)
                         r->name, rb_avail(&r->ring));
             } else {
                 for (int c = 0; c < r->channels && (r->ch_start+c) < MAX_CH; c++)
-                    memset(g_in_buf[r->ch_start+c], 0, g_period_frames*sizeof(float));
+                    memset(g_in_ptr[r->ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
                 continue;
             }
         }
@@ -357,11 +391,11 @@ static void dsp_run_parallel(void)
         g_worker_arg[w].n_out = g_n_out;
     }
     pthread_barrier_wait(&g_barrier_work_start);
-    process_channel_dsp(g_in_ch,  g_in_buf,  g_in_level,  0, DSP_WORKER_CH, g_n_in);
+    process_channel_dsp(g_in_ch,  g_in_ptr,  g_in_level,  0, DSP_WORKER_CH, g_n_in);
     pthread_barrier_wait(&g_barrier_input_done);
     process_routing(0, DSP_WORKER_CH, g_n_in, g_n_out);
     pthread_barrier_wait(&g_barrier_routing_done);
-    process_channel_dsp(g_out_ch, g_out_buf, g_out_level, 0, DSP_WORKER_CH, g_n_out);
+    process_channel_dsp(g_out_ch, g_out_ptr, g_out_level, 0, DSP_WORKER_CH, g_n_out);
     pthread_barrier_wait(&g_barrier_work_done);
 }
 
@@ -370,7 +404,7 @@ static void interleave_buf(int ch_start, int channels, float *tmp)
 {
     for (int f = 0; f < g_period_frames; f++)
         for (int c = 0; c < channels && (ch_start+c) < MAX_CH; c++)
-            tmp[f * channels + c] = g_out_buf[ch_start+c][f];
+            tmp[f * channels + c] = g_out_ptr[ch_start+c][f];
 }
 
 static void dsp_write_outputs(void)
@@ -379,26 +413,20 @@ static void dsp_write_outputs(void)
 
     for (int di = 0; di < g_n_dev; di++) {
         Device *d = &g_dev[di];
-        if (!d->enabled || d->mode == 1) continue;
-
-        interleave_buf(d->ch_start, d->channels, d->tmp_play_in);
+        if (!d->enabled) continue;
 
         if (d->is_i2s) {
-            if (rb_free(&d->out_ring) >= g_period_frames) {
-                rb_write(&d->out_ring, d->tmp_play_in, g_period_frames);
-                if (d->play_overflow > 0) {
-                    fprintf(stderr, "[aoip_engine] alsa '%s': playback recovered after %d ticks\n",
-                            d->name, d->play_overflow);
-                    d->play_overflow = 0;
-                }
-            } else {
-                d->play_overflow++;
-                if (d->play_overflow == 10 || (d->play_overflow > 10 && d->play_overflow % 500 == 0))
-                    fprintf(stderr, "[aoip_engine] alsa '%s': playback overflow %d ticks (free=%d)\n",
-                            d->name, d->play_overflow, rb_free(&d->out_ring));
-            }
+            /* zero-copy: 입력 슬롯 release.
+             * 출력 슬롯은 dsp_read_inputs()에서 acquire_write()가 성공한 경우만 commit.
+             * g_out_ptr[ch]가 슬롯을 가리키면 commit, 정적 버퍼면 skip. */
+            if (d->mode != 2 && d->i2s_in_acquired)
+                slot_ring_consume_read(&d->i2s_in_ring);
+            if (d->mode != 1 && d->i2s_out_acquired)
+                slot_ring_commit_write(&d->i2s_out_ring);
             continue;
         }
+
+        if (d->mode == 1) continue;  /* capture-only: 출력 없음 */
 
         alsa_playback_src(d);
     }
@@ -457,17 +485,15 @@ static void *reporter_thread(void *arg)
     (void)arg;
     while (g_reporter_running) {
         usleep(125000);
-        if (g_lvl_report) {
-            for (int i = 0; i < g_n_in; i++) {
-                float pk = g_in_level[i]; g_in_level[i] = 0.0f;
-                printf("lvl in %d %.1f\n", i+1, pk > 1e-7f ? 20.0f*log10f(pk) : -120.0f);
-            }
-            for (int i = 0; i < g_n_out; i++) {
-                float pk = g_out_level[i]; g_out_level[i] = 0.0f;
-                printf("lvl out %d %.1f\n", i+1, pk > 1e-7f ? 20.0f*log10f(pk) : -120.0f);
-            }
-            fflush(stdout);
+        for (int i = 0; i < g_n_in; i++) {
+            float pk = g_in_level[i]; g_in_level[i] = 0.0f;
+            printf("lvl in %d %.1f\n", i+1, pk > 1e-7f ? 20.0f*log10f(pk) : -120.0f);
         }
+        for (int i = 0; i < g_n_out; i++) {
+            float pk = g_out_level[i]; g_out_level[i] = 0.0f;
+            printf("lvl out %d %.1f\n", i+1, pk > 1e-7f ? 20.0f*log10f(pk) : -120.0f);
+        }
+        fflush(stdout);
     }
     return NULL;
 }

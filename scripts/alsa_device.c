@@ -164,6 +164,11 @@ static void *alsa_capture_thread(void *arg)
             if (_us > 500)
                 fprintf(stderr, "[aoip_engine] cap %s: xrun recovery (log+IOCTL) %ldus\n",
                         d->name, _us);
+            if (d->is_i2s) {
+                /* xrun 후 partial-fill 슬롯 폐기: 미리셋 안 하면 샘플 정렬 깨짐 */
+                d->i2s_cap_ptrs[0] = NULL;
+                d->i2s_cap_fill    = 0;
+            }
             if (d->is_ravenna) {
                 d->ravenna_accum = 0;
                 d->ravenna_prebuf_count = 0;
@@ -245,11 +250,39 @@ static void *alsa_capture_thread(void *arg)
             fprintf(stderr, "[aoip_engine] cap %s: PTP locked, unmuting capture\n", d->name);
         }
         cap_err_count = 0;
-        for (int i = 0; i < (int)n * d->channels; i++)
-            fbuf[i] = (float)ibuf[i] * (1.0f / 2147483648.0f);
 
-        /* 모든 장치: in_ring에 기록 */
-        int written = rb_write(&d->in_ring, fbuf, (int)n);
+        int written;
+        if (d->is_i2s) {
+            /* I2S zero-copy: SlotRing에 직접 int32→float + deinterleave */
+            if (!d->i2s_cap_ptrs[0]) {
+                if (!slot_ring_acquire_write(&d->i2s_in_ring, d->i2s_cap_ptrs)) {
+                    /* 링 풀: DSP가 너무 느림 — 이 ALSA period 드롭 */
+                    written = (int)n;
+                    goto i2s_cap_tick;
+                }
+                d->i2s_cap_fill = 0;
+            }
+            int frames = (int)n;
+            if (d->i2s_cap_fill + frames > g_period_frames)
+                frames = g_period_frames - d->i2s_cap_fill;
+            for (int f = 0; f < frames; f++)
+                for (int c = 0; c < d->channels; c++)
+                    d->i2s_cap_ptrs[c][d->i2s_cap_fill + f] =
+                        (float)ibuf[f * d->channels + c] * (1.0f / 2147483648.0f);
+            d->i2s_cap_fill += frames;
+            if (d->i2s_cap_fill >= g_period_frames) {
+                slot_ring_commit_write(&d->i2s_in_ring);
+                d->i2s_cap_ptrs[0] = NULL;
+                d->i2s_cap_fill = 0;
+            }
+            written = (int)n;
+        } else {
+            for (int i = 0; i < (int)n * d->channels; i++)
+                fbuf[i] = (float)ibuf[i] * (1.0f / 2147483648.0f);
+            /* RAVENNA/기타: 기존 RingBuf에 기록 */
+            written = rb_write(&d->in_ring, fbuf, (int)n);
+        }
+i2s_cap_tick:;
 
         /* RAVENNA: htstamp 갱신 (DSP 클럭 신호 없음 — hw:aoip가 DSP 마스터) */
         if (d->is_ravenna) {
@@ -339,8 +372,13 @@ static void *alsa_playback_thread(void *arg)
                      :                PREBUF_FRAMES;
 
     if (prebuf > 0) {
-        while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < prebuf)
-            usleep(1000);
+        if (d->is_i2s) {
+            while (!d->quit_play && !g_quit && slot_ring_avail(&d->i2s_out_ring) < prebuf)
+                usleep(1000);
+        } else {
+            while (!d->quit_play && !g_quit && rb_avail(&d->out_ring) < prebuf)
+                usleep(1000);
+        }
     }
 
     while (!d->quit_play && !g_quit) {
@@ -353,20 +391,42 @@ static void *alsa_playback_thread(void *arg)
                     d->name);
         }
 
-        if (!rb_read(&d->out_ring, fbuf, d->period)) {
-            memset(fbuf, 0, (size_t)(d->period * d->channels) * sizeof(float));
-        }
-        for (int i = 0; i < d->period * d->channels; i++) {
-            float v = fbuf[i];
-            if (v >  1.0f) v =  1.0f;
-            if (v < -1.0f) v = -1.0f;
-            ibuf[i] = (int32_t)(v * 2147483647.0f);
-        }
-
-        /* RAVENNA: DSP period(예: 96) 분량을 hw_period(48) 단위로 분할 write.
+        /* I2S: SlotRing 슬롯(g_period_frames)을 hw_period 청크로 나누어 write.
+         * RAVENNA: d->period(=g_period_frames) 분량을 hw_period 단위로 분할 write.
          * 일반 장치: 한 번에 write. */
         snd_pcm_sframes_t n;
-        if (d->is_ravenna) {
+        if (d->is_i2s) {
+            float *rptrs[MAX_CH];
+            int total = g_period_frames;
+            n = 0;
+            if (slot_ring_acquire_read(&d->i2s_out_ring, rptrs)) {
+                for (int off = 0; off < total && n >= 0; off += hw_period) {
+                    for (int f = 0; f < hw_period; f++)
+                        for (int c = 0; c < d->channels; c++) {
+                            float v = rptrs[c][off + f];
+                            if (v >  1.0f) v =  1.0f;
+                            if (v < -1.0f) v = -1.0f;
+                            ibuf[f * d->channels + c] = (int32_t)(v * 2147483647.0f);
+                        }
+                    snd_pcm_sframes_t r = snd_pcm_writei(pcm, ibuf, (snd_pcm_uframes_t)hw_period);
+                    if (r < 0) { n = r; break; }
+                    n += r;
+                }
+                slot_ring_consume_read(&d->i2s_out_ring);
+            } else {
+                memset(ibuf, 0, (size_t)(hw_period * d->channels) * sizeof(int32_t));
+                n = snd_pcm_writei(pcm, ibuf, (snd_pcm_uframes_t)hw_period);
+            }
+        } else if (d->is_ravenna) {
+            if (!rb_read(&d->out_ring, fbuf, d->period)) {
+                memset(fbuf, 0, (size_t)(d->period * d->channels) * sizeof(float));
+            }
+            for (int i = 0; i < d->period * d->channels; i++) {
+                float v = fbuf[i];
+                if (v >  1.0f) v =  1.0f;
+                if (v < -1.0f) v = -1.0f;
+                ibuf[i] = (int32_t)(v * 2147483647.0f);
+            }
             n = 0;
             for (int off = 0; off < d->period && n >= 0; off += hw_period) {
                 snd_pcm_sframes_t r = snd_pcm_writei(
@@ -376,6 +436,15 @@ static void *alsa_playback_thread(void *arg)
                 n += r;
             }
         } else {
+            if (!rb_read(&d->out_ring, fbuf, d->period)) {
+                memset(fbuf, 0, (size_t)(d->period * d->channels) * sizeof(float));
+            }
+            for (int i = 0; i < d->period * d->channels; i++) {
+                float v = fbuf[i];
+                if (v >  1.0f) v =  1.0f;
+                if (v < -1.0f) v = -1.0f;
+                ibuf[i] = (int32_t)(v * 2147483647.0f);
+            }
             n = snd_pcm_writei(pcm, ibuf, (snd_pcm_uframes_t)d->period);
         }
 
@@ -462,13 +531,24 @@ void device_start(Device *d)
     d->quit_cap = d->quit_play = 0;
 
     if (d->mode != 2) {  /* capture */
-        rb_init(&d->in_ring, RING_FRAMES, d->channels);
-        d->ravenna_accum       = 0;
+        if (d->is_i2s) {
+            slot_ring_init(&d->i2s_in_ring, SLOT_COUNT, MAX_PERIOD_FRAMES, d->channels);
+            d->i2s_cap_ptrs[0] = NULL;
+            d->i2s_cap_fill    = 0;
+            d->i2s_in_acquired = 0;
+        } else {
+            rb_init(&d->in_ring, RING_FRAMES, d->channels);
+        }
+        d->ravenna_accum        = 0;
         d->ravenna_prebuf_count = 0;
         pthread_create(&d->cap_tid, NULL, alsa_capture_thread, d);
     }
     if (d->mode != 1) {  /* playback */
-        rb_init(&d->out_ring, RING_FRAMES, d->channels);
+        if (d->is_i2s) {
+            slot_ring_init(&d->i2s_out_ring, SLOT_COUNT, MAX_PERIOD_FRAMES, d->channels);
+        } else {
+            rb_init(&d->out_ring, RING_FRAMES, d->channels);
+        }
         pthread_create(&d->play_tid, NULL, alsa_playback_thread, d);
     }
     printf("bridge:%s:ready\n", d->name);
@@ -487,12 +567,20 @@ void device_stop(Device *d)
     if (d->mode != 2) {
         d->quit_cap = 1;
         pthread_join(d->cap_tid, NULL);
-        if (d->in_ring.buf)  { free(d->in_ring.buf);  d->in_ring.buf  = NULL; }
+        if (d->is_i2s) {
+            slot_ring_destroy(&d->i2s_in_ring);
+        } else {
+            if (d->in_ring.buf) { free(d->in_ring.buf); d->in_ring.buf = NULL; }
+        }
     }
     if (d->mode != 1) {
         d->quit_play = 1;
         pthread_join(d->play_tid, NULL);
-        if (d->out_ring.buf) { free(d->out_ring.buf); d->out_ring.buf = NULL; }
+        if (d->is_i2s) {
+            slot_ring_destroy(&d->i2s_out_ring);
+        } else {
+            if (d->out_ring.buf) { free(d->out_ring.buf); d->out_ring.buf = NULL; }
+        }
     }
     printf("bridge:%s:stopped\n", d->name);
     fflush(stdout);

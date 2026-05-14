@@ -1,5 +1,6 @@
 CC      = gcc
-CFLAGS  = -O3 -Wall -Wextra -ffast-math -march=native -funroll-loops -I.
+CFLAGS  = -O3 -Wall -Wextra -ffast-math -march=native -funroll-loops \
+          -falign-functions=64 -I.
 LDFLAGS = -lrt -lasound -lsamplerate -lmp3lame -lm -lpthread
 
 all: aoip_engine

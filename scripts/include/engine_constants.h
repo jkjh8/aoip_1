@@ -24,3 +24,6 @@
 #define RTP_RATIO_KI   0.000001
 #define RTP_RATIO_MIN  0.9990
 #define RTP_RATIO_MAX  1.0010
+
+/* SlotRing 슬롯 수 — I2S zero-copy 링버퍼 (RING_FRAMES / MAX_PERIOD_FRAMES = 32) */
+#define SLOT_COUNT (RING_FRAMES / MAX_PERIOD_FRAMES)

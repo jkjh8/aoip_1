@@ -33,15 +33,24 @@ typedef struct {
     int   ch_start;
     int   mode;           /* 0=both, 1=capture_only, 2=playback_only */
 
-    RingBuf    in_ring;
+    RingBuf    in_ring;   /* RAVENNA/RTP 경로 전용 (SRC 필요) */
     RingBuf    out_ring;
+
+    /* I2S zero-copy SlotRing — hw:aoip 전용, RAVENNA는 in_ring/out_ring 사용 */
+    SlotRing   i2s_in_ring;
+    SlotRing   i2s_out_ring;
+    /* 캡처 스레드: 현재 write slot 포인터 배열 (g_period_frames 누적용) */
+    float     *i2s_cap_ptrs[MAX_CH];
+    int        i2s_cap_fill;         /* 현재 슬롯에 채운 프레임 수 */
+    int        i2s_in_acquired;      /* 이번 DSP 틱에 입력 슬롯 획득 여부 */
+    int        i2s_out_acquired;     /* 이번 DSP 틱에 출력 슬롯 획득 여부 */
 
     PiState    cap_pi;
     SRC_STATE *cap_src;
     PiState    play_pi;
     SRC_STATE *play_src;
 
-    float tmp_cap_in  [DEV_TMP_FRAMES * MAX_CH];
+    float tmp_cap_in  [DEV_TMP_FRAMES * MAX_CH]; /* RAVENNA SRC 임시 버퍼 */
     float tmp_cap_out [DEV_TMP_FRAMES * MAX_CH];
     float tmp_play_in [DEV_TMP_FRAMES * MAX_CH];
     float tmp_play_out[DEV_TMP_FRAMES * MAX_CH];

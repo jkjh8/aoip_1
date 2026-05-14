@@ -8,9 +8,9 @@
 #include "include/alsa_device.h"
 #include "include/dsp_src.h"
 
-extern int   g_period_frames;
-extern float g_in_buf[MAX_CH][MAX_PERIOD_FRAMES];
-extern float g_out_buf[MAX_CH][MAX_PERIOD_FRAMES];
+extern int    g_period_frames;
+extern float *g_in_ptr[MAX_CH];
+extern float *g_out_ptr[MAX_CH];
 
 /* ── PI 드리프트 보정 ────────────────────────────────────────────── */
 void pi_reset(PiState *p) {
@@ -52,7 +52,7 @@ long src_convert(SRC_STATE *src, PiState *pi,
         if (need > fill || need > DEV_TMP_FRAMES) {
             src_reset(src); pi_reset(pi);
             for (int c = 0; c < channels && (ch_start+c) < MAX_CH; c++)
-                memset(g_in_buf[ch_start+c], 0, g_period_frames*sizeof(float));
+                memset(g_in_ptr[ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
             return 0;
         }
         SRC_DATA sd = {
@@ -63,7 +63,7 @@ long src_convert(SRC_STATE *src, PiState *pi,
         src_process(src, &sd);
         long gen = sd.output_frames_gen;
         for (int c = 0; c < channels && (ch_start+c) < MAX_CH; c++) {
-            float *dst = g_in_buf[ch_start+c];
+            float *dst = g_in_ptr[ch_start+c];
             for (long f = 0; f < gen; f++) dst[f] = tmp_out[f*channels+c];
             for (long f = gen; f < g_period_frames; f++) dst[f] = 0.0f;
         }
@@ -74,7 +74,7 @@ long src_convert(SRC_STATE *src, PiState *pi,
         if (ring_space < (int)out_max) return 0;
         for (int f = 0; f < g_period_frames; f++)
             for (int c = 0; c < channels && (ch_start+c) < MAX_CH; c++)
-                tmp_in[f*channels+c] = g_out_buf[ch_start+c][f];
+                tmp_in[f*channels+c] = g_out_ptr[ch_start+c][f];
         SRC_DATA sd = {
             .data_in = tmp_in, .data_out = tmp_out,
             .input_frames = g_period_frames, .output_frames = out_max,

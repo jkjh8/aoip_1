@@ -683,12 +683,12 @@
       "dst": "aes67:sin_2"
     },
     {
-      "src": "aes67:out_2",
-      "dst": "analog:sin_2"
+      "src": "analog:out_1",
+      "dst": "analog:sin_1"
     },
     {
-      "src": "aes67:out_1",
-      "dst": "analog:sin_1"
+      "src": "analog:out_2",
+      "dst": "analog:sin_2"
     }
   ]
 }

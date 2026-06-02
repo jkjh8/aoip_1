@@ -28,6 +28,7 @@ void bridge_start(Device *d)
                 atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_relaxed);
                 atomic_store_explicit(&d->ravenna_flush, 0, memory_order_relaxed);
                 d->ravenna_prebuf_count = 0;
+                d->ravenna_phase2_printed = 0;
                 d->cap_prebuf_ready = 0;
             }
         }

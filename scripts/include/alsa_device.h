@@ -99,13 +99,23 @@ typedef struct {
      * 캡처 스레드가 1로 설정 → 재생 스레드가 rb_reset 후 0으로 */
     _Atomic int      ravenna_flush;
 
+    /* out_ring 리셋 후 play SRC/PI 재초기화 요청:
+     * 재생 스레드가 1로 설정 → DSP 스레드가 src_reset+pi_reset 후 0으로 */
+    _Atomic int      play_src_reset;
+
     /* PTP 재잠금 후 클럭 안정화 prebuffer 누적 카운터 (캡처 스레드만 접근) */
     int              ravenna_prebuf_count;
-    /* PTP 클럭 안정 후 1초 대기 카운터 — prebuffer 완료 뒤 추가 안정화 (캡처 스레드만 접근) */
-    int              ravenna_unmute_count;
+    /* Phase 2 벽시계 시작 시각 (CLOCK_MONOTONIC ns) — phase2_printed=1 시 기록, holdover 만료 시 0 리셋 */
+    int64_t          ravenna_phase2_start_ns;
+    /* Phase 2 진입 메시지 출력 여부 — holdover 만료 시에만 클리어 (EPIPE 후 재진입 시 중복 출력 방지) */
+    int              ravenna_phase2_printed;
 
     /* PTP 잠금 후 cap SRC 시작 전 in_ring 충전 완료 플래그 (DSP 스레드 전용) */
     int              cap_prebuf_ready;
+
+    /* PTP 홀드오버: 언락 감지 후 무음 공급 누적 프레임 수 (캡처 스레드만 접근)
+     * 0 = 정상, >0 = 홀드오버 중, RAVENNA_HOLDOVER_FRAMES 도달 시 뮤트 전환 */
+    int              ravenna_holdover_frames;
 } Device;
 
 /* ── RT 스레드 CPU 어피니티 ──────────────────────────────────────── */

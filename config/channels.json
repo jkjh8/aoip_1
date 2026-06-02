@@ -20,9 +20,9 @@
             "band": 1,
             "enabled": false,
             "type": "low_shelf",
-            "fc": 180,
+            "fc": 142,
             "q": 0.7,
-            "gainDb": -6.8
+            "gainDb": 0
           },
           {
             "band": 2,
@@ -36,7 +36,7 @@
             "band": 3,
             "enabled": false,
             "type": "peak",
-            "fc": 2000,
+            "fc": 2161,
             "q": 0.7,
             "gainDb": 0
           },
@@ -44,9 +44,9 @@
             "band": 4,
             "enabled": false,
             "type": "high_shelf",
-            "fc": 2088,
+            "fc": 4185,
             "q": 0.7,
-            "gainDb": 6.3
+            "gainDb": 0
           }
         ],
         "gate": {
@@ -59,7 +59,7 @@
         },
         "comp": {
           "enabled": false,
-          "threshold": -6,
+          "threshold": 0,
           "ratio": 10,
           "knee": 6,
           "attackMs": 10,
@@ -440,9 +440,9 @@
             "band": 1,
             "enabled": false,
             "type": "peak",
-            "fc": 100,
+            "fc": 479,
             "q": 0.7,
-            "gainDb": 0
+            "gainDb": -7.3
           },
           {
             "band": 2,
@@ -464,32 +464,32 @@
             "band": 4,
             "enabled": false,
             "type": "high_shelf",
-            "fc": 8000,
+            "fc": 4453,
             "q": 0.707,
-            "gainDb": 0
+            "gainDb": 1
           }
         ],
         "comp": {
           "enabled": false,
-          "threshold": -24,
-          "ratio": 4,
+          "threshold": -29,
+          "ratio": 2,
           "knee": 6,
           "attackMs": 10,
-          "releaseMs": 200,
+          "releaseMs": 20,
           "makeupDb": 0
         },
         "lim": {
           "enabled": false,
-          "threshold": -16,
+          "threshold": -6,
           "releaseMs": 100
         },
         "gate": {
           "enabled": false,
-          "threshold": -27,
+          "threshold": -30,
           "attackMs": 5,
           "holdMs": 5,
           "releaseMs": 10,
-          "rangeDb": -36
+          "rangeDb": -60
         }
       }
     },
@@ -506,10 +506,10 @@
           {
             "band": 1,
             "enabled": false,
-            "type": "low_shelf",
-            "fc": 180,
-            "q": 0.707,
-            "gainDb": 0
+            "type": "peak",
+            "fc": 322,
+            "q": 0.7,
+            "gainDb": 2.6
           },
           {
             "band": 2,
@@ -531,24 +531,24 @@
             "band": 4,
             "enabled": false,
             "type": "high_shelf",
-            "fc": 8000,
-            "q": 0.68,
-            "gainDb": 0
+            "fc": 4453,
+            "q": 0.707,
+            "gainDb": 1
           }
         ],
         "comp": {
           "enabled": false,
-          "threshold": -20,
-          "ratio": 4,
+          "threshold": -29,
+          "ratio": 2,
           "knee": 6,
           "attackMs": 10,
-          "releaseMs": 200,
+          "releaseMs": 20,
           "makeupDb": 0
         },
         "lim": {
           "enabled": false,
-          "threshold": -14.5,
-          "releaseMs": 200
+          "threshold": -6,
+          "releaseMs": 100
         },
         "gate": {
           "enabled": false,
@@ -883,32 +883,8 @@
       "dst": "aes67:sin_8"
     },
     {
-      "src": "analog:out_1",
-      "dst": "aes67:sin_9"
-    },
-    {
-      "src": "analog:out_2",
-      "dst": "aes67:sin_10"
-    },
-    {
-      "src": "analog:out_1",
-      "dst": "aes67:sin_11"
-    },
-    {
-      "src": "analog:out_2",
-      "dst": "aes67:sin_12"
-    },
-    {
-      "src": "analog:out_1",
-      "dst": "aes67:sin_13"
-    },
-    {
-      "src": "analog:out_2",
-      "dst": "aes67:sin_14"
-    },
-    {
-      "src": "analog:out_2",
-      "dst": "aes67:sin_16"
+      "src": "aes67:out_1",
+      "dst": "stream:sin_1"
     },
     {
       "src": "aes67:out_2",
@@ -940,11 +916,67 @@
     },
     {
       "src": "analog:out_1",
+      "dst": "aes67:sin_9"
+    },
+    {
+      "src": "analog:out_2",
+      "dst": "aes67:sin_10"
+    },
+    {
+      "src": "analog:out_1",
+      "dst": "aes67:sin_11"
+    },
+    {
+      "src": "analog:out_2",
+      "dst": "aes67:sin_12"
+    },
+    {
+      "src": "analog:out_1",
+      "dst": "aes67:sin_13"
+    },
+    {
+      "src": "analog:out_2",
+      "dst": "aes67:sin_14"
+    },
+    {
+      "src": "analog:out_1",
       "dst": "aes67:sin_15"
     },
     {
-      "src": "aes67:out_1",
-      "dst": "stream:sin_1"
+      "src": "analog:out_2",
+      "dst": "aes67:sin_16"
+    },
+    {
+      "src": "aes67:out_9",
+      "dst": "stream:sin_9"
+    },
+    {
+      "src": "aes67:out_10",
+      "dst": "stream:sin_10"
+    },
+    {
+      "src": "aes67:out_11",
+      "dst": "stream:sin_11"
+    },
+    {
+      "src": "aes67:out_12",
+      "dst": "stream:sin_12"
+    },
+    {
+      "src": "aes67:out_13",
+      "dst": "stream:sin_13"
+    },
+    {
+      "src": "aes67:out_14",
+      "dst": "stream:sin_14"
+    },
+    {
+      "src": "aes67:out_15",
+      "dst": "stream:sin_15"
+    },
+    {
+      "src": "aes67:out_16",
+      "dst": "stream:sin_16"
     },
     {
       "src": "aes67:out_1",

@@ -8,6 +8,7 @@
 #include "include/engine_constants.h"
 #include "include/alsa_device.h"
 #include "include/dsp_src.h"
+#include "include/clk2.h"
 
 extern int    g_period_frames;
 extern float *g_in_ptr[MAX_CH];
@@ -175,6 +176,17 @@ int ring_capture_src(SRC_STATE *src, PiState *pi,
 /* ── RAVENNA 재생 SRC ────────────────────────────────────────────── */
 void alsa_playback_src(Device *d)
 {
+    /* out_ring 리셋 후 SRC 내부 delay line의 이전 오디오 잔재를 제거.
+     * 리셋 없이 재개하면 SRC 히스토리가 새 오디오와 섞여 '외계인 소리' 발생. */
+    if (atomic_load_explicit(&d->play_src_reset, memory_order_acquire)) {
+        src_reset(d->play_src);
+        pi_reset(&d->play_pi);
+        double hint = atomic_load_explicit(&g_ravenna_ratio_hint, memory_order_relaxed);
+        if (hint > RATIO_MIN && hint < RATIO_MAX)
+            d->play_pi.ratio = hint;
+        atomic_store_explicit(&d->play_src_reset, 0, memory_order_release);
+    }
+
     int play_avail = rb_avail(&d->out_ring);
     int play_free  = rb_free(&d->out_ring);
     long gen = src_convert(d->play_src, &d->play_pi, d->tmp_play_in, d->tmp_play_out,

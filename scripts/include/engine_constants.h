@@ -22,6 +22,9 @@
 /* RAVENNA 캡처 SRC 버퍼 타겟 (1ms @ 48kHz) */
 #define RAVENNA_FILL_TARGET (SAMPLE_RATE * 1 / 1000)
 
+/* PTP 언락 시 즉시 뮤트 대신 무음 공급으로 버퍼를 유지하는 홀드오버 기간 (200ms) */
+#define RAVENNA_HOLDOVER_FRAMES (SAMPLE_RATE / 5)
+
 /* RTP 전용 PI 상수 — ALSA PI보다 20x 빠른 응답, ±1000ppm 보정 범위 */
 #define RTP_RATIO_KP   0.001
 #define RTP_RATIO_KI   0.000001

@@ -18,7 +18,7 @@ import { setupSocket } from './socket/index.js';
 import logger from './lib/logger.js';
 import { getConfig, reloadConfig } from './lib/config.js';
 import { getDspChannelCounts, restoreRoutes, restoreDspState, syncAes67Active } from './lib/channels/index.js';
-import { startupDsp, registerAnalogBridge, waitForDspReady, addEngineRestartListener, sendToEngine, markStartupDone } from './lib/dsp/index.js';
+import { startupDsp, registerAnalogBridge, waitForDspReady, addEngineRestartListener, sendToEngine, markStartupDone, shutdownDsp } from './lib/dsp/index.js';
 import { startupBridges, reregisterBridges } from './lib/bridges.js';
 import { startupRtp } from './lib/rtp/index.js';
 import { getDaemonStatus, getSinks, getSources, startDaemonLogForwarder, startStatusFileWatcher, refreshDaemonNetworkConf } from './lib/aes67daemon.js'
@@ -111,3 +111,16 @@ async function startup() {
 startup().catch((err) => {
   logger.error('[startup] Fatal:', err.message);
 });
+
+let _shuttingDown = false
+async function _gracefulShutdown(sig) {
+  if (_shuttingDown) return
+  _shuttingDown = true
+  logger.info('[shutdown] received %s — stopping engine...', sig)
+  try { await shutdownDsp(3000) }
+  catch (e) { logger.warn('[shutdown] shutdownDsp error: %s', e.message) }
+  try { httpServer.close() } catch { /* ignore */ }
+  setTimeout(() => process.exit(0), 200).unref()
+}
+process.on('SIGTERM', () => _gracefulShutdown('SIGTERM'))
+process.on('SIGINT',  () => _gracefulShutdown('SIGINT'))

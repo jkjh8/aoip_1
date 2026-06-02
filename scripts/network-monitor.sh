@@ -43,14 +43,11 @@ wait_for_ip() {
 }
 
 stop_network_services() {
-    log "Link down on $IFACE — stopping network services"
-    for svc in "${NETWORK_SERVICES_STOP[@]}"; do
-        if systemctl is-active --quiet "${svc}.service"; then
-            log "Stopping ${svc}.service"
-            systemctl stop "${svc}.service"
-        fi
-    done
-    log "All network services stopped"
+    # 링크 다운 시 서비스를 종료하지 않는다.
+    # 엔진(aoip_engine)은 PTP holdover / ring zero-fill / rb_reset 으로 자체적으로
+    # 무음 출력 + overflow 방지를 처리한다. aes67-daemon / ptp4l 도 링크 복귀 시 자동 재동기화.
+    # 짧은 단절에서 stop/start 캐스케이드(수십초 다운타임) 회피.
+    log "Link down on $IFACE — services left running (engine handles silence/holdover)"
 }
 
 start_network_services() {
@@ -64,10 +61,14 @@ start_network_services() {
     ip=$(ip -4 addr show "$IFACE" | grep -oP '(?<=inet )\d+\.\d+\.\d+\.\d+')
     log "IP acquired: $ip — starting network services"
 
+    # stop을 안 하므로 보통 이미 동작 중. 미동작 서비스만 기동(콜드부트 대비).
     for svc in "${NETWORK_SERVICES_START[@]}"; do
+        if systemctl is-active --quiet "${svc}.service"; then
+            log "${svc}.service already running — skip"
+            continue
+        fi
         log "Starting ${svc}.service"
         systemctl start "${svc}.service"
-        # Give each service time to initialize before starting the next
         case "$svc" in
             ptp4l)        sleep 3 ;;
             aes67-daemon) sleep 5 ;;

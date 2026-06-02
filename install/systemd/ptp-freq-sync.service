@@ -1,0 +1,18 @@
+[Unit]
+Description=PTP Frequency Sync (ptp4l freq → CLOCK_REALTIME)
+After=ptp4l.service
+Requires=ptp4l.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/sbin/ptp-freq-sync.py
+Restart=on-failure
+RestartSec=5
+User=root
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=46
+CPUAffinity=1
+OOMScoreAdjust=-900
+
+[Install]
+WantedBy=multi-user.target

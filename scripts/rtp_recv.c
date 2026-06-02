@@ -614,20 +614,23 @@ static void *stats_thread(void *arg)
         int kbps = (int)((cur - prev_bytes) * 8 / 2 / 1000);
         int has_data = (cur != prev_bytes);
         if (!has_data) {
-            pthread_mutex_lock(&ctx->addr_mtx);
-            ctx->src_ip[0] = '\0'; ctx->src_port = 0;
-            pthread_mutex_unlock(&ctx->addr_mtx);
-            /* multicast re-join every 6s of silence to recover from stale IGMP state after reboot */
-            if (ctx->is_multicast && ++no_data_count >= 3) {
+            /* clear src_ip after 3 consecutive no-data periods (6s) to avoid connect/disconnect spam */
+            if (++no_data_count >= 3) {
                 no_data_count = 0;
-                struct ip_mreq mreq;
-                mreq.imr_multiaddr        = ctx->mcast_addr;
-                mreq.imr_interface.s_addr = INADDR_ANY;
-                setsockopt(ctx->udp_sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
-                if (setsockopt(ctx->udp_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
-                    fprintf(stderr, "[rtp_recv:%s] multicast re-join failed: %s\n", ctx->key, strerror(errno));
-                else
-                    fprintf(stderr, "[rtp_recv:%s] multicast re-joined %s\n", ctx->key, ctx->bind_addr);
+                pthread_mutex_lock(&ctx->addr_mtx);
+                ctx->src_ip[0] = '\0'; ctx->src_port = 0;
+                pthread_mutex_unlock(&ctx->addr_mtx);
+                /* multicast re-join every 6s of silence to recover from stale IGMP state after reboot */
+                if (ctx->is_multicast) {
+                    struct ip_mreq mreq;
+                    mreq.imr_multiaddr        = ctx->mcast_addr;
+                    mreq.imr_interface.s_addr = INADDR_ANY;
+                    setsockopt(ctx->udp_sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+                    if (setsockopt(ctx->udp_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
+                        fprintf(stderr, "[rtp_recv:%s] multicast re-join failed: %s\n", ctx->key, strerror(errno));
+                    else
+                        fprintf(stderr, "[rtp_recv:%s] multicast re-joined %s\n", ctx->key, ctx->bind_addr);
+                }
             }
         } else {
             no_data_count = 0;

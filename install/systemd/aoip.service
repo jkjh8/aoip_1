@@ -14,6 +14,10 @@ ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do [ -c /dev/snd/pcmC0D0p ] && 
 ExecStart=/home/kjh/.nvm/versions/node/v24.14.1/bin/node --max-old-space-size=128 index.js
 Restart=on-failure
 RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=5
+SendSIGKILL=yes
 RuntimeDirectory=aoip
 RuntimeDirectoryPreserve=yes
 LimitRTPRIO=99

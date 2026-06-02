@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <stdatomic.h>
+#include <time.h>
 #include "include/dsp_io.h"
 #include "include/engine_globals.h"
 #include "include/dsp_neon.h"
@@ -26,6 +27,45 @@ int dsp_wait_tick(long long period_ns)
     if (pfd.revents & POLLIN) {
         uint64_t val;
         (void)read(g_dsp_clock_fd, &val, sizeof(val));
+
+        /* [DEBUG] catch-up burst 검증: 즉시 비-블로킹 poll로 잔여 신호 측정 */
+        static uint64_t s_total_ticks = 0;
+        static uint64_t s_burst_extra = 0;
+        static uint64_t s_burst_events = 0;
+        static int      s_burst_max = 0;
+        static time_t   s_last_report = 0;
+        s_total_ticks++;
+        int extra = 0;
+        while (1) {
+            struct pollfd p2 = { .fd = g_dsp_clock_fd, .events = POLLIN };
+            if (poll(&p2, 1, 0) <= 0) break;
+            if (!(p2.revents & POLLIN)) break;
+            uint64_t v2;
+            if (read(g_dsp_clock_fd, &v2, sizeof(v2)) <= 0) break;
+            extra++;
+            if (extra > 256) break; /* safety */
+        }
+        if (extra > 0) {
+            s_burst_extra += extra;
+            s_burst_events++;
+            if (extra > s_burst_max) s_burst_max = extra;
+        }
+        time_t now = time(NULL);
+        if (s_last_report == 0) s_last_report = now;
+        if (now - s_last_report >= 60) {
+            fprintf(stderr,
+                "[aoip_engine] dsp burst stat: events=%llu extra=%llu max=%d / ticks=%llu (%.4f%%)\n",
+                (unsigned long long)s_burst_events,
+                (unsigned long long)s_burst_extra,
+                s_burst_max,
+                (unsigned long long)s_total_ticks,
+                100.0 * (double)s_burst_events / (double)(s_total_ticks ? s_total_ticks : 1));
+            s_burst_events = 0;
+            s_burst_extra = 0;
+            s_burst_max = 0;
+            s_total_ticks = 0;
+            s_last_report = now;
+        }
     }
     return 1;
 }

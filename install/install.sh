@@ -183,6 +183,20 @@ info "aoip_engine, rtp_recv, rtp_send 빌드 중..."
 make -C "${AOIP_DIR}/scripts"
 info "빌드 완료"
 
+# ptp4l LD_PRELOAD shim 빌드 (IP_MULTICAST_LOOP 강제 ON)
+# → 같은 호스트의 aes67-daemon이 ptp4l PTP 멀티캐스트 패킷 수신 가능하도록
+PTP_SHIM_SRC="${INSTALL_DIR}/ptp_mcast_loop.c"
+PTP_SHIM_DST="/usr/local/lib/ptp_mcast_loop.so"
+if [ -f "${PTP_SHIM_SRC}" ]; then
+    info "ptp_mcast_loop.so 빌드 중..."
+    gcc -O2 -fPIC -shared -Wl,-soname,ptp_mcast_loop.so \
+        "${PTP_SHIM_SRC}" -o "${PTP_SHIM_DST}" -ldl
+    chmod 0755 "${PTP_SHIM_DST}"
+    info "ptp_mcast_loop.so → ${PTP_SHIM_DST}"
+else
+    warn "ptp_mcast_loop.c 없음 — shim 빌드 건너뜀 (ptp4l/aes67-daemon 동시동작 불가)"
+fi
+
 # =============================================================================
 # 6. uac2-gadget.sh 배포
 # =============================================================================
@@ -211,6 +225,7 @@ SYSTEMD_DST="/etc/systemd/system"
 SERVICES=(
     ravenna-module.service
     ptp4l.service
+    phc2sys.service
     ptp-irq-affinity.service
     uac2-gadget.service
     aes67-daemon.service
@@ -218,6 +233,10 @@ SERVICES=(
     aoip.service
     aoip-rt-tune.service
 )
+# phc2sys: phc2sys-freqonly.sh 래퍼를 ExecStart로 호출.
+#   외부 마스터가 wall time을 운반하지 않는 환경(PHC=1970)에서도 sys clock step 없이
+#   주파수만 동기화 (-F 0 -S 0). linreg servo로 ±수십 ppm 변동.
+#   tick은 변조하지 않음 (이전 phc2sys 표준 모드의 tick=9841 사고 회피).
 
 for svc in "${SERVICES[@]}"; do
     SRC="${SYSTEMD_SRC}/${svc}"
@@ -257,6 +276,22 @@ if [ -f "${PTP_IRQ_SH}" ]; then
     cp "${PTP_IRQ_SH}" /usr/local/sbin/ptp-irq-affinity.sh
     chmod +x /usr/local/sbin/ptp-irq-affinity.sh
     info "ptp-irq-affinity.sh → /usr/local/sbin/"
+fi
+
+# phc2sys-freqonly.sh 배포 (phc2sys.service가 호출)
+PHC2SYS_SH="${SYSTEMD_SRC}/phc2sys-freqonly.sh"
+if [ -f "${PHC2SYS_SH}" ]; then
+    cp "${PHC2SYS_SH}" /usr/local/sbin/phc2sys-freqonly.sh
+    chmod +x /usr/local/sbin/phc2sys-freqonly.sh
+    info "phc2sys-freqonly.sh → /usr/local/sbin/"
+fi
+
+# ptp-freq-sync.py 배포 (백업 경로 — 현재 SERVICES에는 없으나 긴급 롤백용)
+PTP_FREQ_PY="${SYSTEMD_SRC}/ptp-freq-sync.py"
+if [ -f "${PTP_FREQ_PY}" ]; then
+    cp "${PTP_FREQ_PY}" /usr/local/sbin/ptp-freq-sync.py
+    chmod +x /usr/local/sbin/ptp-freq-sync.py
+    info "ptp-freq-sync.py → /usr/local/sbin/ (백업)"
 fi
 
 # =============================================================================

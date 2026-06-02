@@ -75,6 +75,12 @@ float         g_route[MAX_CH][MAX_CH];
 _Atomic float g_in_level[MAX_CH];
 _Atomic float g_out_level[MAX_CH];
 
+_Atomic float g_in_gate_in_level[MAX_CH];
+_Atomic float g_out_gate_in_level[MAX_CH];
+
+_Atomic int   g_in_gate_phase[MAX_CH];
+_Atomic int   g_out_gate_phase[MAX_CH];
+
 _Atomic float g_in_gr_gate[MAX_CH];
 _Atomic float g_in_gr_comp[MAX_CH];
 _Atomic float g_out_gr_gate[MAX_CH];
@@ -183,12 +189,16 @@ void process_channel_dsp_in(int ch_start, int ch_count)
         }
         gain_ramp_neon(buf, c->gain_cur, c->gain_tgt, g_period_frames);
         c->gain_cur = c->gain_tgt;
-        in_ch_dsp(c, buf, g_period_frames);
+        in_ch_dsp_pre_gate(c, buf, g_period_frames);
+        float pre_gate_peak = level_peak_neon(buf, g_period_frames);
+        atomic_max_float(&g_in_gate_in_level[ch], pre_gate_peak);
+        in_ch_dsp_gate_on(c, buf, g_period_frames);
         float peak = level_peak_neon(buf, g_period_frames);
         atomic_max_float(&g_in_level[ch], peak);
         /* GR 원자 업데이트 */
         atomic_store_explicit(&g_in_gr_gate[ch], c->gate.gr_cur, memory_order_relaxed);
         atomic_store_explicit(&g_in_gr_comp[ch], c->comp.gr_cur, memory_order_relaxed);
+        atomic_store_explicit(&g_in_gate_phase[ch], (int)c->gate.phase, memory_order_relaxed);
     }
 }
 
@@ -210,12 +220,16 @@ void process_channel_dsp_out(int ch_start, int ch_count)
         }
         gain_ramp_neon(buf, c->gain_cur, c->gain_tgt, g_period_frames);
         c->gain_cur = c->gain_tgt;
+        /* 출력 체인은 게이트가 첫 단계 — out_ch_dsp 직전에 게이트 입력 피크 측정 */
+        float pre_gate_peak = level_peak_neon(buf, g_period_frames);
+        atomic_max_float(&g_out_gate_in_level[ch], pre_gate_peak);
         out_ch_dsp(c, buf, g_period_frames);
         float peak = level_peak_neon(buf, g_period_frames);
         atomic_max_float(&g_out_level[ch], peak);
         atomic_store_explicit(&g_out_gr_gate[ch], c->gate.gr_cur, memory_order_relaxed);
         atomic_store_explicit(&g_out_gr_comp[ch], c->comp.gr_cur, memory_order_relaxed);
         atomic_store_explicit(&g_out_gr_lim[ch],  c->lim.gr_cur,  memory_order_relaxed);
+        atomic_store_explicit(&g_out_gate_phase[ch], (int)c->gate.phase, memory_order_relaxed);
     }
 }
 

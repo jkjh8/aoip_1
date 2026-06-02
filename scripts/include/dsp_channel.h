@@ -68,8 +68,10 @@ typedef struct {
 } LimCmd;
 
 /* ── DSP 체인 처리 (gain ramp 이후, bypass/mute 이전 확인은 호출자 책임) */
-void in_ch_dsp (InChDspState  *ch, float *buf, int frames);
-void out_ch_dsp(OutChDspState *ch, float *buf, int frames);
+/* 입력 체인은 게이트 입력 레벨 별도 측정을 위해 두 단계로 분리 */
+void in_ch_dsp_pre_gate (InChDspState *ch, float *buf, int frames); /* trim + HPF + EQ */
+void in_ch_dsp_gate_on  (InChDspState *ch, float *buf, int frames); /* gate + comp */
+void out_ch_dsp         (OutChDspState *ch, float *buf, int frames);
 
 /* ── cmd ring → DSP 상태 적용 (RT 스레드, apply_cmd에서 호출) ────── */
 void in_ch_apply_trim(InChDspState  *ch, float trim_db);

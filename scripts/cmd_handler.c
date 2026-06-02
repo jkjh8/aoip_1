@@ -94,6 +94,22 @@ static void cmd_bridge(int n, char **tok)
         d->is_i2s = (!strcmp(name, "analog") && d->mode != 2) ? 1 : 0;
         d->clk_accum       = 0;
         bridge_start(d);
+        /* DSP는 analog(hw:aoip) 브릿지만 활성. 그 외(AES67/RAVENNA 등)는 자동 bypass */
+        int is_analog = (strstr(d->dev, "hw:aoip") != NULL);
+        if (!is_analog) {
+            int dir_in  = (d->mode != 2);   /* mode 0=duplex, 1=in, 2=out */
+            int dir_out = (d->mode != 1);
+            for (int c = 0; c < d->channels; c++) {
+                if (dir_in) {
+                    Cmd bc = { .type = CMD_BYPASS, .dir = 0, .ch = d->ch_start + c, .flag = 1 };
+                    cmd_push(&bc);
+                }
+                if (dir_out) {
+                    Cmd bc = { .type = CMD_BYPASS, .dir = 1, .ch = d->ch_start + c, .flag = 1 };
+                    cmd_push(&bc);
+                }
+            }
+        }
     } else if (!strcmp(sub, "start")) {
         for (int i = 0; i < g_n_dev; i++)
             if (!strcmp(g_dev[i].name, name)) { bridge_start(&g_dev[i]); break; }

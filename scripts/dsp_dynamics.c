@@ -52,7 +52,9 @@ void gate_process(GateState *g, float *buf, int frames)
             if (--g->hold_count <= 0) g->phase = GATE_RELEASE;
             break;
         case GATE_RELEASE:
-            if (env >= thr) { g->phase = GATE_OPEN; break; }
+            /* RELEASE 중 신호 복귀: gain이 중간값이므로 OPEN 직행 금지.
+             * ATTACK으로 보내 1.0까지 정상 복귀시켜야 게인 고정 버그 방지. */
+            if (env >= thr) { g->phase = GATE_ATTACK; break; }
             gain = rel * gain + (1.0f - rel) * range;
             if (gain <= range * 1.001f) {
                 gain = range;

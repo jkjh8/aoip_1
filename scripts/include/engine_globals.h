@@ -40,6 +40,14 @@ extern float         g_route[MAX_CH][MAX_CH];
 extern _Atomic float g_in_level[MAX_CH];
 extern _Atomic float g_out_level[MAX_CH];
 
+/* 게이트 입력 직전 피크 (진단용: 게이트가 보는 신호 레벨) */
+extern _Atomic float g_in_gate_in_level[MAX_CH];
+extern _Atomic float g_out_gate_in_level[MAX_CH];
+
+/* 게이트 phase 스냅샷 (진단용: 0=CLOSED 1=ATTACK 2=OPEN 3=HOLD 4=RELEASE) */
+extern _Atomic int   g_in_gate_phase[MAX_CH];
+extern _Atomic int   g_out_gate_phase[MAX_CH];
+
 /* ── GR 미터링 원자 배열 ─────────────────────────────────────────── */
 extern _Atomic float g_in_gr_gate[MAX_CH];
 extern _Atomic float g_in_gr_comp[MAX_CH];

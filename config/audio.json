@@ -17,14 +17,14 @@
     "periodFrames": 48,
     "lvlReport": true,
     "startupDelay": 0,
-    "ravennaFillFrames": 96
+    "ravennaFillFrames":64
   },
   "jack": {
     "device": "hw:aoip",
     "name": "Analog",
     "rate": 48000,
     "period": 48,
-    "periods": 2,
+    "periods": 1,
     "channels": 2
   },
   "bridges": [
@@ -45,7 +45,7 @@
       "device": "hw:RAVENNA",
       "rate": 48000,
       "period": 48,
-      "periods": 3,
+      "periods": 1,
       "channels": 16,
       "aes67": true,
       "enabled": true

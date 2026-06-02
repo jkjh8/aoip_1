@@ -6,15 +6,19 @@
 #include "include/dsp_eq.h"
 #include "include/dsp_dynamics.h"
 
-/* ── 입력 채널 DSP 체인 ──────────────────────────────────────────── */
-/* gain ramp + mute/bypass는 aoip_engine.c process_channel_dsp가 처리.
- * 이 함수는 gain ramp 이후의 DSP 처리만 담당. */
-void in_ch_dsp(InChDspState *ch, float *buf, int frames)
+/* ── 입력 채널 DSP — 게이트 전 단계 (trim + HPF + EQ) ───────────── */
+/* 호출 후 buf는 게이트 입력 상태. 호출자가 여기서 피크 측정 후 gate_on 호출. */
+void in_ch_dsp_pre_gate(InChDspState *ch, float *buf, int frames)
 {
     if (ch->trim_lin != 1.0f)
         gain_apply_neon(buf, ch->trim_lin, frames);
     hpf_process(&ch->hpf, buf, frames);
     eq_process(&ch->eq, buf, frames);
+}
+
+/* ── 입력 채널 DSP — 게이트 이후 단계 (gate + comp) ─────────────── */
+void in_ch_dsp_gate_on(InChDspState *ch, float *buf, int frames)
+{
     gate_process(&ch->gate, buf, frames);
     comp_process(&ch->comp, buf, frames);
 }

@@ -51,19 +51,19 @@
         ],
         "gate": {
           "enabled": false,
-          "threshold": -14,
-          "attackMs": 5,
-          "releaseMs": 10,
-          "holdMs": 5,
-          "rangeDb": -36
+          "threshold": -30,
+          "attackMs": 10,
+          "releaseMs": 100,
+          "holdMs": 50,
+          "rangeDb": -60
         },
         "comp": {
           "enabled": false,
-          "threshold": 0,
-          "ratio": 10,
+          "threshold": -39,
+          "ratio": 3,
           "knee": 6,
-          "attackMs": 10,
-          "releaseMs": 200,
+          "attackMs": 5,
+          "releaseMs": 50,
           "makeupDb": 0
         }
       }
@@ -119,19 +119,19 @@
         ],
         "gate": {
           "enabled": false,
-          "threshold": -16,
-          "attackMs": 5,
+          "threshold": -30,
+          "attackMs": 10,
           "releaseMs": 100,
-          "holdMs": 5,
-          "rangeDb": -16
+          "holdMs": 50,
+          "rangeDb": -60
         },
         "comp": {
           "enabled": false,
-          "threshold": -20,
-          "ratio": 4,
+          "threshold": -39,
+          "ratio": 3,
           "knee": 6,
-          "attackMs": 10,
-          "releaseMs": 100,
+          "attackMs": 5,
+          "releaseMs": 50,
           "makeupDb": 0
         }
       }
@@ -479,7 +479,7 @@
           "makeupDb": 0
         },
         "lim": {
-          "enabled": false,
+          "enabled": true,
           "threshold": -6,
           "releaseMs": 100
         },
@@ -546,7 +546,7 @@
           "makeupDb": 0
         },
         "lim": {
-          "enabled": false,
+          "enabled": true,
           "threshold": -6,
           "releaseMs": 100
         },

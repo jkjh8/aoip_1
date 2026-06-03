@@ -20,9 +20,9 @@
             "band": 1,
             "enabled": false,
             "type": "low_shelf",
-            "fc": 142,
+            "fc": 317,
             "q": 0.7,
-            "gainDb": 0
+            "gainDb": -4.2
           },
           {
             "band": 2,
@@ -51,11 +51,11 @@
         ],
         "gate": {
           "enabled": false,
-          "threshold": -30,
+          "threshold": -29,
           "attackMs": 10,
           "releaseMs": 100,
           "holdMs": 50,
-          "rangeDb": -60
+          "rangeDb": -20
         },
         "comp": {
           "enabled": false,
@@ -80,50 +80,50 @@
         "trim": 0,
         "hpf": {
           "enabled": false,
-          "slope": 12,
-          "fc": 80
+          "slope": 48,
+          "fc": 57
         },
         "eq": [
           {
             "band": 1,
             "enabled": false,
-            "type": "peak",
-            "fc": 100,
-            "q": 0.707,
-            "gainDb": 0
+            "type": "low_shelf",
+            "fc": 317,
+            "q": 0.7,
+            "gainDb": -4.2
           },
           {
             "band": 2,
             "enabled": false,
             "type": "peak",
             "fc": 500,
-            "q": 0.707,
+            "q": 0.7,
             "gainDb": 0
           },
           {
             "band": 3,
             "enabled": false,
             "type": "peak",
-            "fc": 2000,
-            "q": 0.707,
+            "fc": 2161,
+            "q": 0.7,
             "gainDb": 0
           },
           {
             "band": 4,
             "enabled": false,
             "type": "high_shelf",
-            "fc": 8000,
-            "q": 0.707,
+            "fc": 4185,
+            "q": 0.7,
             "gainDb": 0
           }
         ],
         "gate": {
           "enabled": false,
-          "threshold": -30,
+          "threshold": -29,
           "attackMs": 10,
           "releaseMs": 100,
           "holdMs": 50,
-          "rangeDb": -60
+          "rangeDb": -20
         },
         "comp": {
           "enabled": false,
@@ -479,8 +479,8 @@
           "makeupDb": 0
         },
         "lim": {
-          "enabled": true,
-          "threshold": -6,
+          "enabled": false,
+          "threshold": -13.5,
           "releaseMs": 100
         },
         "gate": {
@@ -507,9 +507,9 @@
             "band": 1,
             "enabled": false,
             "type": "peak",
-            "fc": 322,
+            "fc": 479,
             "q": 0.7,
-            "gainDb": 2.6
+            "gainDb": -7.3
           },
           {
             "band": 2,
@@ -546,17 +546,17 @@
           "makeupDb": 0
         },
         "lim": {
-          "enabled": true,
-          "threshold": -6,
+          "enabled": false,
+          "threshold": -13.5,
           "releaseMs": 100
         },
         "gate": {
           "enabled": false,
-          "threshold": -27,
+          "threshold": -30,
           "attackMs": 5,
           "holdMs": 5,
-          "releaseMs": 100,
-          "rangeDb": -16
+          "releaseMs": 10,
+          "rangeDb": -60
         }
       }
     },
@@ -986,5 +986,9 @@
       "src": "aes67:out_2",
       "dst": "analog:sin_2"
     }
-  ]
+  ],
+  "i2s": {
+    "input": "stereo",
+    "output": "stereo"
+  }
 }

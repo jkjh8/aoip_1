@@ -1,17 +1,19 @@
 [Unit]
-Description=PHC ↔ System Clock Sync (AES67)
+Description=PHC → CLOCK_TAI Sync (AES67)
 After=ptp4l.service network-online.target
 Requires=ptp4l.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/phc2sys-freqonly.sh
+# 부팅 시 이전 phc2sys가 남긴 tick 왜곡(9841µs) 복구
+ExecStartPre=python3 /usr/local/sbin/reset-tick.py
+ExecStart=/usr/sbin/phc2sys -s /dev/ptp0 -c CLOCK_TAI -O 0 -m -u 60
 Restart=on-failure
 RestartSec=3
 User=root
 CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=79
+CPUSchedulingPriority=46
 CPUAffinity=1
 OOMScoreAdjust=-900
 LimitRTPRIO=infinity

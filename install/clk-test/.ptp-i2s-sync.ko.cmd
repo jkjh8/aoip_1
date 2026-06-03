@@ -1,0 +1,1 @@
+savedcmd_ptp-i2s-sync.ko := aarch64-linux-gnu-ld -r -EL  -maarch64elf -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T /usr/src/linux-headers-6.18.29+rpt-rpi-v8-rt/arch/arm64/module.lds -o ptp-i2s-sync.ko ptp-i2s-sync.o ptp-i2s-sync.mod.o .module-common.o

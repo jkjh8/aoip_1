@@ -1,11 +1,11 @@
 [Unit]
-Description=PTP Frequency Sync (ptp4l freq → CLOCK_REALTIME)
+Description=PTP TAI Sync (PHC freq → CLOCK_REALTIME + tick reset)
 After=ptp4l.service
 Requires=ptp4l.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /usr/local/sbin/ptp-freq-sync.py
+ExecStart=/usr/local/sbin/ptp-tai-sync /dev/ptp0
 Restart=on-failure
 RestartSec=5
 User=root

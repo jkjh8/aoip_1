@@ -507,6 +507,32 @@ socket.emit('dsp:restore', (res) => {
 
 ---
 
+#### `dsp:mode:get` / `dsp:mode:set` — I2S Mono/Stereo 처리 모드
+
+I2S Analog 1/2 채널의 모노/스테레오 DSP 처리 모드를 조회/설정합니다.
+스테레오 모드에서는 ch1↔ch2 의 DSP 파라미터, gain, mute 가 mirror 됩니다.
+모드 변경 진입 시 ch2 가 ch1 의 값으로 덮어써집니다. 자세한 의미는 `docs/dsp-api.md` 참고.
+
+```js
+// 조회
+socket.emit('dsp:mode:get', (res) => {
+  // res: { ok: true, mode: { input: 'mono'|'stereo', output: 'mono'|'stereo' } }
+});
+
+// 설정 — direction+mode 또는 input/output 단축형
+socket.emit('dsp:mode:set', { input: 'stereo' }, (res) => {
+  // res: { ok: true, mode: { input: 'stereo', output: 'mono' } }
+});
+socket.emit('dsp:mode:set', { direction: 'output', mode: 'stereo' }, (res) => { ... });
+
+// 서버 브로드캐스트 (모드 변경 시 + 최초 연결 시)
+socket.on('dsp:mode', ({ input, output }) => { ... });
+```
+
+REST 대응: `GET /api/dsp/mode`, `PUT /api/dsp/mode`.
+
+---
+
 ### DSP 파라미터
 
 #### `dsp:hpf` — HPF (High Pass Filter) 설정

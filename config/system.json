@@ -1,0 +1,25 @@
+{
+  "log": {
+    "enabled": true,
+    "debug": true
+  },
+  "serial": {
+    "enabled": true,
+    "device": "/dev/ttyAMA4",
+    "baudRate": 9600,
+    "dataBits": 8,
+    "stopBits": 1,
+    "parity": "none",
+    "tcpPort": 4001
+  },
+  "aes67": {
+    "url": "http://127.0.0.1:8080",
+    "service": "aes67-daemon.service",
+    "statusFile": "/home/kjh/aes67/status.json",
+    "daemonConf": "/home/kjh/aes67/daemon.conf"
+  },
+  "network": {
+    "interface": "eth0",
+    "configFile": "/etc/systemd/network/20-wired.network"
+  }
+}

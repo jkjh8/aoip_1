@@ -1,7 +1,30 @@
 import { Router } from 'express';
 import { getNetworkInfo, setStaticIp, setDhcp, rebootSystem } from '../../lib/system.js';
+import { getSystemConfig, saveSystemConfig } from '../../lib/config.js';
+import { setLogEnabled, setLogDebug } from '../../lib/logger.js';
 
 const router = Router();
+
+// GET /system/log → { enabled, debug }
+router.get('/log', (_req, res) => {
+  const { log = {} } = getSystemConfig();
+  res.json({ enabled: log.enabled ?? true, debug: log.debug ?? false });
+});
+
+// POST /system/log  body: { enabled?, debug? }
+router.post('/log', (req, res) => {
+  const { enabled, debug } = req.body ?? {};
+  if (enabled !== undefined && typeof enabled !== 'boolean') return res.status(400).json({ ok: false, error: 'enabled must be boolean' });
+  if (debug   !== undefined && typeof debug   !== 'boolean') return res.status(400).json({ ok: false, error: 'debug must be boolean' });
+
+  const sys = getSystemConfig();
+  sys.log = { ...(sys.log ?? {}), ...(enabled !== undefined && { enabled }), ...(debug !== undefined && { debug }) };
+  saveSystemConfig();
+
+  if (enabled !== undefined) setLogEnabled(enabled);
+  if (debug   !== undefined) setLogDebug(debug);
+  res.json({ ok: true, log: sys.log });
+});
 
 // GET /system/network?iface=eth0
 router.get('/network', (req, res) => {

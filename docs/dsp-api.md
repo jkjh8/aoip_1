@@ -172,6 +172,88 @@ interface DspChangedEvent {
 
 ---
 
+## I2S Mono / Stereo Processing Mode
+
+The on-board I2S codec (`config/audio.json` → `jack`, defaults to Analog 1/2) supports a runtime-selectable **mono** or **stereo** DSP processing mode. The mode is set independently for the input and output direction.
+
+- **mono** (default): channels 1 and 2 are processed independently. Each channel keeps its own DSP parameters, gain, and mute state.
+- **stereo**: channels 1 and 2 are linked. Any DSP parameter, gain, or mute change made to either channel is mirrored to the other so the pair processes identically.
+
+**Linked parameters:** `trim`, `hpf`, `eq` (all 4 bands), `gate`, `comp`, `lim`, `gain`, `mute`.
+**Not linked:** `label` (each channel keeps its own name), routing, `active`.
+
+**Mode-change semantics:**
+- **mono → stereo:** channel 2 is overwritten with channel 1's current values (channel 1 is the master). Engine commands are re-issued for channel 2 to apply the mirrored state immediately.
+- **stereo → mono:** current values on both channels are preserved as-is. Subsequent edits diverge again.
+
+**Availability:** stereo mode is only valid when `jack.channels === 2`. Other configurations are forced to `mono`.
+
+### Socket.IO Events
+
+```typescript
+// Client → Server: query current mode
+socket.emit('dsp:mode:get', (res) => { /* res = { ok: true, mode: { input, output } } */ })
+
+// Client → Server: set mode. Either { direction, mode } or { input, output } shape.
+interface DspModeSetPayload {
+  direction?: 'input' | 'output'
+  mode?:      'mono'  | 'stereo'
+  input?:     'mono'  | 'stereo'  // shortcut, may be combined with output
+  output?:    'mono'  | 'stereo'
+}
+socket.emit('dsp:mode:set', { input: 'stereo' }, (res) => { /* res = { ok, mode } */ })
+
+// Server → Client: broadcast on mode change and on initial connection.
+interface DspModeEvent {
+  input:  'mono' | 'stereo'
+  output: 'mono' | 'stereo'
+}
+socket.on('dsp:mode', (mode: DspModeEvent) => { ... })
+```
+
+### REST API
+
+| Method | Path | Body | Response |
+|--------|------|------|----------|
+| GET    | `/api/dsp/mode` | — | `{ ok: true, mode: { input, output } }` |
+| PUT    | `/api/dsp/mode` | `{ input?: 'mono'\|'stereo', output?: 'mono'\|'stereo' }` | `{ ok: true, mode }` on success, `{ ok: false, error }` on validation failure |
+
+**Examples:**
+
+```bash
+# Read current mode
+curl http://localhost:3000/api/dsp/mode
+# → { "ok": true, "mode": { "input": "mono", "output": "mono" } }
+
+# Enable stereo link on inputs only
+curl -X PUT -H 'Content-Type: application/json' \
+  -d '{"input":"stereo"}' \
+  http://localhost:3000/api/dsp/mode
+# → { "ok": true, "mode": { "input": "stereo", "output": "mono" } }
+
+# Enable stereo on both directions
+curl -X PUT -H 'Content-Type: application/json' \
+  -d '{"input":"stereo","output":"stereo"}' \
+  http://localhost:3000/api/dsp/mode
+```
+
+### Persistence
+
+The mode is persisted in `config/channels.json` under the top-level `i2s` field:
+
+```json
+{
+  "inputs": [ ... ],
+  "outputs": [ ... ],
+  "routing": [ ... ],
+  "i2s": { "input": "mono", "output": "mono" }
+}
+```
+
+On server restart the saved mode is restored before `restoreDspState()` runs, so channel 1's saved parameters (which equal channel 2's in stereo mode) are re-applied to both channels.
+
+---
+
 ## DSP State Persistence
 
 DSP parameters are persisted per-channel in `config/channels.json` under a `dsp` key. On engine restart, `restoreDspState()` replays all saved parameters automatically.

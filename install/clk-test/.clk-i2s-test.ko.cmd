@@ -1,0 +1,1 @@
+savedcmd_clk-i2s-test.ko := aarch64-linux-gnu-ld -r -EL  -maarch64elf -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T /usr/src/linux-headers-6.18.29+rpt-rpi-v8-rt/arch/arm64/module.lds -o clk-i2s-test.ko clk-i2s-test.o clk-i2s-test.mod.o .module-common.o

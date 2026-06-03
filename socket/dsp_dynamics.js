@@ -1,5 +1,5 @@
 import { sendGate, sendComp, sendLim, sendGrEnable } from '../lib/dsp/dynamics.js'
-import { setChannelDsp } from '../lib/channels/index.js'
+import { setChannelDsp, getPair } from '../lib/channels/index.js'
 import logger from '../lib/logger.js'
 
 export default function register(socket, ctx) {
@@ -43,14 +43,22 @@ export default function register(socket, ctx) {
     _t.clear()
   })
 
+  function emitChanged(type, id, key, params) {
+    ctx?.io?.emit('dsp:changed', { type, id, key, params })
+  }
+
   socket.on('dsp:gate', ({ type, id, params = {} } = {}, cb) => {
     ctx?.markDspBusy()
     throttle(`gate:${type}:${id}`, cb, () => {
       try {
         const dir = type === 'input' ? 'in' : 'out'
         sendGate(dir, id, params)
+        const pair = getPair(type, id)
+        if (pair) sendGate(dir, pair, params)
         setChannelDsp(type, id, 'gate', params)
-        logger.info('[dsp:gate] %s ch%d  %o', type, id, params)
+        emitChanged(type, id, 'gate', params)
+        if (pair) emitChanged(type, pair, 'gate', params)
+        logger.info('[dsp:gate] %s ch%d%s  %o', type, id, pair ? `+ch${pair}` : '', params)
       } catch (e) { logger.warn('[dsp:gate] error: %s', e.message); cb?.({ ok: false, error: e.message }) }
     })
   })
@@ -61,8 +69,12 @@ export default function register(socket, ctx) {
       try {
         const dir = type === 'input' ? 'in' : 'out'
         sendComp(dir, id, params)
+        const pair = getPair(type, id)
+        if (pair) sendComp(dir, pair, params)
         setChannelDsp(type, id, 'comp', params)
-        logger.info('[dsp:comp] %s ch%d  %o', type, id, params)
+        emitChanged(type, id, 'comp', params)
+        if (pair) emitChanged(type, pair, 'comp', params)
+        logger.info('[dsp:comp] %s ch%d%s  %o', type, id, pair ? `+ch${pair}` : '', params)
       } catch (e) { logger.warn('[dsp:comp] error: %s', e.message); cb?.({ ok: false, error: e.message }) }
     })
   })
@@ -72,8 +84,12 @@ export default function register(socket, ctx) {
     throttle(`lim:${id}`, cb, () => {
       try {
         sendLim(id, params)
+        const pair = getPair('output', id)
+        if (pair) sendLim(pair, params)
         setChannelDsp('output', id, 'lim', params)
-        logger.info('[dsp:lim] output ch%d  %o', id, params)
+        emitChanged('output', id, 'lim', params)
+        if (pair) emitChanged('output', pair, 'lim', params)
+        logger.info('[dsp:lim] output ch%d%s  %o', id, pair ? `+ch${pair}` : '', params)
       } catch (e) { logger.warn('[dsp:lim] error: %s', e.message); cb?.({ ok: false, error: e.message }) }
     })
   })

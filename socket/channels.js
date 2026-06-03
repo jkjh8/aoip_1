@@ -1,8 +1,8 @@
-import { getChannels, getAllChannelDefs, setChannelActive, setGain, setMute, setLabel, addRoute, removeRoute, getSavedRoutes } from '../lib/channels/index.js';
+import { getChannels, getAllChannelDefs, setChannelActive, setGain, setMute, setLabel, addRoute, removeRoute, getSavedRoutes, getPair, getI2sMode, setI2sMode } from '../lib/channels/index.js';
 import { sendGain, sendMute, sendBypass, connect, disconnect } from '../lib/dsp/index.js';
 import { startRtpStream, stopRtpStream, startRtpStreams } from '../lib/rtp/index.js';
 
-export default function register(socket, { broadcastStatus, config }) {
+export default function register(socket, { broadcastStatus, broadcastChannels, config }) {
   socket.on('route:add', async ({ src, dst } = {}, cb) => {
     try {
       if (!src || !dst) return cb?.({ ok: false, error: 'src and dst required' });
@@ -26,7 +26,10 @@ export default function register(socket, { broadcastStatus, config }) {
   socket.on('ch:gain', async ({ type, id, gain } = {}, cb) => {
     try {
       setGain(type, id, gain);
-      sendGain(type === 'input' ? 'in' : 'out', id, gain);
+      const dir = type === 'input' ? 'in' : 'out';
+      sendGain(dir, id, gain);
+      const pair = getPair(type, id);
+      if (pair) sendGain(dir, pair, gain);
       await broadcastStatus();
       cb?.({ ok: true });
     } catch (e) { cb?.({ ok: false, error: e.message }); }
@@ -35,7 +38,10 @@ export default function register(socket, { broadcastStatus, config }) {
   socket.on('ch:mute', async ({ type, id, muted } = {}, cb) => {
     try {
       setMute(type, id, muted);
-      sendMute(type === 'input' ? 'in' : 'out', id, muted);
+      const dir = type === 'input' ? 'in' : 'out';
+      sendMute(dir, id, muted);
+      const pair = getPair(type, id);
+      if (pair) sendMute(dir, pair, muted);
       await broadcastStatus();
       cb?.({ ok: true });
     } catch (e) { cb?.({ ok: false, error: e.message }); }
@@ -107,6 +113,25 @@ export default function register(socket, { broadcastStatus, config }) {
       }
       await broadcastStatus()
       cb?.({ ok: true })
+    } catch (e) { cb?.({ ok: false, error: e.message }) }
+  });
+
+  socket.on('dsp:mode:get', (cb) => {
+    try { cb?.({ ok: true, mode: getI2sMode() }); }
+    catch (e) { cb?.({ ok: false, error: e.message }); }
+  });
+
+  socket.on('dsp:mode:set', async ({ direction, mode, input, output } = {}, cb) => {
+    try {
+      const changes = []
+      if (direction && mode) changes.push([direction, mode])
+      if (input)  changes.push(['input',  input])
+      if (output) changes.push(['output', output])
+      if (!changes.length) return cb?.({ ok: false, error: 'direction+mode or input/output required' })
+      for (const [d, m] of changes) setI2sMode(d, m)
+      broadcastChannels?.()
+      await broadcastStatus()
+      cb?.({ ok: true, mode: getI2sMode() })
     } catch (e) { cb?.({ ok: false, error: e.message }) }
   });
 

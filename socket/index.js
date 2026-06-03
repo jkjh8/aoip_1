@@ -2,7 +2,7 @@ import { Server as SocketIO } from 'socket.io';
 import { getBridgeStatus } from '../lib/bridges.js';
 import { getDaemonStatus, daemonEvents, enrichSinks } from '../lib/aes67daemon.js';
 import { getRtpStreamStatus, streamEvents } from '../lib/rtp/index.js';
-import { getChannels, getSavedRoutes, syncAes67Active } from '../lib/channels/index.js';
+import { getChannels, getSavedRoutes, syncAes67Active, getI2sMode, i2sModeEvents } from '../lib/channels/index.js';
 import { isDspRunning, getDspUptime, getGrSnapshot } from '../lib/dsp/index.js';
 
 import logger from '../lib/logger.js';
@@ -42,6 +42,7 @@ async function snapshot() {
     channels:    getChannels(),
     connections,
     aes67:    cachedAes67Status,
+    i2s:      getI2sMode(),
   };
 }
 
@@ -128,6 +129,13 @@ export function setupSocket(httpServer, config) {
     if (io.engine.clientsCount > 0) io.emit('aes67:ptp:status', data);
   });
 
+  // I2S mono/stereo mode 변경 → 클라이언트 브로드캐스트 + 채널 상태 갱신
+  i2sModeEvents.on('changed', (info) => {
+    if (io.engine.clientsCount > 0) io.emit('dsp:mode', info.mode);
+    broadcastChannels();
+    broadcastStatus();
+  });
+
   const ctx = {
     io,
     broadcastStatus,
@@ -142,6 +150,7 @@ export function setupSocket(httpServer, config) {
     await refreshAes67Status();
     try { socket.emit('status', await snapshot()); } catch { /* ignore */ }
     socket.emit('channels', getChannels());
+    socket.emit('dsp:mode', getI2sMode());
     const _allStreams = getRtpStreamStatus();
     socket.emit('streams', { inputs: _allStreams.filter(s => s.type === 'rtp_in'), outputs: _allStreams.filter(s => s.type === 'rtp_out') });
 

@@ -16,7 +16,7 @@ setInterval(() => _sdNotify('WATCHDOG=1'), 10_000).unref();
 import apiRoutes from './routes/index.js';
 import { setupSocket } from './socket/index.js';
 import logger from './lib/logger.js';
-import { getConfig, reloadConfig } from './lib/config.js';
+import { getConfig, reloadConfig, getSystemConfig } from './lib/config.js';
 import { getDspChannelCounts, restoreRoutes, restoreDspState, syncAes67Active } from './lib/channels/index.js';
 import { startupDsp, registerAnalogBridge, waitForDspReady, addEngineRestartListener, sendToEngine, markStartupDone, shutdownDsp } from './lib/dsp/index.js';
 import { startupBridges, reregisterBridges } from './lib/bridges.js';
@@ -87,7 +87,7 @@ async function startup() {
   ]);
   broadcastChannels();
 
-  startSerial(config)
+  startSerial(getSystemConfig())
   markStartupDone();
 
   addEngineRestartListener(async () => {

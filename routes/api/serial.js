@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { getConfig, saveConfig } from '../../lib/config.js'
+import { getSystemConfig, saveSystemConfig } from '../../lib/config.js'
 import { startSerial, stopSerial, restartSerial, getSerialStatus } from '../../lib/serial/index.js'
 
 const router = Router()
@@ -26,7 +26,7 @@ router.get('/status', (_req, res) => {
 
 // GET /serial/config
 router.get('/config', (_req, res) => {
-  const { serial = {} } = getConfig()
+  const { serial = {} } = getSystemConfig()
   res.json(serial)
 })
 
@@ -36,28 +36,28 @@ router.post('/config', (req, res) => {
   const err = _validate(req.body)
   if (err) return res.status(400).json({ ok: false, error: err })
 
-  const config = getConfig()
-  config.serial = { ...(config.serial ?? {}), ...req.body }
-  saveConfig()
+  const sys = getSystemConfig()
+  sys.serial = { ...(sys.serial ?? {}), ...req.body }
+  saveSystemConfig()
 
-  restartSerial(config)
-  res.json({ ok: true, serial: config.serial })
+  restartSerial(sys)
+  res.json({ ok: true, serial: sys.serial })
 })
 
 // POST /serial/start
 router.post('/start', (_req, res) => {
-  const config = getConfig()
-  config.serial = { ...(config.serial ?? {}), enabled: true }
-  saveConfig()
-  startSerial(config)
+  const sys = getSystemConfig()
+  sys.serial = { ...(sys.serial ?? {}), enabled: true }
+  saveSystemConfig()
+  startSerial(sys)
   res.json({ ok: true })
 })
 
 // POST /serial/stop
 router.post('/stop', (_req, res) => {
-  const config = getConfig()
-  config.serial = { ...(config.serial ?? {}), enabled: false }
-  saveConfig()
+  const sys = getSystemConfig()
+  sys.serial = { ...(sys.serial ?? {}), enabled: false }
+  saveSystemConfig()
   stopSerial()
   res.json({ ok: true })
 })

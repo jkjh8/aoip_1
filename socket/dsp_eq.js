@@ -1,5 +1,5 @@
 import { sendTrim, sendHpf, sendEqBand } from '../lib/dsp/eq.js'
-import { setChannelDsp } from '../lib/channels/index.js'
+import { setChannelDsp, getPair } from '../lib/channels/index.js'
 import logger from '../lib/logger.js'
 
 export default function register(socket, ctx) {
@@ -17,14 +17,22 @@ export default function register(socket, ctx) {
     _t.clear()
   })
 
+  function emitChanged(type, id, key, params) {
+    ctx?.io?.emit('dsp:changed', { type, id, key, params })
+  }
+
   socket.on('dsp:trim', ({ type, id, db } = {}, cb) => {
     ctx?.markDspBusy()
     debounce(`trim:${type}:${id}`, cb, () => {
       try {
         const dir = type === 'input' ? 'in' : 'out'
         sendTrim(dir, id, db)
+        const pair = getPair(type, id)
+        if (pair) sendTrim(dir, pair, db)
         setChannelDsp(type, id, 'trim', Number(db))
-        logger.info('[dsp:trim] %s ch%d  db=%s', type, id, db)
+        emitChanged(type, id, 'trim', Number(db))
+        if (pair) emitChanged(type, pair, 'trim', Number(db))
+        logger.info('[dsp:trim] %s ch%d%s  db=%s', type, id, pair ? `+ch${pair}` : '', db)
         cb?.({ ok: true })
       } catch (e) { logger.warn('[dsp:trim] error: %s', e.message); cb?.({ ok: false, error: e.message }) }
     })
@@ -35,8 +43,12 @@ export default function register(socket, ctx) {
     debounce(`hpf:${id}`, cb, () => {
       try {
         sendHpf('in', id, params)
+        const pair = getPair('input', id)
+        if (pair) sendHpf('in', pair, params)
         setChannelDsp('input', id, 'hpf', params)
-        logger.info('[dsp:hpf] input ch%d  %o', id, params)
+        emitChanged('input', id, 'hpf', params)
+        if (pair) emitChanged('input', pair, 'hpf', params)
+        logger.info('[dsp:hpf] input ch%d%s  %o', id, pair ? `+ch${pair}` : '', params)
         cb?.({ ok: true })
       } catch (e) { logger.warn('[dsp:hpf] error: %s', e.message); cb?.({ ok: false, error: e.message }) }
     })
@@ -48,8 +60,13 @@ export default function register(socket, ctx) {
       try {
         const dir = type === 'input' ? 'in' : 'out'
         sendEqBand(dir, id, band, params)
-        setChannelDsp(type, id, 'eq', { band: Number(band), ...params })
-        logger.info('[dsp:eq] %s ch%d band%d  %o', type, id, band, params)
+        const pair = getPair(type, id)
+        if (pair) sendEqBand(dir, pair, band, params)
+        const eqParams = { band: Number(band), ...params }
+        setChannelDsp(type, id, 'eq', eqParams)
+        emitChanged(type, id, 'eq', eqParams)
+        if (pair) emitChanged(type, pair, 'eq', eqParams)
+        logger.info('[dsp:eq] %s ch%d%s band%d  %o', type, id, pair ? `+ch${pair}` : '', band, params)
         cb?.({ ok: true })
       } catch (e) { logger.warn('[dsp:eq] error: %s', e.message); cb?.({ ok: false, error: e.message }) }
     })

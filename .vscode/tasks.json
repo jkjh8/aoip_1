@@ -4,7 +4,7 @@
     {
       "label": "Sync → 임베디드",
       "type": "shell",
-      "command": "bash /mnt/c/Users/kjh/Desktop/DEV/aoip_1/scripts/sync.sh",
+      "command": "bash /mnt/c/Users/kjh/Desktop/DEV/aoip_1/scripts/tools/sync.sh",
       "group": "build",
       "presentation": {
         "reveal": "always",
@@ -35,7 +35,7 @@
     {
       "label": "Deploy & Restart",
       "type": "shell",
-      "command": "bash /mnt/c/Users/kjh/Desktop/DEV/aoip_1/scripts/deploy.sh",
+      "command": "bash /mnt/c/Users/kjh/Desktop/DEV/aoip_1/scripts/tools/deploy.sh",
       "group": "build",
       "presentation": {
         "reveal": "always",

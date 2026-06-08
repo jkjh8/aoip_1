@@ -154,8 +154,8 @@ export function setupSocket(httpServer, config) {
     const _allStreams = getRtpStreamStatus();
     socket.emit('streams', { inputs: _allStreams.filter(s => s.type === 'rtp_in'), outputs: _allStreams.filter(s => s.type === 'rtp_out') });
 
-    socket.on('disconnect', () => {
-      logger.info('[io] disconnected:', socket.id);
+    socket.on('disconnect', (reason) => {
+      logger.info('[io] disconnected: %s reason=%s', socket.id, reason);
     });
 
     registerStreams(socket, ctx);

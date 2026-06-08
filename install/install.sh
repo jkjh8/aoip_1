@@ -198,6 +198,18 @@ else
 fi
 
 # =============================================================================
+# 5b. ptp-i2s-sync 커널 모듈 (I2S ↔ RAVENNA 클럭 동기화)
+# =============================================================================
+section "5b. ptp-i2s-sync 커널 모듈"
+
+CLK_SYNC_SH="${INSTALL_DIR}/install-clk-sync.sh"
+if [ -f "${CLK_SYNC_SH}" ]; then
+    bash "${CLK_SYNC_SH}"
+else
+    warn "install-clk-sync.sh 없음 — clk 동기화 모듈 건너뜀"
+fi
+
+# =============================================================================
 # 6. uac2-gadget.sh 배포
 # =============================================================================
 section "6. UAC2 Gadget 스크립트 배포"
@@ -359,7 +371,7 @@ section "9. 권한 설정"
 
 chmod +x "${INSTALL_DIR}/aes67/aes67-daemon"
 chmod +x "${INSTALL_DIR}/aes67/scripts/"*.sh
-chmod +x "${AOIP_DIR}/scripts/"*.sh
+chmod +x "${AOIP_DIR}/scripts/tools/"*.sh
 
 if [ -n "${TARGET_USER}" ]; then
     usermod -aG audio "${TARGET_USER}"

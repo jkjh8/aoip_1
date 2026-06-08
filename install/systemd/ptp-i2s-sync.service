@@ -1,0 +1,17 @@
+[Unit]
+Description=PTP-synchronized I2S clock correction (loads kernel module + sets sysfs perms)
+DefaultDependencies=no
+After=local-fs.target systemd-modules-load.service
+Before=aoip.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 1) 모듈 로드 (이미 로드돼 있으면 modprobe 가 멱등하게 동작)
+ExecStart=/sbin/modprobe ptp-i2s-sync
+# 2) sysfs 권한: aoip_engine (audio 그룹) 가 freq_ppb 에 쓰기 가능하도록.
+#    kernel 은 world-writable(0002) 을 금지하므로 group=audio + 0664 로 둔다.
+ExecStart=/bin/sh -c 'chgrp audio /sys/kernel/ptp_i2s_sync/freq_ppb && chmod 0664 /sys/kernel/ptp_i2s_sync/freq_ppb'
+
+[Install]
+WantedBy=multi-user.target

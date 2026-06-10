@@ -14,7 +14,53 @@ import registerDspEq    from './dsp_eq.js';
 import registerDspDyn   from './dsp_dynamics.js';
 
 const STATUS_INTERVAL = 2000;
-const LEVEL_INTERVAL  = 100;  // 10 fps
+const LEVEL_INTERVAL  = 33;   // 30 fps
+
+// level(dB) → Uint8: -120..0 dB → 0..240 (0.5 dB step). 범위 밖은 클램프.
+function _encLevel(dB) {
+  const v = Math.round((dB + 120) * 2);
+  return v < 0 ? 0 : v > 255 ? 255 : v;
+}
+// gr reduction(dB, 음수/0) → Uint8: 0..-60 dB → 0..120 (0.5 dB step)
+function _encGr(dB) {
+  const v = Math.round(-dB * 2);
+  return v < 0 ? 0 : v > 255 ? 255 : v;
+}
+
+function _encodeLevels(ch) {
+  const ins = ch.inputs, outs = ch.outputs;
+  const n = ins.length, m = outs.length;
+  // [u8 n][u8 m] + n*[u8 id, u8 lvl] + m*[u8 id, u8 lvl]
+  const buf = Buffer.allocUnsafe(2 + (n + m) * 2);
+  buf[0] = n; buf[1] = m;
+  let o = 2;
+  for (let i = 0; i < n; i++) { buf[o++] = ins[i].id  & 0xff; buf[o++] = _encLevel(ins[i].level); }
+  for (let i = 0; i < m; i++) { buf[o++] = outs[i].id & 0xff; buf[o++] = _encLevel(outs[i].level); }
+  return buf;
+}
+
+function _encodeGr(gr) {
+  const ins = gr.inputs, outs = gr.outputs;
+  const n = ins.length, m = outs.length;
+  // [u8 n][u8 m] + n*[u8 ch, u8 gate, u8 comp] + m*[u8 ch, u8 gate, u8 comp, u8 lim]
+  const buf = Buffer.allocUnsafe(2 + n * 3 + m * 4);
+  buf[0] = n; buf[1] = m;
+  let o = 2;
+  for (let i = 0; i < n; i++) {
+    const r = ins[i];
+    buf[o++] = r.ch & 0xff;
+    buf[o++] = _encGr(r.gate ?? 0);
+    buf[o++] = _encGr(r.comp ?? 0);
+  }
+  for (let i = 0; i < m; i++) {
+    const r = outs[i];
+    buf[o++] = r.ch & 0xff;
+    buf[o++] = _encGr(r.gate ?? 0);
+    buf[o++] = _encGr(r.comp ?? 0);
+    buf[o++] = _encGr(r.lim  ?? 0);
+  }
+  return buf;
+}
 
 let cachedConnections = [];
 let cachedAes67Status = { running: false, ready: false, url: 'http://127.0.0.1:8080' };
@@ -95,17 +141,14 @@ export function setupSocket(httpServer, config) {
     });
   }
 
-  // 레벨 미터 — 빠른 주기로 별도 emit (DSP 커맨드 처리 중엔 억제)
+  // 레벨 미터 — 모든 연결 클라이언트에 binary broadcast (DSP 커맨드 처리 중엔 억제)
   setInterval(() => {
     if (io.engine.clientsCount === 0) return;
     if (Date.now() < _dspBusyUntil) return;
     const ch = getChannels();
-    io.emit('levels', {
-      inputs:  ch.inputs.map(c  => ({ id: c.id, level: c.level })),
-      outputs: ch.outputs.map(c => ({ id: c.id, level: c.level })),
-    });
+    io.emit('levels', _encodeLevels(ch));
     const gr = getGrSnapshot();
-    if (gr.inputs.length || gr.outputs.length) io.emit('gr', gr);
+    if (gr.inputs.length || gr.outputs.length) io.emit('gr', _encodeGr(gr));
   }, LEVEL_INTERVAL);
 
   // 전체 상태 — 느린 주기

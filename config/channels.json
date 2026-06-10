@@ -527,20 +527,20 @@
         "comp": {
           "enabled": false,
           "threshold": -29,
-          "ratio": 2,
+          "ratio": 5,
           "knee": 6,
           "attackMs": 10,
           "releaseMs": 20,
           "makeupDb": 0
         },
         "lim": {
-          "enabled": true,
-          "threshold": -13.5,
+          "enabled": false,
+          "threshold": -23,
           "releaseMs": 100
         },
         "gate": {
           "enabled": false,
-          "threshold": -30,
+          "threshold": -19,
           "attackMs": 5,
           "holdMs": 5,
           "releaseMs": 10,
@@ -595,20 +595,20 @@
         "comp": {
           "enabled": false,
           "threshold": -29,
-          "ratio": 2,
+          "ratio": 5,
           "knee": 6,
           "attackMs": 10,
           "releaseMs": 20,
           "makeupDb": 0
         },
         "lim": {
-          "enabled": true,
-          "threshold": -13.5,
+          "enabled": false,
+          "threshold": -23,
           "releaseMs": 100
         },
         "gate": {
           "enabled": false,
-          "threshold": -30,
+          "threshold": -19,
           "attackMs": 5,
           "holdMs": 5,
           "releaseMs": 10,
@@ -1133,6 +1133,38 @@
     {
       "src": "aes67:out_1",
       "dst": "stream:sin_1"
+    },
+    {
+      "src": "aes67:out_9",
+      "dst": "stream:sin_9"
+    },
+    {
+      "src": "aes67:out_10",
+      "dst": "stream:sin_10"
+    },
+    {
+      "src": "aes67:out_11",
+      "dst": "stream:sin_11"
+    },
+    {
+      "src": "aes67:out_12",
+      "dst": "stream:sin_12"
+    },
+    {
+      "src": "aes67:out_13",
+      "dst": "stream:sin_13"
+    },
+    {
+      "src": "aes67:out_14",
+      "dst": "stream:sin_14"
+    },
+    {
+      "src": "aes67:out_15",
+      "dst": "stream:sin_15"
+    },
+    {
+      "src": "aes67:out_16",
+      "dst": "stream:sin_16"
     }
   ],
   "i2s": {

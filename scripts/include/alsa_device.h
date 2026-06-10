@@ -95,6 +95,15 @@ typedef struct {
      * 캡처 스레드가 쓰고, DSP 스레드가 읽음 */
     _Atomic int      ravenna_ptp_locked;
 
+    /* 일반 ALSA (USB UAC2 등) 호스트 스트림 활성: 0=비활성(뮤트), 1=활성
+     * 캡처 스레드가 readi 성공/EIO 전환 시 갱신, DSP 스레드가 읽음 */
+    _Atomic int      cap_stream_active;
+
+    /* 일반 ALSA 재생 측 호스트 스트림 활성: 0=비활성, 1=활성
+     * 재생 스레드가 writei 성공/EIO 전환 시 갱신, DSP 스레드가 읽어 out_ring 채움 게이트.
+     * 매 EIO마다 out_ring 리셋하면 잠시 회복돼도 데이터가 없어 무음만 나가는 문제 방지. */
+    _Atomic int      play_stream_active;
+
     /* PTP 언락 시 재생 스레드에 out_ring 플러시 요청:
      * 캡처 스레드가 1로 설정 → 재생 스레드가 rb_reset 후 0으로 */
     _Atomic int      ravenna_flush;

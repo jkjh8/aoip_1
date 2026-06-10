@@ -134,8 +134,45 @@ static void read_alsa_device(Device *d)
         } else {
             d->cap_underrun = 0;
         }
-    } else {
+    } else if (d->is_i2s) {
         read_alsa_master(d);
+    } else {
+        /* 일반 ALSA (USB UAC2 등): in_ring + SRC, cap_stream_active 게이트.
+         * Ravenna 와 동일 구조이지만 PTP/holdover 로직 없음. */
+        for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
+            g_in_ptr[d->ch_start+c] = g_in_buf_static[d->ch_start+c];
+        if (!atomic_load_explicit(&d->cap_stream_active, memory_order_acquire)) {
+            for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
+                memset(g_in_ptr[d->ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
+            d->cap_prebuf_ready = 0;
+            return;
+        }
+        int fill_target = d->period * 2;  /* USB period 2개 ≈ 21ms @512/48k */
+        if (!d->cap_prebuf_ready) {
+            if (rb_avail(&d->in_ring) < fill_target) {
+                for (int c = 0; c < d->channels && (d->ch_start+c) < MAX_CH; c++)
+                    memset(g_in_ptr[d->ch_start+c], 0, (size_t)g_period_frames * sizeof(float));
+                return;
+            }
+            src_reset(d->cap_src);
+            pi_reset(&d->cap_pi);
+            d->cap_prebuf_ready = 1;
+            fprintf(stderr, "[aoip_engine] alsa '%s': cap prebuffer done (fill=%d), SRC ready\n",
+                    d->name, rb_avail(&d->in_ring));
+        }
+        if (ring_capture_src(d->cap_src, &d->cap_pi, &d->in_ring,
+                             d->tmp_cap_in, d->tmp_cap_out,
+                             fill_target, d->channels, d->ch_start) == 0) {
+            d->cap_underrun++;
+            if (d->cap_underrun >= 100) {
+                src_reset(d->cap_src);
+                pi_reset(&d->cap_pi);
+                d->cap_prebuf_ready = 0;
+                d->cap_underrun = 0;
+            }
+        } else {
+            d->cap_underrun = 0;
+        }
     }
 }
 

@@ -176,6 +176,11 @@ int ring_capture_src(SRC_STATE *src, PiState *pi,
 /* ── RAVENNA 재생 SRC ────────────────────────────────────────────── */
 void alsa_playback_src(Device *d)
 {
+    /* DSP는 호스트 스트림 활성 여부와 무관하게 계속 out_ring을 채운다.
+     * UAC2 비활성 동안 ring이 차서 rb_write가 잘려도 무해 — 재활성화 시점에
+     * 재생 스레드가 rb_reset(rp=wp)으로 현재 write 위치로 점프해서 그 이후 신선한
+     * 데이터부터 재생한다. */
+
     /* out_ring 리셋 후 SRC 내부 delay line의 이전 오디오 잔재를 제거.
      * 리셋 없이 재개하면 SRC 히스토리가 새 오디오와 섞여 '외계인 소리' 발생. */
     if (atomic_load_explicit(&d->play_src_reset, memory_order_acquire)) {

@@ -356,8 +356,18 @@ static void *alsa_capture_thread(void *arg)
                     usleep(50000);
                 }
             } else {
-                if (cap_err_count++ == 0)
+                /* 일반 ALSA(USB UAC2 등): 호스트 스트림 미활성.
+                 * 활성→비활성 전이 시 in_ring/SRC 리셋 + DSP 측 cap_stream_active=0 으로 뮤트. */
+                if (atomic_load_explicit(&d->cap_stream_active, memory_order_relaxed)) {
+                    fprintf(stderr, "[aoip_engine] cap %s: host stream inactive (EIO), muting\n",
+                            d->name);
+                    atomic_store_explicit(&d->cap_stream_active, 0, memory_order_release);
+                    rb_reset(&d->in_ring);
+                    if (d->cap_src) src_reset(d->cap_src);
+                    cap_err_count = 1;
+                } else if (cap_err_count++ == 0) {
                     fprintf(stderr, "[aoip_engine] cap %s: EIO, host stream not active\n", d->name);
+                }
                 snd_pcm_prepare(pcm);
                 usleep(100000);
             }
@@ -459,6 +469,21 @@ static void *alsa_capture_thread(void *arg)
             }
             written = (int)n;
         } else {
+            /* 일반 ALSA(USB UAC2 등): 비활성→활성 전이 시 ring/SRC 리셋 + DSP 측 언뮤트.
+             * Ravenna 는 PTP 잠금 로직이 별도 관리하므로 건드리지 않음. */
+            if (!d->is_ravenna &&
+                !atomic_load_explicit(&d->cap_stream_active, memory_order_relaxed)) {
+                fprintf(stderr, "[aoip_engine] cap %s: host stream active, starting\n", d->name);
+                rb_reset(&d->in_ring);
+                if (d->cap_src) {
+                    src_reset(d->cap_src);
+                    d->cap_pi.ratio  = 1.0;
+                    d->cap_pi.integ  = 0.0;
+                    d->cap_pi.smooth = 0.0;
+                }
+                atomic_store_explicit(&d->cap_stream_active, 1, memory_order_release);
+                cap_err_count = 0;
+            }
             i32_to_f32_block(ibuf, fbuf, (int)n * d->channels);
             /* RAVENNA/기타: 기존 RingBuf에 기록 */
             written = rb_write(&d->in_ring, fbuf, (int)n);
@@ -622,9 +647,9 @@ static void *alsa_playback_thread(void *arg)
             while (!g_quit && snd_pcm_resume(pcm) == -EAGAIN) usleep(10000);
             snd_pcm_prepare(pcm);
         } else if (n == -EIO) {
-            rb_reset(&d->out_ring);
-            atomic_store_explicit(&d->play_src_reset, 1, memory_order_release);
             if (d->is_ravenna) {
+                rb_reset(&d->out_ring);
+                atomic_store_explicit(&d->play_src_reset, 1, memory_order_release);
                 /* PTP 미잠금: PCM close → 재오픈 주기로 잠금 확인 */
                 if (play_err_count++ == 0)
                     fprintf(stderr, "[aoip_engine] play %s: EIO (PTP not locked), pausing\n",
@@ -658,10 +683,18 @@ static void *alsa_playback_thread(void *arg)
                 }
                 if (!pcm && !d->quit_play && !g_quit) continue;
             } else {
-                /* UAC2 가젯: 호스트 스트림 미활성 */
-                if (play_err_count++ == 0)
+                /* UAC2 가젯: 호스트 스트림 미활성.
+                 * DSP는 계속 ring을 채우므로 여기서 ring 건드리지 않음 — 복귀 시점에
+                 * rb_reset 으로 현재 write 위치(=가장 신선한 오디오)로 점프한다. */
+                if (atomic_load_explicit(&d->play_stream_active, memory_order_relaxed)) {
+                    fprintf(stderr, "[aoip_engine] play %s: host stream inactive (EIO)\n",
+                            d->name);
+                    atomic_store_explicit(&d->play_stream_active, 0, memory_order_release);
+                    play_err_count = 1;
+                } else if (play_err_count++ == 0) {
                     fprintf(stderr, "[aoip_engine] play %s: EIO, host stream not active\n",
                             d->name);
+                }
                 snd_pcm_prepare(pcm);
                 usleep(100000);
             }
@@ -683,6 +716,17 @@ static void *alsa_playback_thread(void *arg)
                 }
             }
         } else {
+            /* UAC2: 비활성→활성 복귀 — rb_reset 으로 read 포인터를 현재 write 위치로 점프.
+             * 비활성 동안 DSP가 채워둔 stale 오디오는 버리고, 그 다음 DSP 틱부터 신선한
+             * 데이터를 재생. SRC delay line 도 함께 리셋해 잔향 제거. */
+            if (!d->is_ravenna && !d->is_i2s &&
+                !atomic_load_explicit(&d->play_stream_active, memory_order_relaxed)) {
+                fprintf(stderr, "[aoip_engine] play %s: host stream active, resuming\n",
+                        d->name);
+                atomic_store_explicit(&d->play_stream_active, 1, memory_order_release);
+                rb_reset(&d->out_ring);
+                atomic_store_explicit(&d->play_src_reset, 1, memory_order_release);
+            }
             play_err_count = 0;
         }
     }
@@ -711,6 +755,7 @@ void device_start(Device *d)
         d->ravenna_holdover_frames = 0;
         d->ravenna_phase2_start_ns = 0;
         d->ravenna_phase2_printed  = 0;
+        atomic_store_explicit(&d->cap_stream_active, 0, memory_order_relaxed);
         pthread_create(&d->cap_tid, NULL, alsa_capture_thread, d);
     }
     if (d->mode != 1) {  /* playback */
@@ -719,6 +764,10 @@ void device_start(Device *d)
         } else {
             rb_init(&d->out_ring, RING_FRAMES, d->channels);
         }
+        /* UAC2: 활성으로 초기화 — prebuf 대기가 진행되어야 하므로 DSP가 ring을 채울 수 있게 함.
+         * 첫 writei가 EIO면 비활성으로 전이, 이후 호스트가 스트림 열면 다시 활성으로 복귀.
+         * RAVENNA/I2S는 이 플래그를 보지 않으므로 영향 없음. */
+        atomic_store_explicit(&d->play_stream_active, 1, memory_order_relaxed);
         pthread_create(&d->play_tid, NULL, alsa_playback_thread, d);
     }
     /* 링/슬롯 초기화 및 스레드 시작 완료 후에 enabled=1 설정

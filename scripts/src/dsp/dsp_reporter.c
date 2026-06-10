@@ -7,13 +7,13 @@
 #include "include/engine_globals.h"
 #include "include/engine_constants.h"
 
-/* ~12Hz (83ms) 주기로 레벨 + GR 리포트 */
+/* ~6Hz (167ms) 주기로 레벨 + GR 리포트 */
 void *reporter_thread(void *arg)
 {
     (void)arg;
     int buf_tick = 0;
     while (g_reporter_running) {
-        usleep(83000);
+        usleep(167000);
         if (g_lvl_report) {
             for (int i = 0; i < g_n_in; i++) {
                 float pk = atomic_exchange_explicit(&g_in_level[i], 0.0f, memory_order_relaxed);
@@ -37,8 +37,8 @@ void *reporter_thread(void *arg)
                 printf("gr out %d gate %.1f comp %.1f lim %.1f\n", i+1, gate, comp, lim);
             }
         }
-        /* 2초마다 rtp_in 버퍼 상태 보고 (83ms * 24 ≈ 2s) */
-        if (++buf_tick >= 24) {
+        /* 2초마다 rtp_in 버퍼 상태 보고 (167ms * 12 ≈ 2s) */
+        if (++buf_tick >= 12) {
             buf_tick = 0;
             for (int i = 0; i < g_n_rtp_in; i++) {
                 RtpStream *r = &g_rtp_in[i];

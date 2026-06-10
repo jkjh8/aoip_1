@@ -5,20 +5,45 @@
     "alsaPrio": 83,
     "ravennaPrio": 86,
     "rtpPrio": 82,
-    "periodFrames": 24,
+    "periodFrames": 48,
     "lvlReport": true,
     "startupDelay": 0,
-    "ravennaFillFrames": 56
+    "ravennaFillFrames": 96
   },
   "jack": {
     "device": "hw:aoip",
     "name": "Analog",
     "rate": 48000,
-    "period": 24,
+    "period": 48,
     "periods": 1,
-    "channels": 2
+    "channels": 2,
+    "dspEnabled": true
   },
   "bridges": [
+    {
+      "type": "audio_in",
+      "name": "USB Audio IN",
+      "device": "hw:UAC2Gadget",
+      "rate": 48000,
+      "period": 512,
+      "periods": 4,
+      "channels": 2,
+      "usb_gadget": true,
+      "enabled": true,
+      "dspEnabled": false
+    },
+    {
+      "type": "audio_out",
+      "name": "USB Audio OUT",
+      "device": "hw:UAC2Gadget",
+      "rate": 48000,
+      "period": 512,
+      "periods": 4,
+      "channels": 2,
+      "usb_gadget": true,
+      "enabled": true,
+      "dspEnabled": false
+    },
     {
       "type": "audio_in",
       "name": "AES67_in",
@@ -28,7 +53,8 @@
       "periods": 3,
       "channels": 16,
       "aes67": true,
-      "enabled": true
+      "enabled": true,
+      "dspEnabled": false
     },
     {
       "type": "audio_out",
@@ -39,7 +65,8 @@
       "periods": 1,
       "channels": 16,
       "aes67": true,
-      "enabled": true
+      "enabled": true,
+      "dspEnabled": false
     }
   ],
   "rtp_streams": [
@@ -55,7 +82,8 @@
       "enabled": true,
       "sampleRate": 0,
       "address": "0.0.0.0",
-      "codec": ""
+      "codec": "",
+      "dspEnabled": false
     },
     {
       "type": "rtp_in",
@@ -69,7 +97,8 @@
       "enabled": true,
       "sampleRate": 0,
       "address": "0.0.0.0",
-      "codec": ""
+      "codec": "",
+      "dspEnabled": false
     },
     {
       "type": "rtp_in",
@@ -83,7 +112,8 @@
       "enabled": true,
       "sampleRate": 0,
       "address": "0.0.0.0",
-      "codec": ""
+      "codec": "",
+      "dspEnabled": false
     },
     {
       "type": "rtp_in",
@@ -97,7 +127,8 @@
       "enabled": true,
       "sampleRate": 0,
       "address": "0.0.0.0",
-      "codec": ""
+      "codec": "",
+      "dspEnabled": false
     },
     {
       "type": "rtp_in",
@@ -111,7 +142,8 @@
       "enabled": true,
       "sampleRate": 0,
       "address": "0.0.0.0",
-      "codec": ""
+      "codec": "",
+      "dspEnabled": false
     },
     {
       "type": "rtp_in",
@@ -125,7 +157,8 @@
       "enabled": true,
       "sampleRate": 0,
       "address": "0.0.0.0",
-      "codec": ""
+      "codec": "",
+      "dspEnabled": false
     },
     {
       "type": "rtp_in",
@@ -139,7 +172,8 @@
       "enabled": true,
       "sampleRate": 0,
       "address": "0.0.0.0",
-      "codec": ""
+      "codec": "",
+      "dspEnabled": false
     },
     {
       "type": "rtp_in",
@@ -153,7 +187,8 @@
       "enabled": true,
       "sampleRate": 0,
       "address": "0.0.0.0",
-      "codec": ""
+      "codec": "",
+      "dspEnabled": false
     },
     {
       "type": "rtp_out",
@@ -163,6 +198,7 @@
       "protocol": "rtp",
       "codec": "mp3",
       "sampleRate": 44100,
+      "dspEnabled": false,
       "targets": [
         {
           "host": "192.168.10.146",
@@ -184,6 +220,7 @@
       "protocol": "rtp",
       "codec": "mp3",
       "sampleRate": 44100,
+      "dspEnabled": false,
       "targets": [
         {
           "host": "192.168.10.146",
@@ -205,6 +242,7 @@
       "protocol": "rtp",
       "codec": "mp3",
       "sampleRate": 44100,
+      "dspEnabled": false,
       "targets": [],
       "enabled": true,
       "bitrate": 320,
@@ -221,6 +259,7 @@
       "protocol": "rtp",
       "codec": "mp3",
       "sampleRate": 44100,
+      "dspEnabled": false,
       "targets": [
         {
           "host": "10.20.0.193",
@@ -242,6 +281,7 @@
       "protocol": "rtp",
       "codec": "mp3",
       "sampleRate": 44100,
+      "dspEnabled": false,
       "targets": [],
       "enabled": true,
       "bitrate": 320,
@@ -258,6 +298,7 @@
       "protocol": "rtp",
       "codec": "mp3",
       "sampleRate": 44100,
+      "dspEnabled": false,
       "targets": [],
       "enabled": true,
       "bitrate": 320,
@@ -274,6 +315,7 @@
       "protocol": "rtp",
       "codec": "mp3",
       "sampleRate": 44100,
+      "dspEnabled": false,
       "targets": [],
       "enabled": true,
       "bitrate": 320,
@@ -290,6 +332,7 @@
       "protocol": "rtp",
       "codec": "mp3",
       "sampleRate": 44100,
+      "dspEnabled": false,
       "targets": [],
       "enabled": true,
       "bitrate": 320,

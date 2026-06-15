@@ -48,12 +48,13 @@ static inline void clk2_reader_snapshot(_Atomic uint32_t *seq,
 
 extern int g_period_frames;
 
-/* 안정화 판정: 연속 STABLE_COUNT회 drift 변화 < STABLE_PPM → 30s 주기로 전환 */
-#define STABLE_PPM   2.0
-#define STABLE_COUNT 5
-/* 보정 주기는 5s 고정 — 더 길게 가면 누적 step 이 커져 라이브 DMA glitch (memory) */
-#define FAST_INTERVAL_S 5LL
-#define SLOW_INTERVAL_S 30LL
+/* 안정화 판정: |drift_med| < STABLE_PPM_ABS AND |delta| < STABLE_PPM_DELTA 가 STABLE_COUNT회 연속.
+ * delta 만 보면 median 이 outlier 값에 stuck 인 상태(+18ppm 유지)도 "안정"으로 오인 → 절대값 게이트 필수. */
+#define STABLE_PPM_ABS   3.0
+#define STABLE_PPM_DELTA 2.0
+#define STABLE_COUNT     5
+#define FAST_INTERVAL_S  5LL
+#define SLOW_INTERVAL_S  30LL
 /* PTP 재동기화 감지 후 ratio_hint 갱신을 막는 동결 시간.
  * PTP 끊김→재락 시 ravenna_rate 가 점프하면서 DSP SRC 가 한 사이클 동안
  * 실 피치 시프트를 일으키는 현상 방지. 10s 정도면 측정 윈도우가 새 정상 상태로 채워짐. */
@@ -239,9 +240,12 @@ void clk2_report(int64_t *pa_fr,  int64_t *pa_hts,
         if (!frozen && ratio_med > RATIO_MIN && ratio_med < RATIO_MAX)
             atomic_store_explicit(&g_ravenna_ratio_hint, ratio_med, memory_order_relaxed);
 
-        /* 안정화 판정도 median 기준으로 (초기 빠른 수렴 구간에서만) */
+        /* 안정화 판정도 median 기준으로 (초기 빠른 수렴 구간에서만).
+         * 절대값(|med| < ABS) + delta(|med-prev| < DELTA) 동시 충족이어야 함 —
+         * delta-only 는 outlier 값에 median 이 머무는 동안에도 통과해서 오동작. */
         if (!stabilized) {
-            if (fabs(drift_ppm_med - prev_ppm) < STABLE_PPM)
+            if (fabs(drift_ppm_med) < STABLE_PPM_ABS &&
+                fabs(drift_ppm_med - prev_ppm) < STABLE_PPM_DELTA)
                 stable_cnt++;
             else
                 stable_cnt = 0;

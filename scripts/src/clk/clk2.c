@@ -53,7 +53,7 @@ extern int g_period_frames;
 #define STABLE_COUNT 5
 /* 보정 주기는 5s 고정 — 더 길게 가면 누적 step 이 커져 라이브 DMA glitch (memory) */
 #define FAST_INTERVAL_S 5LL
-#define SLOW_INTERVAL_S 5LL
+#define SLOW_INTERVAL_S 30LL
 /* PTP 재동기화 감지 후 ratio_hint 갱신을 막는 동결 시간.
  * PTP 끊김→재락 시 ravenna_rate 가 점프하면서 DSP SRC 가 한 사이클 동안
  * 실 피치 시프트를 일으키는 현상 방지. 10s 정도면 측정 윈도우가 새 정상 상태로 채워짐. */

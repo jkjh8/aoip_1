@@ -298,6 +298,10 @@ static void *alsa_capture_thread(void *arg)
                 d->ravenna_accum = 0;
                 d->ravenna_prebuf_count = 0;
                 d->ravenna_holdover_frames = 0;
+                /* Phase 2 게이트 상태도 함께 리셋 — 안 하면 다음 prebuf 통과 시
+                 * 오래된 phase2_start_ns 로 3s 벽시계가 즉시 만료되어 unmute. */
+                d->ravenna_phase2_printed = 0;
+                d->ravenna_phase2_start_ns = 0;
                 /* 입력 링버퍼·SRC·PI 전부 리셋: xrun으로 데이터 불연속 발생 */
                 rb_reset(&d->in_ring);
                 if (d->cap_src) {
@@ -352,6 +356,12 @@ static void *alsa_capture_thread(void *arg)
                     } else if (cap_err_count++ == 0) {
                         fprintf(stderr, "[aoip_engine] cap %s: EIO (PTP not locked), muting\n", d->name);
                     }
+                    /* 이미 mute 상태에서 EIO 재발 — prebuf/Phase 2 중이라면
+                     * 누적된 prebuf_count와 phase2 게이트 상태를 모두 리셋해야
+                     * PTP 회복 후 3s 벽시계가 처음부터 정상 동작한다. */
+                    d->ravenna_prebuf_count = 0;
+                    d->ravenna_phase2_printed = 0;
+                    d->ravenna_phase2_start_ns = 0;
                     d->ravenna_accum = 0;
                     usleep(50000);
                 }

@@ -146,7 +146,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": false
+      "active": true
     },
     {
       "id": 4,
@@ -156,7 +156,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": false
+      "active": true
     },
     {
       "id": 5,
@@ -624,7 +624,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": false
+      "active": true
     },
     {
       "id": 4,
@@ -634,7 +634,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": false
+      "active": true
     },
     {
       "id": 5,
@@ -991,30 +991,6 @@
       "dst": "aes67:sin_8"
     },
     {
-      "src": "aes67:out_3",
-      "dst": "stream:sin_3"
-    },
-    {
-      "src": "aes67:out_4",
-      "dst": "stream:sin_4"
-    },
-    {
-      "src": "aes67:out_5",
-      "dst": "stream:sin_5"
-    },
-    {
-      "src": "aes67:out_6",
-      "dst": "stream:sin_6"
-    },
-    {
-      "src": "aes67:out_7",
-      "dst": "stream:sin_7"
-    },
-    {
-      "src": "aes67:out_8",
-      "dst": "stream:sin_8"
-    },
-    {
       "src": "analog:out_1",
       "dst": "aes67:sin_9"
     },
@@ -1111,30 +1087,6 @@
       "dst": "aes67:sin_16"
     },
     {
-      "src": "aes67:out_1",
-      "dst": "usb_audio_out:sin_1"
-    },
-    {
-      "src": "aes67:out_2",
-      "dst": "usb_audio_out:sin_2"
-    },
-    {
-      "src": "aes67:out_1",
-      "dst": "analog:sin_1"
-    },
-    {
-      "src": "aes67:out_2",
-      "dst": "analog:sin_2"
-    },
-    {
-      "src": "aes67:out_2",
-      "dst": "stream:sin_2"
-    },
-    {
-      "src": "aes67:out_1",
-      "dst": "stream:sin_1"
-    },
-    {
       "src": "aes67:out_9",
       "dst": "stream:sin_9"
     },
@@ -1165,6 +1117,54 @@
     {
       "src": "aes67:out_16",
       "dst": "stream:sin_16"
+    },
+    {
+      "src": "aes67:out_2",
+      "dst": "analog:sin_2"
+    },
+    {
+      "src": "aes67:out_1",
+      "dst": "analog:sin_1"
+    },
+    {
+      "src": "aes67:out_1",
+      "dst": "stream:sin_1"
+    },
+    {
+      "src": "aes67:out_2",
+      "dst": "stream:sin_2"
+    },
+    {
+      "src": "aes67:out_3",
+      "dst": "stream:sin_3"
+    },
+    {
+      "src": "aes67:out_4",
+      "dst": "stream:sin_4"
+    },
+    {
+      "src": "aes67:out_5",
+      "dst": "stream:sin_5"
+    },
+    {
+      "src": "aes67:out_6",
+      "dst": "stream:sin_6"
+    },
+    {
+      "src": "aes67:out_7",
+      "dst": "stream:sin_7"
+    },
+    {
+      "src": "aes67:out_8",
+      "dst": "stream:sin_8"
+    },
+    {
+      "src": "aes67:out_1",
+      "dst": "usb_audio_out:sin_1"
+    },
+    {
+      "src": "aes67:out_2",
+      "dst": "usb_audio_out:sin_2"
     }
   ],
   "i2s": {

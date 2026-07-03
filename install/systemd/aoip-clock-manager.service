@@ -1,0 +1,18 @@
+[Unit]
+Description=AoIP PTP Role-aware Clock Manager
+# SLAVE: 시스템 freq를 GM(PHC)에 슬레이빙 / MASTER: phc2sys로 PHC를 시스템에 종속
+After=network-online.target ptp4l.service
+Wants=network-online.target ptp4l.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/sbin/ptp-clock-manager.py
+# 어떤 형태로 죽어도 chrony는 반드시 복구 (slave 모드에서 정지시키므로)
+ExecStopPost=-/bin/systemctl start chrony.service
+Restart=on-failure
+RestartSec=5
+User=root
+OOMScoreAdjust=-900
+
+[Install]
+WantedBy=multi-user.target

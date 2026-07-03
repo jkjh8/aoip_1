@@ -237,7 +237,7 @@ SYSTEMD_DST="/etc/systemd/system"
 SERVICES=(
     ravenna-module.service
     ptp4l.service
-    phc2sys.service
+    aoip-clock-manager.service
     ptp-irq-affinity.service
     uac2-gadget.service
     aes67-daemon.service
@@ -245,10 +245,12 @@ SERVICES=(
     aoip.service
     aoip-rt-tune.service
 )
-# phc2sys: phc2sys-freqonly.sh 래퍼를 ExecStart로 호출.
-#   외부 마스터가 wall time을 운반하지 않는 환경(PHC=1970)에서도 sys clock step 없이
-#   주파수만 동기화 (-F 0 -S 0). linreg servo로 ±수십 ppm 변동.
-#   tick은 변조하지 않음 (이전 phc2sys 표준 모드의 tick=9841 사고 회피).
+# aoip-clock-manager: ptp4l 역할에 따라 클럭 도메인을 통합하는 데몬.
+#   SLAVE  → chrony 정지 + 시스템 freq를 PHC에 위상 앵커 PI로 슬레이빙
+#            (진입시점 오프셋만 유지 — 절대시간은 안 당기므로 ARB GM
+#            에포크 점프에 면역, tick 변조 사고 여지 없음)
+#   MASTER → chrony 재개 + phc2sys(REALTIME→PHC)로 슬레이브 장비가 우리 도메인 추종
+#   구 phc2sys.service(freqonly 래퍼)를 대체.
 
 for svc in "${SERVICES[@]}"; do
     SRC="${SYSTEMD_SRC}/${svc}"
@@ -290,7 +292,23 @@ if [ -f "${PTP_IRQ_SH}" ]; then
     info "ptp-irq-affinity.sh → /usr/local/sbin/"
 fi
 
-# phc2sys-freqonly.sh 배포 (phc2sys.service가 호출)
+# ptp-clock-manager.py 배포 (aoip-clock-manager.service가 호출)
+CLOCK_MGR_PY="${INSTALL_DIR}/../scripts/tools/ptp-clock-manager.py"
+if [ -f "${CLOCK_MGR_PY}" ]; then
+    cp "${CLOCK_MGR_PY}" /usr/local/sbin/ptp-clock-manager.py
+    chmod +x /usr/local/sbin/ptp-clock-manager.py
+    info "ptp-clock-manager.py → /usr/local/sbin/"
+fi
+
+# ptp4l.conf 배포 (step_threshold 1.0 — ARB GM 대비 PHC 스텝 허용)
+PTP4L_CONF="${INSTALL_DIR}/linuxptp/ptp4l.conf"
+if [ -f "${PTP4L_CONF}" ]; then
+    mkdir -p /etc/linuxptp
+    cp "${PTP4L_CONF}" /etc/linuxptp/ptp4l.conf
+    info "ptp4l.conf → /etc/linuxptp/"
+fi
+
+# phc2sys-freqonly.sh 배포 (구버전 — 현재 SERVICES에는 없음, 긴급 롤백용)
 PHC2SYS_SH="${SYSTEMD_SRC}/phc2sys-freqonly.sh"
 if [ -f "${PHC2SYS_SH}" ]; then
     cp "${PHC2SYS_SH}" /usr/local/sbin/phc2sys-freqonly.sh

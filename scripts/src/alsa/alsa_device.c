@@ -192,6 +192,11 @@ static void *alsa_capture_thread(void *arg)
     float   *fbuf = malloc((size_t)(d->period * d->channels) * sizeof(float));
     int cap_err_count = 0;
 
+    /* Phase 2(3s 벽시계) 시작 시각 — thread-local.
+     * struct 필드에 두면 bridge_start 재호출 등으로 이전 thread 잔재값을
+     * 새 thread 가 그대로 보는 race 가 발생 (디버그로 확인됨). 0 = 미시작. */
+    int64_t phase2_start_ns = 0;
+
     /* RAVENNA: alsa_open 후 PREPARED 상태 — 명시적 start 필요.
      * poll-before-read 방식은 PREPARED 상태에서 POLLIN이 오지 않아 deadlock.
      * snd_pcm_start()로 RUNNING 상태로 전환 후 poll 사용. */
@@ -236,31 +241,18 @@ static void *alsa_capture_thread(void *arg)
                 int ready = poll(pfds, (nfds_t)npfds, 50);
                 if (d->quit_cap || g_quit) break;
                 if (ready == 0) {
-                    /* 타임아웃: 소스 없음 또는 PTP 미잠금.
-                     * ptp_locked=1 이면 홀드오버: 50ms 분량 무음을 in_ring에 공급하여
-                     * DSP 버퍼를 유지한다. PTP가 RAVENNA_HOLDOVER_FRAMES 안에 복귀하면
-                     * 뮤트/리셋 없이 오디오가 재개된다. */
-                    if (atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed) &&
-                        d->ravenna_holdover_frames < RAVENNA_HOLDOVER_FRAMES) {
-                        if (d->ravenna_holdover_frames == 0)
-                            fprintf(stderr, "[aoip_engine] cap %s: poll timeout, holdover start (%dms max)\n",
-                                    d->name, RAVENNA_HOLDOVER_FRAMES * 1000 / SAMPLE_RATE);
-                        int feed = SAMPLE_RATE / 20; /* 50ms */
-                        if (d->ravenna_holdover_frames + feed > RAVENNA_HOLDOVER_FRAMES)
-                            feed = RAVENNA_HOLDOVER_FRAMES - d->ravenna_holdover_frames;
-                        float sil[RAVENNA_HW_PERIOD * MAX_CH];
-                        memset(sil, 0, sizeof(float) * RAVENNA_HW_PERIOD * d->channels);
-                        for (int _i = 0; _i < feed / RAVENNA_HW_PERIOD; _i++)
-                            rb_write(&d->in_ring, sil, RAVENNA_HW_PERIOD);
-                        d->ravenna_holdover_frames += feed;
-                        if (d->ravenna_holdover_frames >= RAVENNA_HOLDOVER_FRAMES) {
-                            fprintf(stderr, "[aoip_engine] cap %s: holdover expired, muting\n", d->name);
-                            atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_release);
-                            atomic_store_explicit(&d->ravenna_flush, 1, memory_order_release);
-                            rb_reset(&d->in_ring);
-                            d->ravenna_prebuf_count = 0;
-                            d->ravenna_phase2_printed = 0;
-                        }
+                    /* 타임아웃: 소스 없음 또는 PTP 미잠금 — 즉시 mute+reset.
+                     * 이전엔 200ms holdover 동안 silence fill 로 짧은 끊김을 흡수했으나,
+                     * 실제 unlock 길이와 silence 길이가 어긋나면서 재개 시 in_ring 안에
+                     * (silence + 실 sample) 위상이 밀려 비트 시프트 발생. 모든 PTP glitch
+                     * 를 prebuf+3s 경로로 보내 깔끔하게 재정렬. */
+                    if (atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed)) {
+                        fprintf(stderr, "[aoip_engine] cap %s: poll timeout → mute (PTP unlock)\n", d->name);
+                        atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_release);
+                        atomic_store_explicit(&d->ravenna_flush, 1, memory_order_release);
+                        rb_reset(&d->in_ring);
+                        d->ravenna_prebuf_count = 0;
+                        phase2_start_ns = 0;
                     }
                     continue;
                 }
@@ -297,11 +289,9 @@ static void *alsa_capture_thread(void *arg)
             if (d->is_ravenna) {
                 d->ravenna_accum = 0;
                 d->ravenna_prebuf_count = 0;
-                d->ravenna_holdover_frames = 0;
                 /* Phase 2 게이트 상태도 함께 리셋 — 안 하면 다음 prebuf 통과 시
                  * 오래된 phase2_start_ns 로 3s 벽시계가 즉시 만료되어 unmute. */
-                d->ravenna_phase2_printed = 0;
-                d->ravenna_phase2_start_ns = 0;
+                phase2_start_ns = 0;
                 /* 입력 링버퍼·SRC·PI 전부 리셋: xrun으로 데이터 불연속 발생 */
                 rb_reset(&d->in_ring);
                 if (d->cap_src) {
@@ -328,43 +318,26 @@ static void *alsa_capture_thread(void *arg)
         }
         if (n == -EIO) {
             if (d->is_ravenna) {
-                /* PTP 미잠금 또는 소스 없음.
-                 * ptp_locked=1 이면 홀드오버: RAVENNA_HW_PERIOD 무음을 in_ring에 공급.
-                 * 1ms 간격으로 호출되어 홀드오버 기간 동안 DSP 버퍼를 유지한다.
-                 * 홀드오버 만료 또는 이미 뮤트 상태면 기존 방식으로 처리. */
-                if (atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed) &&
-                    d->ravenna_holdover_frames < RAVENNA_HOLDOVER_FRAMES) {
-                    if (d->ravenna_holdover_frames == 0)
-                        fprintf(stderr, "[aoip_engine] cap %s: EIO holdover start (%dms max)\n",
-                                d->name, RAVENNA_HOLDOVER_FRAMES * 1000 / SAMPLE_RATE);
-                    float sil[RAVENNA_HW_PERIOD * MAX_CH];
-                    memset(sil, 0, sizeof(float) * RAVENNA_HW_PERIOD * d->channels);
-                    rb_write(&d->in_ring, sil, RAVENNA_HW_PERIOD);
-                    d->ravenna_holdover_frames += RAVENNA_HW_PERIOD;
-                    usleep(1000); /* 1ms: RAVENNA_HW_PERIOD(48) 프레임 주기 시뮬레이션 */
-                } else {
-                    /* 홀드오버 만료 or 이미 ptp_locked=0 */
-                    if (atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed)) {
-                        /* 홀드오버 만료: 최초 1회만 처리 */
-                        fprintf(stderr, "[aoip_engine] cap %s: holdover expired (EIO), muting\n", d->name);
-                        atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_release);
-                        atomic_store_explicit(&d->ravenna_flush, 1, memory_order_release);
-                        rb_reset(&d->in_ring);
-                        d->ravenna_prebuf_count = 0;
-                        d->ravenna_phase2_printed = 0;
-                        cap_err_count = 1;
-                    } else if (cap_err_count++ == 0) {
-                        fprintf(stderr, "[aoip_engine] cap %s: EIO (PTP not locked), muting\n", d->name);
-                    }
-                    /* 이미 mute 상태에서 EIO 재발 — prebuf/Phase 2 중이라면
-                     * 누적된 prebuf_count와 phase2 게이트 상태를 모두 리셋해야
-                     * PTP 회복 후 3s 벽시계가 처음부터 정상 동작한다. */
-                    d->ravenna_prebuf_count = 0;
-                    d->ravenna_phase2_printed = 0;
-                    d->ravenna_phase2_start_ns = 0;
-                    d->ravenna_accum = 0;
-                    usleep(50000);
+                /* PTP 미잠금 또는 소스 없음 — 즉시 mute+reset.
+                 * holdover silence fill 제거: 짧은 끊김에도 silence/실 sample
+                 * 위상 어긋남으로 비트 시프트 발생 이력. 모든 EIO 를 prebuf+3s
+                 * 경로로 보내 깨끗하게 재정렬한다. */
+                if (atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed)) {
+                    fprintf(stderr, "[aoip_engine] cap %s: EIO → mute (PTP unlock)\n", d->name);
+                    atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_release);
+                    atomic_store_explicit(&d->ravenna_flush, 1, memory_order_release);
+                    rb_reset(&d->in_ring);
+                    cap_err_count = 1;
+                } else if (cap_err_count++ == 0) {
+                    fprintf(stderr, "[aoip_engine] cap %s: EIO (PTP not locked), muting\n", d->name);
                 }
+                /* 이미 mute 상태에서 EIO 재발 — 누적된 prebuf_count 와 phase2
+                 * 게이트 상태를 모두 리셋해야 PTP 회복 후 3s 벽시계가 처음부터
+                 * 정상 동작한다. */
+                d->ravenna_prebuf_count = 0;
+                phase2_start_ns = 0;
+                d->ravenna_accum = 0;
+                usleep(50000);
             } else {
                 /* 일반 ALSA(USB UAC2 등): 호스트 스트림 미활성.
                  * 활성→비활성 전이 시 in_ring/SRC 리셋 + DSP 측 cap_stream_active=0 으로 뮤트. */
@@ -413,22 +386,19 @@ static void *alsa_capture_thread(void *arg)
                 cap_err_count = 0;
                 continue;
             }
-            /* Phase 2: 3초 벽시계 대기 (PTP servo 완전 수렴 — EIO/EPIPE 무관) */
-            if (!d->ravenna_phase2_printed) {
-                struct timespec _ts;
-                clock_gettime(CLOCK_MONOTONIC, &_ts);
-                d->ravenna_phase2_start_ns = (int64_t)_ts.tv_sec * 1000000000LL + _ts.tv_nsec;
+            /* Phase 2: 3초 벽시계 대기 (PTP servo 완전 수렴 — EIO/EPIPE 무관).
+             * phase2_start_ns 자체를 sentinel 로 사용 (0=미시작) — printed 별도 플래그를
+             * 두면 bridge_manager 가 한 쪽만 리셋해 start_ns=0 잔재로 즉시 만료되는 race 발생. */
+            struct timespec _ts;
+            clock_gettime(CLOCK_MONOTONIC, &_ts);
+            int64_t now_ns = (int64_t)_ts.tv_sec * 1000000000LL + _ts.tv_nsec;
+            if (phase2_start_ns == 0) {
+                phase2_start_ns = now_ns;
                 fprintf(stderr, "[aoip_engine] cap %s: PTP clk stable, waiting 3s before unmute\n", d->name);
-                d->ravenna_phase2_printed = 1;
             }
-            {
-                struct timespec _ts;
-                clock_gettime(CLOCK_MONOTONIC, &_ts);
-                int64_t now_ns = (int64_t)_ts.tv_sec * 1000000000LL + _ts.tv_nsec;
-                if (now_ns - d->ravenna_phase2_start_ns < 3000000000LL) {
-                    cap_err_count = 0;
-                    continue;
-                }
+            if (now_ns - phase2_start_ns < 3000000000LL) {
+                cap_err_count = 0;
+                continue;
             }
             /* Phase 2 완료: in_ring 초기화 후 언뮤트 → DSP prefill 재시작 */
             rb_reset(&d->in_ring);
@@ -444,11 +414,6 @@ static void *alsa_capture_thread(void *arg)
          * alsa 측 후속 reconfig 로 덮어쓰이지 않는다. */
         if (d->is_i2s && !atomic_load_explicit(&g_clk_ready, memory_order_acquire))
             clk2_apply_initial_ppb();
-        if (d->is_ravenna && d->ravenna_holdover_frames > 0) {
-            fprintf(stderr, "[aoip_engine] cap %s: PTP recovered, holdover cleared (%dms)\n",
-                    d->name, d->ravenna_holdover_frames * 1000 / SAMPLE_RATE);
-            d->ravenna_holdover_frames = 0;
-        }
 
         int written;
         if (d->is_i2s) {
@@ -762,9 +727,6 @@ void device_start(Device *d)
         }
         d->ravenna_accum           = 0;
         d->ravenna_prebuf_count    = 0;
-        d->ravenna_holdover_frames = 0;
-        d->ravenna_phase2_start_ns = 0;
-        d->ravenna_phase2_printed  = 0;
         atomic_store_explicit(&d->cap_stream_active, 0, memory_order_relaxed);
         pthread_create(&d->cap_tid, NULL, alsa_capture_thread, d);
     }

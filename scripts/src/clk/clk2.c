@@ -183,13 +183,18 @@ void clk2_report(int64_t *pa_fr,  int64_t *pa_hts,
     /* precal 지연 적용 — next_ns 5s 게이트보다 위에서 체크해 정확한 타이밍 보장 */
     clk2_precal_tick(now_ns);
 
-    /* PTP 재동기화 감지 — gen 변화 시 freeze 윈도우 시작, median/stab 리셋 */
+    /* PTP 재동기화 감지 — gen 변화 시 freeze 윈도우 시작, median/stab 리셋.
+     * prev 스냅샷도 무효화: 그대로 두면 다음 측정이 unlock 갭(ravenna frame 정지)을
+     * 포함한 윈도우를 봐서 ravenna_rate가 37kHz 같은 쓰레기 값으로 측정 → median 5칸
+     * 오염 → 수십 초간 ratio_hint/안정화 판정 망가짐. next_ns도 FAST로 재설정. */
     uint32_t cur_gen = atomic_load_explicit(&g_ptp_resync_gen, memory_order_acquire);
     if (cur_gen != last_resync_gen) {
         last_resync_gen     = cur_gen;
         resync_freeze_until = now_ns + PTP_RESYNC_FREEZE_NS;
         med_idx = 0; med_filled = 0;
         stable_cnt = 0; stabilized = 0; prev_ppm = 0.0;
+        *pa_fr = 0; *pa_hts = 0; *pr_fr = 0; *pr_hts = 0;
+        *next_ns = now_ns + FAST_INTERVAL_S * 1000000000LL;
         fprintf(stderr, "[aoip_engine] clk2: PTP resync gen=%u, ratio_hint frozen for %lldms\n",
                 cur_gen, (long long)(PTP_RESYNC_FREEZE_NS / 1000000LL));
     }
@@ -226,11 +231,26 @@ void clk2_report(int64_t *pa_fr,  int64_t *pa_hts,
         double dsp_tick_ms  = (double)g_period_frames / aoip_rate * 1000.0;
         double ratio        = ravenna_rate / aoip_rate;
 
+        /* sanity gate: ravenna_rate가 ±5% 벗어나면(PTP unlock 잔재/packet 정지 등)
+         * median 버퍼에 넣지 않음 — 단 한 샘플 오염으로 25초간 ratio_hint가 망가지는
+         * 회귀를 막는다. prev 스냅샷은 갱신해서 다음 측정은 정상 윈도우로. */
+        const double RATE_MIN = SAMPLE_RATE * 0.95;
+        const double RATE_MAX = SAMPLE_RATE * 1.05;
+        int sample_valid = (ravenna_rate > RATE_MIN && ravenna_rate < RATE_MAX &&
+                            aoip_rate    > RATE_MIN && aoip_rate    < RATE_MAX);
+        if (!sample_valid) {
+            fprintf(stderr, "[aoip_engine] clk2: rejecting outlier sample"
+                    " aoip=%.1fHz ravenna=%.1fHz (likely PTP transient)\n",
+                    aoip_rate, ravenna_rate);
+        }
+
         /* 5-sample median 필터 — 이상치 억제 */
-        med_ppm[med_idx]   = drift_ppm;
-        med_ratio[med_idx] = ratio;
-        med_idx = (med_idx + 1) % MED_N;
-        if (med_filled < MED_N) med_filled++;
+        if (sample_valid) {
+            med_ppm[med_idx]   = drift_ppm;
+            med_ratio[med_idx] = ratio;
+            med_idx = (med_idx + 1) % MED_N;
+            if (med_filled < MED_N) med_filled++;
+        }
 
         double drift_ppm_med = (med_filled == MED_N) ? clk2_median5(med_ppm)   : drift_ppm;
         double ratio_med     = (med_filled == MED_N) ? clk2_median5(med_ratio) : ratio;

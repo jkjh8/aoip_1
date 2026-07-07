@@ -45,6 +45,7 @@ PHASE_TC_SEC = 1200      # 위상 오차를 회수하는 시정수 (완만하게
 PHASE_SLEW_PPB = 150     # 위상 회수용 목표 기울기 상한
 PHASE_REANCHOR_NS = 3_000_000  # 위상 오차가 이보다 크면 싸우지 않고 재앵커
 OFFSET_SANE_NS = 5_000_000   # ptp4l offsetFromMaster 가 이보다 크면 PHC 를 신뢰하지 않음
+WALL_TRUST_TIMEOUT = 600     # chrony 동기화 대기 상한 — NTP 불가 현장에서 slave 진입을 영원히 막지 않는다
 
 ADJ_FREQUENCY = 0x0002
 NOMINAL_TICK = 10000
@@ -164,6 +165,26 @@ def chrony(action):
                    capture_output=True, timeout=30)
 
 
+def chrony_active():
+    try:
+        return subprocess.run(
+            ["systemctl", "is-active", "--quiet", CHRONY_UNIT],
+            capture_output=True, timeout=10).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def chrony_synced():
+    """chrony가 NTP 소스에 실제 동기화됐는지 (Leap status: Normal)"""
+    try:
+        out = subprocess.run(["chronyc", "-n", "tracking"],
+                             capture_output=True, text=True, timeout=5).stdout
+        tail = out.split("Leap status")[-1] if "Leap status" in out else ""
+        return "Normal" in tail
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
 class Manager:
     def __init__(self):
         self.phc = PhcReader(PHC_DEV)
@@ -174,6 +195,11 @@ class Manager:
         self.samples = []          # (monotonic_sec, phc_minus_real_ns)
         self.base_freq = None
         self.d0 = None             # 위상 앵커: slave 진입 시점의 (PHC−REALTIME)
+        # 부팅 게이트: RTC 리셋(무배터리) 후 낡은 시간으로 복원된 상태에서
+        # chrony가 NTP 교정을 마치기 전에 slave 진입해 chrony를 정지시키면
+        # wall time이 며칠씩 틀린 채 갇힌다 (2026-07-08 실사고: 60일 오차 2일 방치)
+        self.wall_trusted = False
+        self.trust_deadline = time.monotonic() + WALL_TRUST_TIMEOUT
         self.tick_sanity()
 
     def tick_sanity(self):
@@ -288,6 +314,20 @@ class Manager:
         log(f"시작 (iface={IFACE}, phc={PHC_DEV})")
         while True:
             role, off = get_role()
+
+            # 부팅 게이트 — wall time 신뢰 확보 전에는 slave 진입 보류
+            if role == "slave" and not self.wall_trusted:
+                if chrony_synced():
+                    self.wall_trusted = True
+                    log("wall time 신뢰 확보 (chrony NTP 동기화 확인) — slave 진입 허용")
+                elif time.monotonic() > self.trust_deadline:
+                    self.wall_trusted = True
+                    log("경고: chrony 동기화 타임아웃 — wall time 미확인 상태로 slave 진입")
+                else:
+                    if not chrony_active():
+                        chrony("start")
+                    role = "neutral"
+
             if role != self.mode:
                 if role == self.pending:
                     self.pending_count += 1
@@ -300,6 +340,12 @@ class Manager:
                 self.pending, self.pending_count = None, 0
 
             if self.mode == "slave":
+                # 불변식 재확인: 패키지 업데이트 등 외부 요인으로 chrony가
+                # 재기동되면 두 컨트롤러가 충돌한다 — 감지 즉시 재정지
+                if chrony_active():
+                    log("경고: slave 모드 중 chrony 재기동 감지 — 다시 정지")
+                    chrony("stop")
+                    self.samples.clear()  # chrony가 freq를 만졌을 수 있음
                 self.slave_tick()
             elif self.mode == "master" and self.phc2sys \
                     and self.phc2sys.poll() is not None:

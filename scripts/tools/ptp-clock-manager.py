@@ -46,6 +46,7 @@ PHASE_SLEW_PPB = 150     # 위상 회수용 목표 기울기 상한
 PHASE_REANCHOR_NS = 3_000_000  # 위상 오차가 이보다 크면 싸우지 않고 재앵커
 OFFSET_SANE_NS = 5_000_000   # ptp4l offsetFromMaster 가 이보다 크면 PHC 를 신뢰하지 않음
 WALL_TRUST_TIMEOUT = 600     # chrony 동기화 대기 상한 — NTP 불가 현장에서 slave 진입을 영원히 막지 않는다
+NTP_RETRY_SEC = 600          # 미검증 상태로 진입한 뒤 one-shot NTP 재시도 주기
 
 ADJ_FREQUENCY = 0x0002
 NOMINAL_TICK = 10000
@@ -200,6 +201,11 @@ class Manager:
         # wall time이 며칠씩 틀린 채 갇힌다 (2026-07-08 실사고: 60일 오차 2일 방치)
         self.wall_trusted = False
         self.trust_deadline = time.monotonic() + WALL_TRUST_TIMEOUT
+        # wall_verified: NTP로 실제 검증된 시간인지. 게이트 타임아웃으로
+        # 미검증 진입한 경우, 나중에 인터넷이 연결되면 one-shot으로 교정한다
+        # (slave 모드에선 chrony가 꺼져 있어 상주 교정 주체가 없으므로).
+        self.wall_verified = False
+        self.ntp_retry_at = 0.0
         self.tick_sanity()
 
     def tick_sanity(self):
@@ -319,6 +325,7 @@ class Manager:
             if role == "slave" and not self.wall_trusted:
                 if chrony_synced():
                     self.wall_trusted = True
+                    self.wall_verified = True
                     log("wall time 신뢰 확보 (chrony NTP 동기화 확인) — slave 진입 허용")
                 elif time.monotonic() > self.trust_deadline:
                     self.wall_trusted = True
@@ -327,6 +334,26 @@ class Manager:
                     if not chrony_active():
                         chrony("start")
                     role = "neutral"
+
+            # 미검증 시간 사후 교정: 인터넷이 늦게 연결되는 현장 대응.
+            # chrony가 살아있으면 그쪽이 교정하므로 동기화 여부만 확인하고,
+            # 꺼져 있으면(slave) one-shot(chronyd -q)으로 스텝 — wall 스텝은
+            # 오디오와 무관하고 위상 점프 가드가 재앵커로 흡수한다(실증됨).
+            if not self.wall_verified and time.monotonic() >= self.ntp_retry_at:
+                self.ntp_retry_at = time.monotonic() + NTP_RETRY_SEC
+                if chrony_active():
+                    if chrony_synced():
+                        self.wall_verified = True
+                        log("wall time NTP 검증 완료 (chrony)")
+                else:
+                    try:
+                        r = subprocess.run(["chronyd", "-q", "-t", "30"],
+                                           capture_output=True, timeout=60)
+                        if r.returncode == 0:
+                            self.wall_verified = True
+                            log("wall time one-shot NTP 동기화 성공")
+                    except (subprocess.TimeoutExpired, OSError):
+                        pass
 
             if role != self.mode:
                 if role == self.pending:

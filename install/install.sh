@@ -292,21 +292,8 @@ if [ -f "${PTP_IRQ_SH}" ]; then
     info "ptp-irq-affinity.sh → /usr/local/sbin/"
 fi
 
-# ptp-clock-manager.py 배포 (aoip-clock-manager.service가 호출)
-CLOCK_MGR_PY="${INSTALL_DIR}/../scripts/tools/ptp-clock-manager.py"
-if [ -f "${CLOCK_MGR_PY}" ]; then
-    cp "${CLOCK_MGR_PY}" /usr/local/sbin/ptp-clock-manager.py
-    chmod +x /usr/local/sbin/ptp-clock-manager.py
-    info "ptp-clock-manager.py → /usr/local/sbin/"
-fi
-
-# ptp4l.conf 배포 (step_threshold 1.0 — ARB GM 대비 PHC 스텝 허용)
-PTP4L_CONF="${INSTALL_DIR}/linuxptp/ptp4l.conf"
-if [ -f "${PTP4L_CONF}" ]; then
-    mkdir -p /etc/linuxptp
-    cp "${PTP4L_CONF}" /etc/linuxptp/ptp4l.conf
-    info "ptp4l.conf → /etc/linuxptp/"
-fi
+# 시간 동기화 스택 (fake-hwclock, chrony 설정, ptp4l.conf, clock-manager 배포)
+bash "${INSTALL_DIR}/setup-time-sync.sh"
 
 # phc2sys-freqonly.sh 배포 (구버전 — 현재 SERVICES에는 없음, 긴급 롤백용)
 PHC2SYS_SH="${SYSTEMD_SRC}/phc2sys-freqonly.sh"

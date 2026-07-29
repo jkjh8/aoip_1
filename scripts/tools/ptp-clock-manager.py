@@ -35,6 +35,10 @@ PHC2SYS = "/usr/sbin/phc2sys"
 # 윈도우 회귀로 뽑는다.
 POLL_SEC = 10            # 역할 폴링 = 표류 샘플 주기
 DEBOUNCE = 2             # 역할 전환에 필요한 연속 동일 판정 횟수
+HOLDOVER_SEC = 180       # slave 이탈 시 chrony/phc2sys 를 재개하기 전 coast 하는 창.
+                         # 외부 GM(콘솔)의 짧은 글리치·재부팅을 흡수해 읽기 포인터
+                         # (CLOCK_MONOTONIC)가 GM 도메인을 이탈하지 않게 한다.
+                         # 실제 GM 드롭 지속시간이 불명이라 tunable — 로그 관찰 후 조정.
 WINDOW_N = 60            # 보정 1회당 샘플 수 (~10분 윈도우)
 ANCHOR_N = 15            # 위상 앵커/오차 산출용 중앙값 표본 수
 STEP_GUARD_NS = 10_000_000   # 예측오차 10ms 초과 = 진짜 PHC 스텝(에포크 점프)
@@ -193,6 +197,7 @@ class Manager:
         self.pending = None
         self.pending_count = 0
         self.phc2sys = None
+        self.holdover_until = None  # holdover 만료 시각 (mode=="holdover" 일 때만 유효)
         self.samples = []          # (monotonic_sec, phc_minus_real_ns)
         self.base_freq = None
         self.d0 = None             # 위상 앵커: slave 진입 시점의 (PHC−REALTIME)
@@ -231,11 +236,31 @@ class Manager:
             log(f"chrony 정지, freq 슬레이빙 시작 (base {self.base_freq:+.0f} ppb)")
         else:
             chrony("start")
-            if self.mode == "slave":
+            if self.mode in ("slave", "holdover"):
                 log("chrony 재개 (누적 wall 오차는 chrony 가 완만히 회수)")
             if mode == "master":
                 self.start_phc2sys()
         self.mode = mode
+        self.holdover_until = None
+
+    # ---- 홀드오버 (slave 이탈 시 규율을 허물지 않고 coast) ----
+    def enter_holdover(self):
+        # slave → holdover: 외부 GM 이 잠깐 사라졌다. chrony 를 재개하지도
+        # phc2sys 로 PHC 를 스텝하지도 않고, 마지막 slave 주파수를 그대로
+        # 유지한 채 coast 한다 → 읽기 포인터가 GM 도메인을 이탈하지 않는다.
+        self.mode = "holdover"
+        self.holdover_until = time.monotonic() + HOLDOVER_SEC
+        log(f"홀드오버 진입 (GM 상실 — freq {freq_ppb():+.0f} ppb 유지, "
+            f"{HOLDOVER_SEC}s 내 복귀 대기)")
+
+    def resume_slave(self):
+        # holdover → slave: GM 복귀. 주파수는 연속(건드리지 않음), 위상만
+        # 재앵커한다. base_freq(권한 앵커)는 유지 → 같은 slave 세션 연장.
+        self.mode = "slave"
+        self.holdover_until = None
+        self.samples.clear()
+        self.d0 = None
+        log("slave 재개 (홀드오버 종료 — GM 복귀, 위상 재앵커)")
 
     def start_phc2sys(self):
         # 시스템 클럭(=chrony/UTC) → PHC. 최초 1회 대점프는 step 허용(기본값).
@@ -355,25 +380,45 @@ class Manager:
                     except (subprocess.TimeoutExpired, OSError):
                         pass
 
-            if role != self.mode:
-                if role == self.pending:
-                    self.pending_count += 1
-                else:
-                    self.pending, self.pending_count = role, 1
-                if self.pending_count >= DEBOUNCE:
-                    self.enter(role)
-                    self.pending, self.pending_count = None, 0
+            # ---- 역할 디바운스 → 상태 전이 (홀드오버 포함) ----
+            # 원시 role 을 DEBOUNCE 회 연속 확인해야 confirmed 로 인정한다.
+            if role == self.pending:
+                self.pending_count += 1
             else:
-                self.pending, self.pending_count = None, 0
+                self.pending, self.pending_count = role, 1
+            confirmed = role if self.pending_count >= DEBOUNCE else None
 
-            if self.mode == "slave":
+            if self.mode == "holdover":
+                # coast 중: GM 이 복귀하면(slave 확정) 매끄럽게 재개하고,
+                # 창을 넘겨도 안 오면 그때 비로소 실제 전환(chrony/phc2sys 재개).
+                if confirmed == "slave":
+                    self.resume_slave()
+                elif time.monotonic() >= self.holdover_until:
+                    target = confirmed if confirmed in ("master", "neutral") \
+                        else "neutral"
+                    log(f"홀드오버 만료 ({HOLDOVER_SEC}s) — GM 미복귀, "
+                        f"실제 전환 → {target}")
+                    self.enter(target)
+            elif self.mode == "slave":
+                # slave 이탈은 곧바로 규율을 허물지 않고 홀드오버로 coast 한다.
+                if confirmed is not None and confirmed != "slave":
+                    self.enter_holdover()
+            else:
+                if confirmed is not None and confirmed != self.mode:
+                    self.enter(confirmed)
+
+            # ---- 모드별 상주 처리 ----
+            if self.mode in ("slave", "holdover"):
                 # 불변식 재확인: 패키지 업데이트 등 외부 요인으로 chrony가
-                # 재기동되면 두 컨트롤러가 충돌한다 — 감지 즉시 재정지
+                # 재기동되면 두 컨트롤러가 충돌한다 — 감지 즉시 재정지.
+                # 홀드오버 중에도 동일(chrony 가 freq 를 만지면 coast 가 깨진다).
                 if chrony_active():
-                    log("경고: slave 모드 중 chrony 재기동 감지 — 다시 정지")
+                    log("경고: slave/holdover 중 chrony 재기동 감지 — 다시 정지")
                     chrony("stop")
                     self.samples.clear()  # chrony가 freq를 만졌을 수 있음
-                self.slave_tick()
+                if self.mode == "slave":
+                    self.slave_tick()
+                # holdover: slave_tick 생략 = 주파수 freeze (의도된 coast)
             elif self.mode == "master" and self.phc2sys \
                     and self.phc2sys.poll() is not None:
                 log("phc2sys 비정상 종료 — 재시작")

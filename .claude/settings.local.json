@@ -110,7 +110,12 @@
       "Bash(python3 -c ' *)",
       "Bash(journalctl -u aoip-engine.service --since \"30 seconds ago\" --no-pager)",
       "Bash(sudo phc_ctl /dev/ptp0 get)",
-      "Bash(sudo phc_ctl /dev/ptp0 -- set 1942831)"
+      "Bash(sudo phc_ctl /dev/ptp0 -- set 1942831)",
+      "Bash(nohup bash -c ' *)",
+      "Bash(echo \"watcher started pid $!\")",
+      "Bash(kill 49053)",
+      "Bash(sudo -n true)",
+      "Bash(ip -brief addr show eth0)"
     ]
   }
 }

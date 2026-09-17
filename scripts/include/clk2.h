@@ -24,7 +24,7 @@ extern _Atomic double g_ravenna_ratio_hint;
 extern _Atomic int g_clk_ready;
 
 /* RAVENNA PTP 락 도달 플래그 — 라이브 ppb 보정은 이 신호 이후에만 실행.
- * alsa_device 가 "PTP locked (3s stable)" 시점에 1 로 set. */
+ * alsa_device 언뮤트 게이트가 클럭 검증 후 언뮤트하는 시점에 1 로 set. */
 extern _Atomic int g_ptp_locked;
 
 /* PTP 재동기화 카운터 — alsa_device 가 매 lock 시점(최초/재락 모두)에 +1.

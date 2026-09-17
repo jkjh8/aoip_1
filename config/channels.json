@@ -186,7 +186,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 8,
@@ -196,7 +196,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 9,
@@ -206,7 +206,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 10,
@@ -216,7 +216,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 11,
@@ -226,7 +226,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 12,
@@ -236,7 +236,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 13,
@@ -246,7 +246,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 14,
@@ -256,7 +256,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 15,
@@ -266,7 +266,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 16,
@@ -276,7 +276,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 17,
@@ -286,7 +286,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 18,
@@ -296,7 +296,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 19,
@@ -306,7 +306,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 20,
@@ -316,7 +316,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 21,
@@ -406,7 +406,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 30,
@@ -416,7 +416,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 31,
@@ -426,7 +426,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 32,
@@ -436,7 +436,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 33,
@@ -446,7 +446,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 34,
@@ -456,7 +456,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 35,
@@ -466,7 +466,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 36,
@@ -476,7 +476,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     }
   ],
   "outputs": [
@@ -664,7 +664,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 8,
@@ -674,7 +674,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 9,
@@ -684,7 +684,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 10,
@@ -694,7 +694,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 11,
@@ -704,7 +704,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 12,
@@ -714,7 +714,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 13,
@@ -724,7 +724,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 14,
@@ -734,7 +734,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 15,
@@ -744,7 +744,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 16,
@@ -754,7 +754,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 17,
@@ -764,7 +764,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 18,
@@ -774,7 +774,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 19,
@@ -784,7 +784,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 20,
@@ -794,7 +794,7 @@
       "gain": 100,
       "muted": false,
       "dspEnabled": false,
-      "active": true
+      "active": false
     },
     {
       "id": 21,
@@ -960,38 +960,6 @@
   "routing": [
     {
       "src": "usb_audio_in:out_1",
-      "dst": "aes67:sin_1"
-    },
-    {
-      "src": "usb_audio_in:out_2",
-      "dst": "aes67:sin_2"
-    },
-    {
-      "src": "usb_audio_in:out_1",
-      "dst": "aes67:sin_3"
-    },
-    {
-      "src": "usb_audio_in:out_2",
-      "dst": "aes67:sin_4"
-    },
-    {
-      "src": "usb_audio_in:out_1",
-      "dst": "aes67:sin_5"
-    },
-    {
-      "src": "usb_audio_in:out_2",
-      "dst": "aes67:sin_6"
-    },
-    {
-      "src": "usb_audio_in:out_1",
-      "dst": "aes67:sin_7"
-    },
-    {
-      "src": "usb_audio_in:out_2",
-      "dst": "aes67:sin_8"
-    },
-    {
-      "src": "usb_audio_in:out_1",
       "dst": "aes67:sin_9"
     },
     {
@@ -1021,6 +989,38 @@
     {
       "src": "usb_audio_in:out_2",
       "dst": "aes67:sin_16"
+    },
+    {
+      "src": "analog:out_1",
+      "dst": "stream:sin_1"
+    },
+    {
+      "src": "analog:out_2",
+      "dst": "stream:sin_2"
+    },
+    {
+      "src": "usb_audio_in:out_1",
+      "dst": "stream:sin_1"
+    },
+    {
+      "src": "usb_audio_in:out_2",
+      "dst": "stream:sin_2"
+    },
+    {
+      "src": "analog:out_1",
+      "dst": "aes67:sin_1"
+    },
+    {
+      "src": "analog:out_2",
+      "dst": "aes67:sin_2"
+    },
+    {
+      "src": "usb_audio_in:out_1",
+      "dst": "aes67:sin_1"
+    },
+    {
+      "src": "usb_audio_in:out_2",
+      "dst": "aes67:sin_2"
     },
     {
       "src": "aes67:out_1",

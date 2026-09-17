@@ -25,7 +25,7 @@
 #include "include/alsa_device.h"
 #include "include/clk2.h"
 
-/* PTP 재잠금/시작 후 언뮤트까지 쌓아야 할 최소 프레임 수 (3 DSP 주기) */
+/* hw:aoip(I2S) 시작 prebuffer — DSP 클럭 eventfd 신호 전 누적 프레임 수 (3 DSP 주기) */
 #define RAVENNA_LOCK_PREBUF (g_period_frames * 3)
 
 /* aoip_engine.c 가 소유하는 전역 플래그 */
@@ -66,20 +66,30 @@ static inline void f32_clamp_to_i32_block(const float *src, int32_t *dst, int n)
     }
 }
 
+/* 마지막 hw_ptr 갱신 시각(ns, CLOCK_MONOTONIC)과 그 시점 avail. 실패 시 0. */
+static inline int64_t pcm_hts_ns(snd_pcm_t *pcm, snd_pcm_uframes_t *avail)
+{
+    struct timespec hts;
+    if (snd_pcm_htimestamp(pcm, avail, &hts) == 0 && hts.tv_sec > 0)
+        return (int64_t)hts.tv_sec * 1000000000LL + hts.tv_nsec;
+    return 0;
+}
+
+static inline int64_t mono_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
 /* frames 증가와 htstamp 갱신을 seqlock으로 묶어 reader 측 torn read 방지.
  * reader는 seq를 acquire-load → 짝수 확인 → 두 값 load → seq 재확인 한다. */
-static inline void clk2_writer_commit(snd_pcm_t *pcm,
-                                      _Atomic uint32_t *seq,
+static inline void clk2_writer_commit(_Atomic uint32_t *seq,
                                       _Atomic int64_t  *frames,
                                       _Atomic int64_t  *hts_ns,
-                                      int64_t add_frames)
+                                      int64_t add_frames,
+                                      int64_t new_hts_ns)
 {
-    snd_pcm_uframes_t avail;
-    struct timespec   hts;
-    int64_t new_hts_ns = 0;
-    if (snd_pcm_htimestamp(pcm, &avail, &hts) == 0 && hts.tv_sec > 0)
-        new_hts_ns = (int64_t)hts.tv_sec * 1000000000LL + hts.tv_nsec;
-
     /* seq: even → odd (mutation in progress) */
     atomic_fetch_add_explicit(seq, 1, memory_order_release);
     atomic_fetch_add_explicit(frames, add_frames, memory_order_relaxed);
@@ -155,6 +165,305 @@ snd_pcm_t *alsa_open(const char *dev, int stream, int rate,
 }
 
 
+/* ── RAVENNA 언뮤트 게이트 ───────────────────────────────────────────
+ *
+ * 드라이버(ravenna-alsa-lkm audio_driver.c)의 캡처 읽기 위치 capture_buffer_pos 는
+ * PCM prepare 시점에만 GlobalSAC mod 링길이 로 맞춰지고, 이후엔 TIC 인터럽트마다
+ * +48 씩 증가만 한다. PTP 언락 동안 드라이버는 인터럽트를 멈추지만 GlobalSAC 는
+ * 계속 흐르므로, 재락 후 읽기 위치가 RTP 쓰기 위치와 (점프량 mod 링길이) 만큼
+ * 어긋난 채 굳는다 → 재부팅(=재prepare) 전까지 안 풀리던 비트 어긋남.
+ * 그래서 언뮤트 직전엔 반드시 drop/prepare/start 로 읽기 위치를 재동기화한다.
+ *
+ *   MEASURE ─(연속 양호 RG_MEASURE_WIN + 구간 평균 기울기 양호)→ prepare 재동기화 → VERIFY
+ *   VERIFY  ─(연속 양호 RG_VERIFY_WIN)→ LIVE(언뮤트)     (불량 → MEASURE)
+ *   LIVE    ─(느슨한 임계 초과 / PTP 언락 / xrun)→ 뮤트 → MEASURE
+ *
+ * 측정: hw 위치(읽은 프레임+avail) 와 그 htstamp 로 위상 e = Δpos − Δt·Fs 를 쌓는다.
+ * 인터럽트 지연은 e 를 낮추기만 하므로 1s 윈도우의 상위값(3번째)은 지터에 둔감하고,
+ * TIC drop·재락·GM 스텝 같은 진짜 위상 변화는 그대로 드러난다.
+ *   rate = 윈도우 간 위상 기울기 (RAVENNA 클럭 vs CLOCK_MONOTONIC, ppm) — GM 슬루
+ *   jump = 기울기 변화량 (프레임)                                      — 스텝/급변
+ * 실측(2026-09-17): 드라이버 TIC 타이머가 100µs(≈4.8fr) 단위로 흔들려 정상 상태에서도
+ * 윈도우당 rate ±190ppm, jump ≤9.6fr 가 나온다. 그래서 윈도우 단위 rate 는 큰 이상만 거르고,
+ * 클럭 기울기 판정은 연속 양호 구간 전체 평균(양자화 노이즈가 구간 길이로 나눠짐)으로 한다. */
+#define RG_WIN_NS            1000000000LL
+#define RG_MEASURE_WIN       10        /* 재동기화 전 연속 양호 윈도우 (≈10s) */
+#define RG_VERIFY_WIN        3         /* 재동기화 후 연속 양호 윈도우 (≈3s) */
+#define RG_WIN_PPM           300.0     /* 윈도우 1개 기울기 한계 — 양자화 노이즈 ≤200ppm 위, GM 슬루 차단 */
+#define RG_GATE_JUMP_FR      12.0      /* 게이트 위상 급변 한계 — 양자화 노이즈 ≤9.6fr 위, TIC drop(48fr) 아래 */
+#define RG_GATE_AVG_PPM      50.0      /* MEASURE 구간 평균 기울기 한계 */
+#define RG_GATE_WANDER_FR    8.0       /* MEASURE 구간 위상의 추세선 대비 최대 이탈 — 양자화 ≈4.8fr,
+                                        * 출렁이는 클럭(평균은 상쇄돼도) 은 수십 fr */
+#define RG_GATE_RELAX_WIN    60        /* 이만큼 통과 못하면 게이트 임계 한 단계 완화 (최대 2단계) */
+#define RG_LIVE_PPM          600.0     /* 언뮤트 중 윈도우 기울기 한계 (TIC drop 은 ≈1000ppm) */
+#define RG_LIVE_JUMP_FR      24.0      /* 언뮤트 중 위상 급변 한계 — 반 TIC 프레임 (drop=48fr) */
+#define RG_RESYNC_LATE_NS    500000LL  /* 마지막 TIC 후 이 시간 넘기면 다음 TIC 과 경합 → 재시도 */
+#define RG_RESYNC_MAX_TRIES  20
+#define RG_BAD_LOG_EVERY     30        /* 게이트 불량 로그 rate-limit (윈도우) */
+#define RG_LIVE_REPORT_WIN   600       /* 언뮤트 중 클럭 통계 보고 주기 (≈10분) */
+
+typedef struct {
+    int     anchored;
+    int     rate;
+    int64_t t0_ns, p0;
+    int64_t win_t0_ns;
+    double  top[3];        /* 윈도우 내 e 상위 3개 (내림차순) */
+    int     win_n;
+    int     have_E, have_d;
+    double  prev_E, prev_d;
+} RavPhase;
+
+typedef struct {
+    double  ppm;
+    double  jump_fr;
+    double  dE_fr;         /* 직전 윈도우 대비 위상 변화 (프레임) */
+    int     have_jump;     /* 0 = 기울기 기준 확보 중(워밍업) */
+    int     reads;
+    int64_t span_ns;
+} RavWin;
+
+typedef enum { RG_MEASURE = 0, RG_VERIFY, RG_LIVE } RgState;
+
+typedef struct {
+    RgState  st;
+    int      good;          /* 연속 양호 윈도우 */
+    int      windows;       /* 뮤트 이후 판정한 윈도우 수 (완화 단계 산출) */
+    int      relax;         /* 게이트 임계 완화 단계 0..2 */
+    int      bad_logged;
+    int      want_resync;
+    int      resync_tries;
+    double   max_ppm, max_jump;
+    /* 연속 양호 구간의 누적 위상(fr)·시간(s) — [0] 은 원점. 평균 기울기·위상 이탈 산출 */
+    double   streak_P[RG_MEASURE_WIN + 1];
+    double   streak_T[RG_MEASURE_WIN + 1];
+    double   avg_ppm, wander_fr;
+    int64_t  pos;           /* 마지막 prepare/start 이후 읽은 프레임 누적 */
+    int      live_win;
+    RavPhase ph;
+} RavGate;
+
+static void rav_phase_top_insert(RavPhase *ph, double e)
+{
+    if (e <= ph->top[2]) return;
+    if (e > ph->top[0])      { ph->top[2] = ph->top[1]; ph->top[1] = ph->top[0]; ph->top[0] = e; }
+    else if (e > ph->top[1]) { ph->top[2] = ph->top[1]; ph->top[1] = e; }
+    else                     { ph->top[2] = e; }
+}
+
+/* 샘플 1개 투입. 윈도우가 끝나 판정할 값이 나오면 1 반환. */
+static int rav_phase_feed(RavPhase *ph, int64_t pos, int64_t t_ns, int rate, RavWin *w)
+{
+    if (!ph->anchored) {
+        memset(ph, 0, sizeof(*ph));
+        ph->anchored  = 1;
+        ph->rate      = rate;
+        ph->t0_ns     = ph->win_t0_ns = t_ns;
+        ph->p0        = pos;
+        ph->top[0] = ph->top[1] = ph->top[2] = -1e300;
+        return 0;
+    }
+    const double fs_per_ns = (double)ph->rate / 1e9;
+    rav_phase_top_insert(ph, (double)(pos - ph->p0) - (double)(t_ns - ph->t0_ns) * fs_per_ns);
+    ph->win_n++;
+
+    int64_t span = t_ns - ph->win_t0_ns;
+    if (span < RG_WIN_NS) return 0;
+
+    double E = ph->win_n >= 3 ? ph->top[2] : ph->top[0];
+    int got = 0;
+    if (ph->have_E) {
+        double dE    = E - ph->prev_E;
+        w->ppm       = dE / ((double)span * fs_per_ns) * 1e6;
+        w->have_jump = ph->have_d;
+        w->jump_fr   = ph->have_d ? fabs(dE - ph->prev_d) : 0.0;
+        w->dE_fr     = dE;
+        w->reads     = ph->win_n;
+        w->span_ns   = span;
+        ph->prev_d = dE;
+        ph->have_d = 1;
+        got = 1;
+    }
+    ph->prev_E    = E;
+    ph->have_E    = 1;
+    ph->win_t0_ns = t_ns;
+    ph->win_n     = 0;
+    ph->top[0] = ph->top[1] = ph->top[2] = -1e300;
+    return got;
+}
+
+static const char *rg_judge(const RavWin *w, double ppm_lim, double jump_lim,
+                            int rate, int period)
+{
+    /* 기대 read 수의 절반 미만 = TIC 인터럽트 끊김 */
+    if ((double)w->reads * period * 1e9 < (double)w->span_ns * rate * 0.5) return "gap";
+    if (fabs(w->ppm) > ppm_lim)                                            return "rate";
+    if (w->have_jump && w->jump_fr > jump_lim)                              return "jump";
+    return NULL;
+}
+
+/* 연속 양호 구간 통계 초기화 */
+static void rg_streak_reset(RavGate *g)
+{
+    g->good = 0;
+    g->max_ppm = g->max_jump = 0.0;
+    g->streak_P[0] = g->streak_T[0] = 0.0;
+}
+
+/* 뮤트 상태에서 측정을 처음부터. pos 는 hw 위치 누적이라 유지. */
+static void rg_restart(RavGate *g)
+{
+    g->st = RG_MEASURE;
+    g->windows = g->relax = g->bad_logged = 0;
+    g->want_resync = g->resync_tries = 0;
+    rg_streak_reset(g);
+    g->live_win = 0;
+    g->ph.anchored = 0;
+}
+
+/* 언뮤트 중이면 뮤트로 전환하고, 어떤 상태든 측정을 처음부터 다시 한다.
+ * flush_play: PTP/클럭 원인일 때 AES67 출력 링도 비우도록 재생 스레드에 신호. */
+static void rav_mute(Device *d, RavGate *g, const char *why, int flush_play)
+{
+    if (atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed)) {
+        fprintf(stderr, "[aoip_engine] cap %s: %s → mute, re-measuring clock\n", d->name, why);
+        atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_release);
+        if (flush_play)
+            atomic_store_explicit(&d->ravenna_flush, 1, memory_order_release);
+        rb_reset(&d->in_ring);
+    }
+    rg_restart(g);
+}
+
+static void rg_on_window(Device *d, RavGate *g, const RavWin *w)
+{
+    double jump = w->have_jump ? w->jump_fr : 0.0;
+
+    if (g->st == RG_LIVE) {
+        const char *why = rg_judge(w, RG_LIVE_PPM, RG_LIVE_JUMP_FR, d->rate, d->period);
+        if (why) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "clock %s (rate %+.1fppm, jump %.2ffr, reads %d)",
+                     why, w->ppm, jump, w->reads);
+            rav_mute(d, g, msg, 1);
+            return;
+        }
+        if (fabs(w->ppm) > g->max_ppm) g->max_ppm = fabs(w->ppm);
+        if (jump > g->max_jump)        g->max_jump = jump;
+        if (++g->live_win >= RG_LIVE_REPORT_WIN) {
+            fprintf(stderr, "[aoip_engine] cap %s: live clock %ds: rate %+.2fppm (max |%.2f|), max jump %.2ffr\n",
+                    d->name, g->live_win, w->ppm, g->max_ppm, g->max_jump);
+            g->live_win = 0;
+            g->max_ppm = g->max_jump = 0.0;
+        }
+        return;
+    }
+
+    if (!w->have_jump) return;   /* 워밍업 */
+
+    /* 오래 통과 못하면 임계를 단계적으로 완화 — 측정 노이즈 과소평가로 영구 뮤트되는 것 방지.
+     * 2단계(평균 150ppm / 18fr)여도 LIVE 임계보다 엄격하고 TIC drop(48fr)·GM 슬루는 계속 걸러진다. */
+    int relax = ++g->windows / RG_GATE_RELAX_WIN;
+    if (relax > 2) relax = 2;
+    double avg_lim    = RG_GATE_AVG_PPM * (1.0 + relax);
+    double jump_lim   = RG_GATE_JUMP_FR * (1.0 + 0.25 * relax);
+    double wander_lim = RG_GATE_WANDER_FR * (1.0 + 0.25 * relax);
+    if (relax != g->relax) {
+        g->relax = relax;
+        fprintf(stderr, "[aoip_engine] cap %s: clock gate not passed for %ds, relaxing to avg %.0fppm / jump %.0ffr / wander %.0ffr\n",
+                d->name, g->windows, avg_lim, jump_lim, wander_lim);
+    }
+
+    const char *why = rg_judge(w, RG_WIN_PPM, jump_lim, d->rate, d->period);
+    if (why) {
+        if (g->st == RG_VERIFY) {
+            fprintf(stderr, "[aoip_engine] cap %s: resync verify failed: clock %s (rate %+.1fppm, jump %.2ffr) → re-measuring\n",
+                    d->name, why, w->ppm, jump);
+            g->st = RG_MEASURE;
+        } else if (g->bad_logged++ % RG_BAD_LOG_EVERY == 0) {
+            fprintf(stderr, "[aoip_engine] cap %s: clock unstable: %s (rate %+.1fppm, jump %.2ffr, reads %d), holding mute\n",
+                    d->name, why, w->ppm, jump, w->reads);
+        }
+        rg_streak_reset(g);
+        g->want_resync = g->resync_tries = 0;
+        return;
+    }
+
+    g->good++;
+    if (fabs(w->ppm) > g->max_ppm) g->max_ppm = fabs(w->ppm);
+    if (jump > g->max_jump)        g->max_jump = jump;
+    if (g->good <= RG_MEASURE_WIN) {
+        g->streak_P[g->good] = g->streak_P[g->good - 1] + w->dE_fr;
+        g->streak_T[g->good] = g->streak_T[g->good - 1] + (double)w->span_ns / 1e9;
+    }
+
+    if (g->st == RG_MEASURE && g->good >= RG_MEASURE_WIN) {
+        /* 구간 끝점 추세선: 평균 기울기 + 각 윈도우 위상의 추세선 대비 최대 이탈 */
+        const int n = RG_MEASURE_WIN;
+        double slope = g->streak_P[n] / g->streak_T[n];          /* fr/s */
+        g->avg_ppm   = slope / d->rate * 1e6;
+        g->wander_fr = 0.0;
+        for (int i = 1; i < n; i++) {
+            double r = fabs(g->streak_P[i] - slope * g->streak_T[i]);
+            if (r > g->wander_fr) g->wander_fr = r;
+        }
+        const char *bad = fabs(g->avg_ppm) > avg_lim   ? "drifting"
+                        : g->wander_fr     > wander_lim ? "wandering" : NULL;
+        if (bad) {
+            if (g->bad_logged++ % RG_BAD_LOG_EVERY == 0)
+                fprintf(stderr, "[aoip_engine] cap %s: clock %s over %ds (avg rate %+.1fppm, wander %.1ffr), holding mute\n",
+                        d->name, bad, n, g->avg_ppm, g->wander_fr);
+            rg_streak_reset(g);
+            return;
+        }
+        g->want_resync = 1;
+    } else if (g->st == RG_VERIFY && g->good >= RG_VERIFY_WIN) {
+        rb_reset(&d->in_ring);
+        atomic_store_explicit(&d->ravenna_ptp_locked, 1, memory_order_release);
+        atomic_store_explicit(&g_ptp_locked, 1, memory_order_release);
+        atomic_fetch_add_explicit(&g_ptp_resync_gen, 1, memory_order_release);
+        fprintf(stderr, "[aoip_engine] cap %s: clock verified %ds after resync (max |rate| %.2fppm, max jump %.2ffr), unmuting → DSP prefill\n",
+                d->name, g->good, g->max_ppm, g->max_jump);
+        g->st = RG_LIVE;
+        g->live_win = 0;
+        g->max_ppm = g->max_jump = 0.0;
+    }
+}
+
+/* 드라이버 읽기 위치를 현재 GlobalSAC 에 재동기화 (drop → prepare → start).
+ * prepare 와 start 사이에 TIC 이 끼면 읽기 위치가 한 프레임 밀리므로 readi 직후
+ * (마지막 TIC 직후) 에만 수행하고, 사후에 경계를 넘겼으면 다음 readi 에서 다시 한다. */
+static void rg_try_resync(Device *d, RavGate *g, snd_pcm_t *pcm, int64_t last_tic_ns)
+{
+    int64_t t_pre = mono_ns();
+    if (last_tic_ns > 0 && t_pre - last_tic_ns > RG_RESYNC_LATE_NS &&
+        ++g->resync_tries < RG_RESYNC_MAX_TRIES)
+        return;
+
+    snd_pcm_drop(pcm);
+    int err = snd_pcm_prepare(pcm);
+    if (err == 0) err = snd_pcm_start(pcm);
+    int64_t late_ns = mono_ns() - last_tic_ns;
+
+    g->pos = 0;
+    g->ph.anchored = 0;
+    if (err < 0) {
+        fprintf(stderr, "[aoip_engine] cap %s: resync prepare/start failed: %s\n",
+                d->name, snd_strerror(err));
+        rg_restart(g);
+        return;
+    }
+    if (last_tic_ns > 0 && late_ns > RG_RESYNC_LATE_NS &&
+        ++g->resync_tries < RG_RESYNC_MAX_TRIES)
+        return;   /* want_resync 유지 → 다음 readi 직후 재시도 */
+
+    fprintf(stderr, "[aoip_engine] cap %s: clock stable %ds (avg rate %+.2fppm, wander %.1ffr, max jump %.2ffr) → driver read pointer resync (%lldus after TIC, tries %d), verifying\n",
+            d->name, g->good, g->avg_ppm, g->wander_fr, g->max_jump,
+            (long long)(late_ns / 1000), g->resync_tries);
+    g->st = RG_VERIFY;
+    g->want_resync = g->resync_tries = 0;
+    rg_streak_reset(g);
+}
+
 /* ── ALSA 캡처 스레드 ────────────────────────────────────────────── */
 static void *alsa_capture_thread(void *arg)
 {
@@ -192,10 +501,12 @@ static void *alsa_capture_thread(void *arg)
     float   *fbuf = malloc((size_t)(d->period * d->channels) * sizeof(float));
     int cap_err_count = 0;
 
-    /* Phase 2(3s 벽시계) 시작 시각 — thread-local.
+    /* 언뮤트 게이트 상태 — thread-local.
      * struct 필드에 두면 bridge_start 재호출 등으로 이전 thread 잔재값을
-     * 새 thread 가 그대로 보는 race 가 발생 (디버그로 확인됨). 0 = 미시작. */
-    int64_t phase2_start_ns = 0;
+     * 새 thread 가 그대로 보는 race 가 발생 (디버그로 확인됨). */
+    RavGate gate;
+    memset(&gate, 0, sizeof(gate));
+    rg_restart(&gate);
 
     /* RAVENNA: alsa_open 후 PREPARED 상태 — 명시적 start 필요.
      * poll-before-read 방식은 PREPARED 상태에서 POLLIN이 오지 않아 deadlock.
@@ -233,7 +544,9 @@ static void *alsa_capture_thread(void *arg)
     while (!d->quit_cap && !g_quit) {
         /* RAVENNA: PTP 유실 또는 소스 없을 때 snd_pcm_readi 무한 블로킹 방지.
          * poll 타임아웃 50ms — 소스 없으면 그냥 skip (direct_cap은 0 유지).
-         * drop+prepare+start는 절대 하지 않음 — 재시작 시 데이터 누적 → 즉시 EPIPE 유발. */
+         * 언락/소스 없음 상태에서 drop+prepare+start 하지 않음 — 재시작 시 데이터 누적 →
+         * 즉시 EPIPE 유발. prepare 재동기화는 게이트가 클럭 안정을 확인한 직후
+         * (rg_try_resync, TIC 직후 타이밍) 에만 한다. */
         if (d->is_ravenna) {
             struct pollfd pfds[4];
             int npfds = snd_pcm_poll_descriptors(pcm, pfds, 4);
@@ -241,25 +554,19 @@ static void *alsa_capture_thread(void *arg)
                 int ready = poll(pfds, (nfds_t)npfds, 50);
                 if (d->quit_cap || g_quit) break;
                 if (ready == 0) {
-                    /* 타임아웃: 소스 없음 또는 PTP 미잠금 — 즉시 mute+reset.
-                     * 이전엔 200ms holdover 동안 silence fill 로 짧은 끊김을 흡수했으나,
-                     * 실제 unlock 길이와 silence 길이가 어긋나면서 재개 시 in_ring 안에
-                     * (silence + 실 sample) 위상이 밀려 비트 시프트 발생. 모든 PTP glitch
-                     * 를 prebuf+3s 경로로 보내 깔끔하게 재정렬. */
-                    if (atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed)) {
-                        fprintf(stderr, "[aoip_engine] cap %s: poll timeout → mute (PTP unlock)\n", d->name);
-                        atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_release);
-                        atomic_store_explicit(&d->ravenna_flush, 1, memory_order_release);
-                        rb_reset(&d->in_ring);
-                        d->ravenna_prebuf_count = 0;
-                        phase2_start_ns = 0;
-                    }
+                    /* 타임아웃: 소스 없음 또는 PTP 미잠금 (드라이버는 언락 중 TIC 인터럽트를
+                     * 멈춘다) — 즉시 mute + 측정 리셋. silence fill 로 흡수하지 않는다
+                     * (silence/실 sample 위상 어긋남으로 비트 시프트 이력). 재락 후엔 게이트가
+                     * 클럭을 다시 재고 prepare 재동기화를 거친 뒤에만 언뮤트. */
+                    rav_mute(d, &gate, "poll timeout (PTP unlock)", 1);
                     continue;
                 }
                 if (ready < 0) {
                     if (errno != EINTR) {
                         snd_pcm_recover(pcm, -EPIPE, 1);
                         snd_pcm_start(pcm);
+                        gate.pos = 0;
+                        rav_mute(d, &gate, "poll error", 1);
                     }
                     continue;
                 }
@@ -288,10 +595,7 @@ static void *alsa_capture_thread(void *arg)
             }
             if (d->is_ravenna) {
                 d->ravenna_accum = 0;
-                d->ravenna_prebuf_count = 0;
-                /* Phase 2 게이트 상태도 함께 리셋 — 안 하면 다음 prebuf 통과 시
-                 * 오래된 phase2_start_ns 로 3s 벽시계가 즉시 만료되어 unmute. */
-                phase2_start_ns = 0;
+                gate.pos = 0;   /* recover = prepare → hw 위치 0 부터 */
                 /* 입력 링버퍼·SRC·PI 전부 리셋: xrun으로 데이터 불연속 발생 */
                 rb_reset(&d->in_ring);
                 if (d->cap_src) {
@@ -302,8 +606,8 @@ static void *alsa_capture_thread(void *arg)
                     d->cap_pi.integ = 0.0;
                     d->cap_pi.smooth = 0.0;
                 }
-                /* ptp_locked=0 → prebuffer 경로 재진입, DSP 입력 뮤트 */
-                atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_release);
+                /* 뮤트 + 게이트 처음부터 — DSP 입력 뮤트, 재측정/재동기화 후 언뮤트 */
+                rav_mute(d, &gate, "capture xrun", 0);
             }
             continue;
         }
@@ -313,29 +617,19 @@ static void *alsa_capture_thread(void *arg)
             if (d->is_ravenna) {
                 snd_pcm_start(pcm);
                 d->ravenna_accum = 0;
+                gate.pos = 0;
+                rav_mute(d, &gate, "suspend/resume", 0);
             }
             continue;
         }
         if (n == -EIO) {
             if (d->is_ravenna) {
-                /* PTP 미잠금 또는 소스 없음 — 즉시 mute+reset.
-                 * holdover silence fill 제거: 짧은 끊김에도 silence/실 sample
-                 * 위상 어긋남으로 비트 시프트 발생 이력. 모든 EIO 를 prebuf+3s
-                 * 경로로 보내 깨끗하게 재정렬한다. */
-                if (atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed)) {
-                    fprintf(stderr, "[aoip_engine] cap %s: EIO → mute (PTP unlock)\n", d->name);
-                    atomic_store_explicit(&d->ravenna_ptp_locked, 0, memory_order_release);
-                    atomic_store_explicit(&d->ravenna_flush, 1, memory_order_release);
-                    rb_reset(&d->in_ring);
+                /* PTP 미잠금 또는 소스 없음 — 즉시 mute + 게이트 리셋 (silence fill 금지). */
+                if (atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed))
                     cap_err_count = 1;
-                } else if (cap_err_count++ == 0) {
+                else if (cap_err_count++ == 0)
                     fprintf(stderr, "[aoip_engine] cap %s: EIO (PTP not locked), muting\n", d->name);
-                }
-                /* 이미 mute 상태에서 EIO 재발 — 누적된 prebuf_count 와 phase2
-                 * 게이트 상태를 모두 리셋해야 PTP 회복 후 3s 벽시계가 처음부터
-                 * 정상 동작한다. */
-                d->ravenna_prebuf_count = 0;
-                phase2_start_ns = 0;
+                rav_mute(d, &gate, "EIO (PTP unlock)", 1);
                 d->ravenna_accum = 0;
                 usleep(50000);
             } else {
@@ -361,52 +655,47 @@ static void *alsa_capture_thread(void *arg)
                 fprintf(stderr, "[aoip_engine] cap %s: %s\n", d->name, snd_strerror((int)n));
             snd_pcm_close(pcm); pcm = NULL;
             rb_reset(&d->in_ring);
-            if (d->is_ravenna) d->ravenna_accum = 0;
+            if (d->is_ravenna) {
+                d->ravenna_accum = 0;
+                gate.pos = 0;
+                rav_mute(d, &gate, "pcm error", 1);
+            }
             while (!d->quit_cap && !g_quit) {
                 SLEEP_INTERRUPTIBLE(500, d->quit_cap);
                 if (d->quit_cap || g_quit) break;
                 pcm = alsa_open(d->dev, SND_PCM_STREAM_CAPTURE,
                                 d->rate, d->period, d->nperiods, d->channels);
-                if (pcm) { cap_err_count = 0; break; }
+                if (pcm) {
+                    cap_err_count = 0;
+                    /* RAVENNA: PREPARED 상태로는 poll 에 POLLIN 이 안 옴 — 명시적 start */
+                    if (d->is_ravenna) snd_pcm_start(pcm);
+                    break;
+                }
             }
             continue;
         }
-        /* PTP 잠금/재잠금:
-         * Phase 1 — RAVENNA_LOCK_PREBUF 프레임: 캡처 클럭 안정화 확인
-         * Phase 2 — SAMPLE_RATE*3 프레임(3초): PTP servo 수렴 대기
-         *   (LAN 재연결 시 ptp4l이 재시작되므로 servo 수렴에 충분한 시간 필요)
-         * 두 단계 모두 in_ring에 쓰지 않음. 완료 후 ring 초기화 + 언뮤트.
-         * ravenna_ptp_locked=1 전환 시 DSP cap_prebuf_ready=0 상태이므로
-         * DSP-level prefill이 자동으로 재시작됨. */
-        if (d->is_ravenna && (int)n > 0 &&
-            !atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed)) {
-            d->ravenna_prebuf_count += (int)n;
-            if (d->ravenna_prebuf_count < RAVENNA_LOCK_PREBUF) {
-                /* Phase 1: 캡처 prebuffer 중 — in_ring에 쓰지 않고 대기 */
+        /* RAVENNA 언뮤트 게이트 — 뮤트 중엔 클럭만 재고 in_ring 에 쓰지 않는다.
+         * 언뮤트(ravenna_ptp_locked=1) 전환 시 DSP cap_prebuf_ready=0 이므로
+         * DSP-level prefill 이 자동으로 재시작된다. */
+        int64_t rav_hts_ns = 0;
+        if (d->is_ravenna && (int)n > 0) {
+            snd_pcm_uframes_t hav = 0;
+            rav_hts_ns = pcm_hts_ns(pcm, &hav);
+            gate.pos += n;
+            RavWin w;
+            if (rav_hts_ns > 0 &&
+                rav_phase_feed(&gate.ph, gate.pos + (int64_t)hav, rav_hts_ns, d->rate, &w))
+                rg_on_window(d, &gate, &w);
+            if (gate.want_resync) {
+                /* readi 직후 = 마지막 TIC 직후 — 이 블록은 버리고 읽기 위치 재동기화 */
+                rg_try_resync(d, &gate, pcm, rav_hts_ns);
                 cap_err_count = 0;
                 continue;
             }
-            /* Phase 2: 3초 벽시계 대기 (PTP servo 완전 수렴 — EIO/EPIPE 무관).
-             * phase2_start_ns 자체를 sentinel 로 사용 (0=미시작) — printed 별도 플래그를
-             * 두면 bridge_manager 가 한 쪽만 리셋해 start_ns=0 잔재로 즉시 만료되는 race 발생. */
-            struct timespec _ts;
-            clock_gettime(CLOCK_MONOTONIC, &_ts);
-            int64_t now_ns = (int64_t)_ts.tv_sec * 1000000000LL + _ts.tv_nsec;
-            if (phase2_start_ns == 0) {
-                phase2_start_ns = now_ns;
-                fprintf(stderr, "[aoip_engine] cap %s: PTP clk stable, waiting 3s before unmute\n", d->name);
-            }
-            if (now_ns - phase2_start_ns < 3000000000LL) {
+            if (!atomic_load_explicit(&d->ravenna_ptp_locked, memory_order_relaxed)) {
                 cap_err_count = 0;
                 continue;
             }
-            /* Phase 2 완료: in_ring 초기화 후 언뮤트 → DSP prefill 재시작 */
-            rb_reset(&d->in_ring);
-            atomic_store_explicit(&d->ravenna_ptp_locked, 1, memory_order_release);
-            atomic_store_explicit(&g_ptp_locked, 1, memory_order_release);
-            atomic_fetch_add_explicit(&g_ptp_resync_gen, 1, memory_order_release);
-            d->ravenna_prebuf_count = 0;
-            fprintf(stderr, "[aoip_engine] cap %s: PTP locked (3s stable), unmuting → DSP prefill\n", d->name);
         }
         cap_err_count = 0;
         /* hw:aoip(I2S): 첫 readi 성공 시점에 PLL 베이스라인 보정 적용 → g_clk_ready set.
@@ -466,9 +755,9 @@ static void *alsa_capture_thread(void *arg)
 
         /* RAVENNA: htstamp 갱신 (DSP 클럭 신호 없음 — hw:aoip가 DSP 마스터) */
         if (d->is_ravenna) {
-            clk2_writer_commit(pcm, &g_ravenna_seq,
+            clk2_writer_commit(&g_ravenna_seq,
                                &g_ravenna_frames, &g_ravenna_hts_ns,
-                               (int64_t)written);
+                               (int64_t)written, rav_hts_ns);
         }
 
         /* hw:aoip (is_i2s=1): DSP 틱 신호 + htstamp 갱신 */
@@ -489,9 +778,10 @@ static void *alsa_capture_thread(void *arg)
                     (void)write(g_dsp_clock_fd, &val, sizeof(val));
                 }
             }
-            clk2_writer_commit(pcm, &g_aoip_seq,
+            snd_pcm_uframes_t hav = 0;
+            clk2_writer_commit(&g_aoip_seq,
                                &g_aoip_frames, &g_aoip_hts_ns,
-                               (int64_t)written);
+                               (int64_t)written, pcm_hts_ns(pcm, &hav));
         }
     }
 

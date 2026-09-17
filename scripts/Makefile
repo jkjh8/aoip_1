@@ -38,14 +38,18 @@ all: $(TARGET)
 $(TARGET): $(OBJS) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+# -MMD -MP: 헤더 의존성 추적 — 구조체(Device 등) 변경 시 포함하는 모든 .o 재빌드.
+# 없으면 헤더만 바뀐 경우 옛 레이아웃 .o 가 섞여 링크된다.
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 $(BIN_DIR):
 	@mkdir -p $@
 
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
+
+-include $(OBJS:.o=.d)
 
 .PHONY: all clean

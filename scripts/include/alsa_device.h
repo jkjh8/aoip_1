@@ -91,9 +91,13 @@ typedef struct {
     /* RAVENNA 클럭 마스터: 캡처 스레드가 g_period_frames 누적 시 DSP eventfd 신호 */
     int              ravenna_accum;        /* 누적 프레임 수 (캡처 스레드만 접근) */
 
-    /* PTP 잠금 상태: 0=EIO(뮤트), 1=정상
-     * 캡처 스레드가 쓰고, DSP 스레드가 읽음 */
+    /* 입력 언뮤트 상태: 0=뮤트(PTP 언락 / 클럭 측정·재동기화 중), 1=언뮤트
+     * 캡처 스레드(언뮤트 게이트)가 쓰고, DSP 스레드가 읽음 */
     _Atomic int      ravenna_ptp_locked;
+
+    /* RAVENNA SRC 슬립(overflow skip / underrun) 60s 통계 (DSP 스레드 전용, 로그용) */
+    uint32_t         cap_slip_report;
+    int64_t          cap_slip_report_frames;
 
     /* 일반 ALSA (USB UAC2 등) 호스트 스트림 활성: 0=비활성(뮤트), 1=활성
      * 캡처 스레드가 readi 성공/EIO 전환 시 갱신, DSP 스레드가 읽음 */

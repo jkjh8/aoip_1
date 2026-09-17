@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <stdatomic.h>
 #include <time.h>
+#include <math.h>
 #include "include/dsp_io.h"
 #include "include/engine_globals.h"
 #include "include/dsp_neon.h"
@@ -96,6 +97,31 @@ static void read_alsa_master(Device *d)
     }
 }
 
+/* RAVENNA SRC 슬립 통계 — overflow skip / underrun zero-fill 횟수를 60s 마다 보고 (로그 전용).
+ * 재게이트 트리거로 쓰지 않는다 (2026-09-17: used==0 을 슬립으로 오판한 카운터로 트리거했다가
+ * 언뮤트 직후 매번 재뮤트되어 입력 전체가 막힘). */
+#define RAV_SLIP_REPORT_FRAMES  ((int64_t)SAMPLE_RATE * 60)
+
+static void ravenna_slip_reset(Device *d)
+{
+    d->cap_slip_report = 0;
+    d->cap_slip_report_frames = 0;
+}
+
+static void ravenna_slip_account(Device *d, int slipped)
+{
+    if (slipped) d->cap_slip_report++;
+
+    d->cap_slip_report_frames += g_period_frames;
+    if (d->cap_slip_report_frames >= RAV_SLIP_REPORT_FRAMES) {
+        if (d->cap_slip_report)
+            fprintf(stderr, "[aoip_engine] ravenna '%s': %u SRC slips in last 60s\n",
+                    d->name, d->cap_slip_report);
+        d->cap_slip_report = 0;
+        d->cap_slip_report_frames = 0;
+    }
+}
+
 static void read_alsa_device(Device *d)
 {
     if (d->is_ravenna) {
@@ -115,15 +141,24 @@ static void read_alsa_device(Device *d)
             }
             src_reset(d->cap_src);
             pi_reset(&d->cap_pi);
+            ravenna_slip_reset(d);
             d->cap_prebuf_ready = 1;
             fprintf(stderr, "[aoip_engine] ravenna '%s': cap prebuffer done (fill=%d), SRC ready\n",
                     d->name, rb_avail(&d->in_ring));
             /* RAVENNA RTP 로딩 완료 — I2S 베이스라인 보정 1회 적용 */
             clk2_apply_precal();
         }
-        if (ring_capture_src(d->cap_src, &d->cap_pi, &d->in_ring,
-                             d->tmp_cap_in, d->tmp_cap_out,
-                             g_ravenna_fill_target, d->channels, d->ch_start) == 0) {
+        /* 실제 샘플 불연속만 센다: overflow skip(ring_capture_src 조건과 동일) 과
+         * 입력 부족으로 출력을 0 으로 채우는 underrun(src_convert 조건과 동일).
+         * used==0 자체는 슬립이 아니다 — libsamplerate 가 내부 버퍼만으로 출력을 만들고
+         * 입력을 0 프레임 소비하는 정상 틱이 ~24틱마다 있다 (need=actual+2 누적). */
+        int pre_avail = rb_avail(&d->in_ring);
+        int overflow  = pre_avail > g_ravenna_fill_target * 2;
+        int underrun  = pre_avail < (int)ceil((double)g_period_frames / d->cap_pi.ratio);
+        int used = ring_capture_src(d->cap_src, &d->cap_pi, &d->in_ring,
+                                    d->tmp_cap_in, d->tmp_cap_out,
+                                    g_ravenna_fill_target, d->channels, d->ch_start);
+        if (used == 0) {
             d->cap_underrun++;
             if (d->cap_underrun >= 100) {
                 src_reset(d->cap_src);
@@ -134,6 +169,7 @@ static void read_alsa_device(Device *d)
         } else {
             d->cap_underrun = 0;
         }
+        ravenna_slip_account(d, overflow || underrun);
     } else if (d->is_i2s) {
         read_alsa_master(d);
     } else {

@@ -8,7 +8,8 @@
     "periodFrames": 48,
     "lvlReport": true,
     "startupDelay": 0,
-    "ravennaFillFrames": 96
+    "ravennaFillFrames": 96,
+    "clk2Servo": true
   },
   "jack": {
     "device": "hw:aoip",

@@ -22,6 +22,7 @@ _Atomic int64_t  g_ravenna_hts_ns = 0;
 _Atomic uint32_t g_ravenna_seq    = 0;
 
 volatile int    g_clk2_report       = 1;
+int             g_clk2_servo        = 0;   /* audio.json engine.clk2Servo */
 _Atomic double  g_ravenna_ratio_hint = 1.0;
 _Atomic int     g_clk_ready          = 0;
 _Atomic int     g_ptp_locked         = 0;
@@ -78,11 +79,86 @@ extern int g_period_frames;
  * SRC ratio_hint 가 어느 정도 흡수한 뒤에 1회 step → 5초부터 시작해서 늘려간다. */
 #define PRECAL_DELAY_NS 0LL
 
+/* ── AES67 추종 위상 서보 (2026-09-17) ──────────────────────────────────
+ * 목표: aoip(I2S) 클럭을 RAVENNA(PTP/AES67) 에 주파수 + **위상**까지 물린다.
+ *   P 항 : 주파수 오차 drift_ppm        → 즉시 반응
+ *   I 항 : 누적 위상 오차 phase_fr      → 두 클럭 그리드의 미끄러짐 자체를 제거
+ *
+ * 왜 위상까지 잡아야 하나: in_ring 은 RAVENNA TIC(48fr/1ms)이 채우고 DSP 틱
+ * (I2S, 48fr/1ms)이 비우는데 두 그리드가 비동기라, 상대 drift 만큼 위상이
+ * 미끄러지다 (1ms / drift) 주기마다 정렬점을 통과하며 avail 이 한 청크 꺼진다
+ * → SRC underrun 버스트. 주파수만 맞춰선 빈도만 낮아지고 없어지지 않는다.
+ *
+ * sysfs 분해능은 ~326ppb (i2s 3.072MHz 에서 1Hz 가 최소 단위) 라 출력이
+ * 양자화되지만, I 항이 경계를 오가며 시그마-델타처럼 평균 분해능을 만든다.
+ * 실측(2026-09-17): 라이브 clk_set_rate 는 단발 ±5000ppb / 연속 90회 모두
+ * xrun 0건. 단 가청 글리치는 미확인이라 g_clk2_servo 로 끌 수 있게 둔다. */
+#define MED_N 5
+
+/* 1차 시도(2026-09-17 20:52) 실패 기록: 매 구간 rate 차이를 적분해서 위상을 만들고
+ * Kp=500ppb/ppm 으로 P 제어했더니 55초 만에 ppb 가 -1815 까지 발산했다.
+ * 원인 = RAVENNA htstamp 의 100µs 양자화([[TIC 양자화]])가 5초 창에서
+ * 100µs/5s = 20ppm 의 rate 노이즈를 만드는데, 제어 신호는 0.3~0.8ppm 이다.
+ * 노이즈를 25배 증폭해서 쫓은 셈. 적분이라 랜덤워크로 쌓이기까지 했다.
+ *
+ * 2차 설계 — 노이즈가 누적되지 않는 관측량 + 데드밴드 뱅뱅 제어:
+ *   ① 위상을 "체결 시점 프레임 카운트로부터의 총 슬립"으로 직접 측정한다.
+ *      phase = (ΔA) - (ΔR) - Fs·[(ta-tr) - (ta0-tr0)]
+ *      → 100µs 양자화 오차가 매번 ±4.8fr 로 '고정'된다 (쌓이지 않음).
+ *   ② median5 로 한 번 더 깎고, 데드밴드(노이즈의 2.5배) 밖에서만 움직인다.
+ *   ③ 한 번에 하드웨어 최소 단위(326ppb = 3.072MHz 에서 1Hz) 하나씩만.
+ *      → 잔여 주파수 오차 ≤ 1양자이므로 위상이 데드밴드를 천천히 오가는
+ *        한계주기(주기 ~20분, 진폭 ±15fr 내외)로 수렴. 48fr crossing 과는
+ *        자릿수가 다르다.
+ *   목표는 '위상 0 고정'이 아니라 '48프레임 crossing 방지' 다 — 이 하드웨어의
+ *   위상 관측 정밀도(±4.8fr)로 그 이상은 불가능하다. */
+#define SERVO_PHASE_DEADBAND_FR   3.0   /* 관측 노이즈의 ~4배.
+                                         * 2026-09-18 12.0→3.0: 커널 REF_UNIT 을 100us→1us 로
+                                         * 고쳐 위상 관측 노이즈가 ±4.8fr→±0.67fr 로 줄었다.
+                                         * 프리필 96 은 crossing 이 안 일어나야 성립하므로
+                                         * 위상을 1ms 창 안에서 단단히 붙들어야 한다. */
+#define SERVO_TRIM_STEP_PPB       326L  /* 하드웨어 1양자 (i2s 3.072MHz 의 1Hz) */
+/* 스텝 후 쿨다운 [tick]. 1양자(326ppb)가 만드는 위상 변화율은
+ *   326e-9 * 48000 = 0.0156 fr/s
+ * 이므로 데드밴드(3fr)를 되돌리는 데 ~190초가 필요하다. 5초마다 밟으면
+ * 효과가 보이기 전에 수십 양자를 연속 적용해 적분기가 와인드업된다.
+ * 2026-09-17 밤 실측: 쿨다운 없이 9.6시간 동안 2810스텝, ppb 가 권한 전체
+ * (17000~26128)를 시간 단위로 왕복하고 하한 클램프에 포화했다. */
+#define SERVO_COOLDOWN_TICKS      40    /* 5s * 40 = 200s */
+#define SERVO_TRIM_MAX_PPB       5000L  /* = PPB_RANGE */
+#define SERVO_PHASE_PANIC_FR      40.0  /* 이 이상이면 관측 이상 → 재앵커 */
+
+static int     servo_engaged  = 0;
+static long    servo_trim_ppb = 0;      /* PPB_INIT 기준 누적 트림 */
+static int64_t servo_a_fr0, servo_a_hts0, servo_r_fr0, servo_r_hts0;
+static double  servo_med[MED_N];
+static int     servo_med_idx  = 0;
+static int     servo_med_fill = 0;
+static int     servo_log_cnt  = 0;
+static int     servo_cool     = 0;   /* 남은 쿨다운 tick */
+
 static long tracker_ppb     = 0;
 static int  tracker_inited  = 0;
 static int     precal_armed   = 0;
 static int     precal_done    = 0;
 static int64_t precal_armed_ns = 0;
+
+static int ppb_write_sysfs(long ppb)
+{
+    int fd = open(PPB_SYSFS_PATH, O_WRONLY);
+    if (fd < 0) {
+        fprintf(stderr, "[aoip_engine] clk2: open(%s) failed: %s\n",
+                PPB_SYSFS_PATH, strerror(errno));
+        return -1;
+    }
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%ld", ppb);
+    int ok = (write(fd, buf, n) > 0);
+    close(fd);
+    if (!ok)
+        fprintf(stderr, "[aoip_engine] clk2: ppb write failed: %s\n", strerror(errno));
+    return ok ? 0 : -1;
+}
 
 static long ppb_read_sysfs(void)
 {
@@ -147,7 +223,6 @@ static void clk2_precal_tick(int64_t now_ns)
 /* 5-sample median 필터 — 측정창에 끼는 일시적 이상치 제거용.
  * seqlock으로 torn read는 막았지만, ALSA htstamp 자체가 한 period 만큼
  * 늦게 갱신되는 경우가 있어 표시값/제어값을 한 번 더 부드럽게 한다. */
-#define MED_N 5
 static double clk2_median5(const double *src)
 {
     double a[MED_N];
@@ -193,6 +268,12 @@ void clk2_report(int64_t *pa_fr,  int64_t *pa_hts,
         resync_freeze_until = now_ns + PTP_RESYNC_FREEZE_NS;
         med_idx = 0; med_filled = 0;
         stable_cnt = 0; stabilized = 0; prev_ppm = 0.0;
+        if (servo_engaged) {
+            servo_engaged = 0;
+            fprintf(stderr, "[aoip_engine] clk2: PTP 재동기화 → 서보 해제, 홀드오버 (ppb=%ld 유지)\n",
+                    tracker_ppb);
+        }
+        servo_med_idx = servo_med_fill = 0;   /* trim 은 유지 = 주파수 홀드오버 */
         *pa_fr = 0; *pa_hts = 0; *pr_fr = 0; *pr_hts = 0;
         *next_ns = now_ns + FAST_INTERVAL_S * 1000000000LL;
         fprintf(stderr, "[aoip_engine] clk2: PTP resync gen=%u, ratio_hint frozen for %lldms\n",
@@ -214,7 +295,9 @@ void clk2_report(int64_t *pa_fr,  int64_t *pa_hts,
     clk2_reader_snapshot(&g_aoip_seq,    &g_aoip_frames,    &g_aoip_hts_ns,    &a_fr, &a_hts);
     clk2_reader_snapshot(&g_ravenna_seq, &g_ravenna_frames, &g_ravenna_hts_ns, &r_fr, &r_hts);
 
-    int64_t interval_s = stabilized ? SLOW_INTERVAL_S : FAST_INTERVAL_S;
+    /* 서보 가동 중엔 30s 로 늘리지 않는다 — 주기가 길면 한 번에 옮기는 양이
+     * 커지고 위상 적분 해상도도 떨어진다 (5s 고정은 과거 사고 교훈). */
+    int64_t interval_s = (g_clk2_servo || !stabilized) ? FAST_INTERVAL_S : SLOW_INTERVAL_S;
 
     if (*pa_hts > 0 && *pr_hts > 0 &&
         a_hts > *pa_hts && r_hts > *pr_hts) {
@@ -278,8 +361,70 @@ void clk2_report(int64_t *pa_fr,  int64_t *pa_hts,
             }
         }
 
-        /* 라이브 보정 비활성화 — 라이브 DMA 중 pll_audio_core clk_set_rate 가 xrun 폭주 유발.
-         * 잔여 drift 는 DSP SRC 가 ratio_hint 로 흡수. precal 1회로 충분. */
+        /* ── AES67 추종 위상 서보 (2차 설계) ────────────────────────────
+         * 체결 조건: 토글 ON + PTP 락 + precal 완료 + 유효 샘플 + freeze 아님.
+         * 해제 시엔 아무것도 쓰지 않는다 = 마지막 ppb 가 남는 홀드오버. */
+        if (g_clk2_servo && sample_valid && !frozen && precal_done &&
+            atomic_load_explicit(&g_ptp_locked, memory_order_acquire)) {
+
+            if (!servo_engaged) {
+                servo_engaged  = 1;
+                servo_a_fr0 = a_fr;  servo_a_hts0 = a_hts;
+                servo_r_fr0 = r_fr;  servo_r_hts0 = r_hts;
+                servo_med_idx = servo_med_fill = 0;
+                servo_log_cnt = 0;
+                fprintf(stderr, "[aoip_engine] clk2: AES67 추종 서보 체결"
+                        " (ppb=%ld, trim=%+ld)\n", tracker_ppb, servo_trim_ppb);
+            } else {
+                /* 앵커 이후 누적 슬립 [frame]. 두 스냅샷 시각이 다르므로
+                 * htstamp 스큐 변화분을 빼서 보정한다. 노이즈는 RAVENNA
+                 * htstamp 의 100µs 양자화뿐이고 ±4.8fr 로 고정된다. */
+                double dA   = (double)(a_fr  - servo_a_fr0);
+                double dR   = (double)(r_fr  - servo_r_fr0);
+                double skew = (double)((a_hts - r_hts) - (servo_a_hts0 - servo_r_hts0));
+                double phase_raw = dA - dR - (double)SAMPLE_RATE * skew / 1e9;
+
+                if (servo_cool > 0) servo_cool--;
+                servo_med[servo_med_idx] = phase_raw;
+                servo_med_idx = (servo_med_idx + 1) % MED_N;
+                if (servo_med_fill < MED_N) servo_med_fill++;
+                double phase = (servo_med_fill == MED_N)
+                             ? clk2_median5(servo_med) : phase_raw;
+
+                if (fabs(phase) > SERVO_PHASE_PANIC_FR) {
+                    fprintf(stderr, "[aoip_engine] clk2 servo: 위상 %.1ffr — 관측 이상,"
+                            " 재앵커 (trim=%+ld 유지)\n", phase, servo_trim_ppb);
+                    servo_a_fr0 = a_fr;  servo_a_hts0 = a_hts;
+                    servo_r_fr0 = r_fr;  servo_r_hts0 = r_hts;
+                    servo_med_idx = servo_med_fill = 0;
+                } else if (servo_med_fill == MED_N && servo_cool == 0) {
+                    /* 데드밴드 밖에서만, 한 번에 1양자씩, 그리고 쿨다운 */
+                    long before = servo_trim_ppb;
+                    if (phase >  SERVO_PHASE_DEADBAND_FR) servo_trim_ppb -= SERVO_TRIM_STEP_PPB;
+                    if (phase < -SERVO_PHASE_DEADBAND_FR) servo_trim_ppb += SERVO_TRIM_STEP_PPB;
+                    if (servo_trim_ppb >  SERVO_TRIM_MAX_PPB) servo_trim_ppb =  SERVO_TRIM_MAX_PPB;
+                    if (servo_trim_ppb < -SERVO_TRIM_MAX_PPB) servo_trim_ppb = -SERVO_TRIM_MAX_PPB;
+
+                    long want = PPB_INIT + servo_trim_ppb;
+                    if (servo_trim_ppb != before && ppb_write_sysfs(want) == 0) {
+                        tracker_ppb = want;
+                        servo_cool  = SERVO_COOLDOWN_TICKS;   /* 효과가 관측될 때까지 대기 */
+                        fprintf(stderr, "[aoip_engine] clk2 servo: phase=%+.1ffr →"
+                                " ppb %ld (trim %+ld)\n", phase, tracker_ppb, servo_trim_ppb);
+                    }
+                }
+
+                if (++servo_log_cnt % 12 == 0)   /* 5s × 12 = 1분마다 */
+                    fprintf(stderr, "[aoip_engine] clk2 servo: phase=%+.1ffr"
+                            " (raw %+.1f) ppb=%ld trim=%+ld drift=%+.3fppm\n",
+                            phase, phase_raw, tracker_ppb, servo_trim_ppb, drift_ppm_med);
+            }
+
+        } else if (servo_engaged) {
+            servo_engaged = 0;
+            fprintf(stderr, "[aoip_engine] clk2: 서보 해제 → 홀드오버 (ppb=%ld 유지)\n",
+                    tracker_ppb);
+        }
 
         printf("clk2 aoip_rate=%.3f ravenna_rate=%.3f drift_ppm=%+.3f elapsed=%.0f"
                " dsp_period=%d dsp_tick_ms=%.3f ratio_hint=%.7f ppb=%ld%s%s\n",

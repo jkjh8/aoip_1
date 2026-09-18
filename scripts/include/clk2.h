@@ -16,6 +16,11 @@ extern _Atomic uint32_t g_ravenna_seq;
 
 extern volatile int g_clk2_report;
 
+/* AES67 추종 위상 서보 ON/OFF — audio.json engine.clk2Servo.
+ * 1 이면 clk2_report 가 라이브로 freq_ppb 를 조정해 I2S 클럭을 RAVENNA(PTP)에
+ * 주파수+위상으로 물린다. PTP 상실 시엔 마지막 ppb 를 유지하는 홀드오버. */
+extern int g_clk2_servo;
+
 /* RAVENNA/aoip 실측 비율 힌트: cap_pi 초기값으로 사용 (기본값 1.0) */
 extern _Atomic double g_ravenna_ratio_hint;
 

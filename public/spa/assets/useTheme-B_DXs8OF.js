@@ -1,0 +1,1 @@
+import{aP as e,b as a}from"./index-Dehueak6.js";const o="aoip-theme";function r(){const t=localStorage.getItem(o);t==="dark"?e.set(!0):t==="light"?e.set(!1):e.set("auto")}function c(){return{isDark:a(()=>e.isActive),toggle:()=>{const s=!e.isActive;e.set(s),localStorage.setItem(o,s?"dark":"light")}}}export{r as a,c as u};

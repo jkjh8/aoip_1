@@ -1,0 +1,100 @@
+--- PTP.c.orig	2026-09-17 23:13:57.294190114 +0900
++++ PTP.c.patched	2026-09-17 23:13:57.306441901 +0900
+@@ -45,12 +45,35 @@
+ #include "MTAL_DP.h"
+ 
+ #define PTP_LOCK_HYSTERESIS		4
+-#define PTP_WATCHDOG_ELAPSE		20000	// we assume to receive at least one sync each 2s
+ #define TIC_LOCK_HYSTERESIS		5
+ 
+-//REF_UNIT is cent of microseconde (100us)
+-#define PS_2_REF_UNIT 100000000 // ps is the PTP unit
+-#define NS_2_REF_UNIT 100000 // ns is the linux time unit
++/* REF_UNIT = 1 microsecond (2026-09-17 변경: 원래 100us)
++ * 원래 100us 였는데 ktime_get() 의 ns 해상도를 여기서 버리는 바람에
++ * TIC 스케줄 / PTP T1,T2 / SAC 계산이 전부 100us = 4.8프레임@48k 로 양자화됐다.
++ * 실측: 개별 TIC 위상이 4.8fr 단위(9.8/14.3fr)로 튀고, 이것이 in_ring 비트
++ * 현상의 관측 노이즈 바닥(±4.8fr)이자 TIC 축소(F<48)를 막는 벽이었다.
++ * 1us 로 내리면 양자화가 0.048프레임이 된다.
++ * 주의: 시간값이 100배 커지므로, REF_UNIT 을 샘플/us 로 환산하는 자리는
++ * 아래 파생 상수를 쓸 것 (배율 하드코딩 금지). */
++#define PS_2_REF_UNIT 1000000   // ps -> REF_UNIT
++#define NS_2_REF_UNIT 1000      // ns -> REF_UNIT (linux time unit)
++#define REF_UNIT_PER_SEC (1000000000ull / NS_2_REF_UNIT)  // 초당 REF_UNIT 수
++#define REF_UNIT_2_US    (NS_2_REF_UNIT / 1000)           // REF_UNIT -> us
++
++/* PTP sync 워치독 — REF_UNIT 단위로 비교되므로 반드시 REF_UNIT 기준으로 환산할 것.
++ * (원본은 100us 전용으로 20000 이 하드코딩돼 있었고, REF_UNIT 을 1us 로 바꾸면
++ *  2s → 20ms 가 되어 sync 도착 전에 워치독이 터진다. 2026-09-17 실증) */
++#define PTP_WATCHDOG_ELAPSE  (2ull * REF_UNIT_PER_SEC)  // sync 최소 2s 마다 수신 가정
++
++/* t[REF_UNIT] → 샘플 수.
++ * ui64T1 은 PTP epoch(TAI, ~1.8e9 s) 기반이라 REF_UNIT 이 작아지면 값이 매우 커진다.
++ * t * rate 를 그냥 곱하면 uint64 가 넘친다 (1us 기준 1.8e15 * 48000 = 8.6e19 > 1.8e19).
++ * 초/나머지로 쪼개서 곱한다. 원식 (t * rate / REF_UNIT_PER_SEC) 과 결과 동일. */
++static inline uint64_t ref_unit_to_samples(uint64_t t, uint32_t ui32Rate)
++{
++    return (t / REF_UNIT_PER_SEC) * ui32Rate
++         + ((t % REF_UNIT_PER_SEC) * ui32Rate) / REF_UNIT_PER_SEC;
++}
+ 
+ // PTP Domain
+ #define PTPMASTER_ANNOUNCE_TIMEOUT	50000000 // [100ns]
+@@ -553,8 +576,8 @@
+ 					//MTAL_DP("====================================================\n");
+ 
+ 					//uint64_t a = CW_ll_modulo((uint64_t)(CInt128(ui64T1) * CInt128(self->m_ui32SamplingRate) / CInt128(10000000)), self->m_ui32FrameSize);
+-					uint64_t a = CW_ll_modulo(((ui64T1) * self->m_ui32SamplingRate) / 10000, self->m_ui32FrameSize);
+-					uint64_t ui64LastTICFrameFraction = ((a) * 10000 / self->m_ui32SamplingRate); // in RTX clock
++					uint64_t a = CW_ll_modulo(ref_unit_to_samples(ui64T1, self->m_ui32SamplingRate), self->m_ui32FrameSize);
++					uint64_t ui64LastTICFrameFraction = ((a) * REF_UNIT_PER_SEC / self->m_ui32SamplingRate); // [REF_UNIT]
+ 					//uint64_t ui64LastTICFrameFraction = (((uint64_t)(CInt128(ui64T1) * CInt128(self->m_ui32SamplingRate) / CInt128(10000000)) % self->m_ui32FrameSize) * 10000000 / self->m_ui32SamplingRate); // in RTX clock
+ 					int32_t i32DeltaTICFrame = (int32_t)((self->m_ui64T2 - ui64LastTICFrameFraction) - self->m_ui64TIC_LastRTXClockTimeAtT2); // [100ns]
+ 
+@@ -621,9 +644,9 @@
+                 // TIC frame alignment
+                 // TODO: verify if we have enough word length (is 128bits need?)
+                 ///uint64_t a = CW_ll_modulo((uint64_t)(CInt128(ui64T1) * CInt128(self->m_ui32SamplingRate) / CInt128(10000000)), (uint64_t)self->m_ui32FrameSize);
+-                uint64_t a = CW_ll_modulo(((ui64T1) * self->m_ui32SamplingRate) / 10000, (uint64_t)self->m_ui32FrameSize);
++                uint64_t a = CW_ll_modulo(ref_unit_to_samples(ui64T1, self->m_ui32SamplingRate), (uint64_t)self->m_ui32FrameSize);
+                 //uint64_t ui64LastTICFrameFraction = (((uint64_t)(CInt128(ui64T1) * CInt128(self->m_ui32SamplingRate) / CInt128(10000000)) % self->m_ui32FrameSize) * 10000000 / self->m_ui32SamplingRate); // in RTX clock
+-                uint64_t ui64LastTICFrameFraction = ((a * 10000) / self->m_ui32SamplingRate); // in RTX clock
++                uint64_t ui64LastTICFrameFraction = ((a * REF_UNIT_PER_SEC) / self->m_ui32SamplingRate); // [REF_UNIT]
+                 //MTAL_DP("ui64T1 = %llu\n", ui64T1);
+                 //MTAL_DP("self->m_ui32SamplingRate = %u\n", self->m_ui32SamplingRate);
+                 //MTAL_DP("ui64LastTICFrameFraction = %llu\n", ui64LastTICFrameFraction);
+@@ -665,7 +688,13 @@
+                 //int64_t dProportional = (((i32DeltaTICFrame * 100) * self->m_dTIC_BasePeriod) / 500000000);
+                 dProportional = (((i32DeltaTICFrame) * self->m_dTIC_BasePeriod));
+                 //dProportional /= 500000000000;
+-                dProportional /= 5000000; // implicitly converted i32DeltaTICFrame into [ps] 
++                /* 원식의 5000000 은 REF_UNIT=100us 전용 상수였다 (500 * 10000).
++                 * REF_UNIT 이 바뀌면 같은 물리 오차에 대한 i32DeltaTICFrame 이 그만큼
++                 * 커지므로 제수도 같이 스케일해야 루프 게인이 유지된다. */
++                dProportional /= (500LL * (long long)REF_UNIT_PER_SEC); // i32DeltaTICFrame[REF_UNIT] -> [ps]
++                /* 제수를 반드시 signed 로 둘 것 — unsigned(ull)면 통상 산술변환으로
++                 * int64 좌변이 uint64 로 승격되어 음수 위상오차가 거대한 양수가 된다.
++                 * (2026-09-17 실증: prop=36893488129, IGR 포화 → 주기 1.4ms 고착) */ 
+ 
+                 // compute leaky integrator
+                 self->m_dTIC_IGR = ((self->m_dTIC_IGR + dProportional) * 95) / 100; // [ps]
+@@ -853,7 +882,7 @@
+ 	//ui64CurrentRTXClockTime = ui64RTXClockTime / NS_2_REF_UNIT;
+ 	get_clock_time(&ui64CurrentRTXClockTime);
+ 
+-	clkJitter = (int32_t)((signed)(self->m_ui64TIC_NextAbsoluteTime * 100) - (signed)(ui64CurrentRTXClockTime / 1000));
++	clkJitter = (int32_t)((signed)(self->m_ui64TIC_NextAbsoluteTime * REF_UNIT_2_US) - (signed)(ui64CurrentRTXClockTime / 1000));
+ 	self->m_maxClkJitter = max(clkJitter, self->m_maxClkJitter);
+ 
+ 	ui64CurrentRTXClockTime /= NS_2_REF_UNIT; // [100us]
+@@ -905,8 +934,8 @@
+         computeNextAbsoluteTime(self, 1);
+         {
+             //MTAL_DP("self->m_ui64TIC_NextAbsoluteTime %llu\n", self->m_ui64TIC_NextAbsoluteTime);
+-            uint64_t ui64Q = (uint64_t)((ui64CurrentRTXClockTime - self->m_i64TIC_PTPToRTXClockOffset) * (self->m_ui32SamplingRate / 100) / 100) / self->m_ui32FrameSize; // [frame count]
+-            uint32_t ui32R = CW_ll_modulo((uint64_t)((ui64CurrentRTXClockTime - self->m_i64TIC_PTPToRTXClockOffset) * (self->m_ui32SamplingRate / 100) / 100), self->m_ui32FrameSize);
++            uint64_t ui64Q = ref_unit_to_samples(ui64CurrentRTXClockTime - self->m_i64TIC_PTPToRTXClockOffset, self->m_ui32SamplingRate) / self->m_ui32FrameSize; // [frame count]
++            uint32_t ui32R = CW_ll_modulo(ref_unit_to_samples(ui64CurrentRTXClockTime - self->m_i64TIC_PTPToRTXClockOffset, self->m_ui32SamplingRate), self->m_ui32FrameSize);
+             //uint32_t ui32R = (uint64_t)(CInt128(ui64CurrentRTXClockTime - self->m_i64TIC_PTPToRTXClockOffset) * CInt128(self->m_ui32SamplingRate / 100) / CInt128(100000)) % self->m_ui32FrameSize;
+ 
+             //if (print_coutner % 1000 == 0)

@@ -64,6 +64,7 @@ void load_config_prios(const char *path)
     if ((v = json_int(section, "periodFrames", 0)) > 0 && v <= MAX_PERIOD_FRAMES)
         g_period_frames = v;
     g_lvl_report  = json_bool(section, "lvlReport", 1);
+    g_clk2_servo  = json_bool(section, "clk2Servo", 0);
     g_clk2_report = g_lvl_report;
     if ((v = json_int(section, "ravennaFillFrames", 0)) > 0)
         g_ravenna_fill_target = v;
@@ -76,7 +77,8 @@ void load_config_prios(const char *path)
     }
 
     fprintf(stderr, "[aoip_engine] config: dsp=%d alsa=%d ravenna=%d rtp=%d period=%d "
-            "lvl=%d clk2=%d ravennaFillFrames=%d\n",
+            "lvl=%d clk2=%d ravennaFillFrames=%d clk2Servo=%d\n",
             g_prio_dsp, g_prio_alsa, g_prio_ravenna, g_prio_rtp,
-            g_period_frames, g_lvl_report, g_clk2_report, g_ravenna_fill_target);
+            g_period_frames, g_lvl_report, g_clk2_report, g_ravenna_fill_target,
+            g_clk2_servo);
 }
